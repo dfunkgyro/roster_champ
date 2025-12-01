@@ -1,0 +1,59 @@
+name: roster_champ
+description: A comprehensive work roster management app with AI-powered suggestions and cloud sync.
+publish_to: 'none'
+version: 2.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  
+  # State Management
+  flutter_riverpod: ^3.0.3
+  
+  # UI & Design
+  google_fonts: ^6.3.2
+  flutter_animate: ^4.5.2
+  
+  # Data Persistence
+  shared_preferences: ^2.5.3
+  
+  # Utilities
+  intl: ^0.20.2
+  uuid: ^4.5.1
+  
+  # Cloud Services (optional - configure to enable)
+  supabase_flutter: ^2.10.3
+  
+  # HTTP Client
+  http: ^1.5.0
+  
+  # Icons
+  cupertino_icons: ^1.0.8
+  flutter_launcher_icons: ^0.14.4
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
+  
+  # Assets
+  assets:
+    - assets/images/
+    - assets/icons/
+
+# Android specific configurations for release build
+flutter_native_splash:
+  color: "#ffffff"
+  image: assets/icon/icon.png
+  
+# App icon configuration
+flutter_launcher_icons:
+  android: "launcher_icon"
+  ios: true
+  image_path: "assets/icon/icon.png"
