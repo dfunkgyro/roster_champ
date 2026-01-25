@@ -1,0 +1,12 @@
+{
+  "name": "roster-champ-infra",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "aws-sdk": "^2.1537.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.1",
+    "sst": "^3.17.25"
+  }
+}
