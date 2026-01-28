@@ -88,19 +88,38 @@ class _InitializeRosterDialogState extends State<InitializeRosterDialog> {
 }
 
 class AddEventDialog extends StatefulWidget {
-  final Function(models.Event) onAdd;
+  final Function(List<models.Event>) onAddEvents;
+  final DateTime? initialDate;
+  final String? initialTitle;
 
-  const AddEventDialog({super.key, required this.onAdd});
+  const AddEventDialog({
+    super.key,
+    required this.onAddEvents,
+    this.initialDate,
+    this.initialTitle,
+  });
 
   @override
   State<AddEventDialog> createState() => _AddEventDialogState();
 }
 
 class _AddEventDialogState extends State<AddEventDialog> {
-  final _titleController = TextEditingController();
+  late final TextEditingController _titleController;
   final _descriptionController = TextEditingController();
-  DateTime _selectedDate = DateTime.now();
+  late DateTime _selectedDate;
   models.EventType _selectedType = models.EventType.general;
+  bool _isRecurring = false;
+  int _repeatInterval = 1;
+  bool _repeatWeekly = true;
+  int _pastOccurrences = 0;
+  int _futureOccurrences = 8;
+
+  @override
+  void initState() {
+    super.initState();
+    _selectedDate = widget.initialDate ?? DateTime.now();
+    _titleController = TextEditingController(text: widget.initialTitle ?? '');
+  }
 
   @override
   void dispose() {
@@ -172,6 +191,90 @@ class _AddEventDialogState extends State<AddEventDialog> {
                 }
               },
             ),
+            const SizedBox(height: 12),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Repeat event'),
+              value: _isRecurring,
+              onChanged: (value) {
+                setState(() => _isRecurring = value);
+              },
+            ),
+            if (_isRecurring) ...[
+              Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      keyboardType: TextInputType.number,
+                      decoration: const InputDecoration(
+                        labelText: 'Repeat every',
+                      ),
+                      onChanged: (value) {
+                        final parsed = int.tryParse(value.trim());
+                        if (parsed != null && parsed > 0) {
+                          _repeatInterval = parsed;
+                        }
+                      },
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  DropdownButton<bool>(
+                    value: _repeatWeekly,
+                    items: const [
+                      DropdownMenuItem(
+                        value: true,
+                        child: Text('Weeks'),
+                      ),
+                      DropdownMenuItem(
+                        value: false,
+                        child: Text('Days'),
+                      ),
+                    ],
+                    onChanged: (value) {
+                      if (value != null) {
+                        setState(() => _repeatWeekly = value);
+                      }
+                    },
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      keyboardType: TextInputType.number,
+                      decoration: const InputDecoration(
+                        labelText: 'Past occurrences',
+                        helperText: 'e.g. 4',
+                      ),
+                      onChanged: (value) {
+                        final parsed = int.tryParse(value.trim());
+                        if (parsed != null && parsed >= 0) {
+                          _pastOccurrences = parsed;
+                        }
+                      },
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: TextField(
+                      keyboardType: TextInputType.number,
+                      decoration: const InputDecoration(
+                        labelText: 'Future occurrences',
+                        helperText: 'e.g. 8',
+                      ),
+                      onChanged: (value) {
+                        final parsed = int.tryParse(value.trim());
+                        if (parsed != null && parsed >= 0) {
+                          _futureOccurrences = parsed;
+                        }
+                      },
+                    ),
+                  ),
+                ],
+              ),
+            ],
           ],
         ),
       ),
@@ -183,16 +286,40 @@ class _AddEventDialogState extends State<AddEventDialog> {
         FilledButton(
           onPressed: () {
             if (_titleController.text.trim().isNotEmpty) {
-              final event = models.Event(
-                id: DateTime.now().millisecondsSinceEpoch.toString(),
-                title: _titleController.text.trim(),
-                description: _descriptionController.text.trim().isEmpty
-                    ? null
-                    : _descriptionController.text.trim(),
-                date: _selectedDate,
-                eventType: _selectedType,
-              );
-              widget.onAdd(event);
+              final description = _descriptionController.text.trim().isEmpty
+                  ? null
+                  : _descriptionController.text.trim();
+              final baseId = DateTime.now().millisecondsSinceEpoch.toString();
+              final events = <models.Event>[];
+              final recurringId = _isRecurring ? baseId : null;
+
+              void addEvent(DateTime date) {
+                events.add(
+                  models.Event(
+                    id: DateTime.now().microsecondsSinceEpoch.toString(),
+                    title: _titleController.text.trim(),
+                    description: description,
+                    date: date,
+                    eventType: _selectedType,
+                    recurringId: recurringId,
+                  ),
+                );
+              }
+
+              addEvent(_selectedDate);
+
+              if (_isRecurring) {
+                final stepDays =
+                    (_repeatWeekly ? 7 : 1) * _repeatInterval.clamp(1, 365);
+                for (var i = 1; i <= _pastOccurrences; i++) {
+                  addEvent(_selectedDate.subtract(Duration(days: stepDays * i)));
+                }
+                for (var i = 1; i <= _futureOccurrences; i++) {
+                  addEvent(_selectedDate.add(Duration(days: stepDays * i)));
+                }
+              }
+
+              widget.onAddEvents(events);
               Navigator.pop(context);
             }
           },
@@ -218,6 +345,14 @@ class _AddEventDialogState extends State<AddEventDialog> {
         return 'Birthday';
       case models.EventType.anniversary:
         return 'Anniversary';
+      case models.EventType.payday:
+        return 'Payday';
+      case models.EventType.religious:
+        return 'Religious';
+      case models.EventType.cultural:
+        return 'Cultural';
+      case models.EventType.sports:
+        return 'Sports';
       case models.EventType.custom:
         return 'Custom';
     }

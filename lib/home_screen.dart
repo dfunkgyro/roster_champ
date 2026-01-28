@@ -842,8 +842,12 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
     await showDialog(
       context: context,
       builder: (context) => AddEventDialog(
-        onAdd: (event) {
-          ref.read(rosterProvider).addEvent(event);
+        onAddEvents: (events) {
+          if (events.length == 1) {
+            ref.read(rosterProvider).addEvent(events.first);
+          } else {
+            ref.read(rosterProvider).addBulkEvents(events);
+          }
         },
       ),
     );
@@ -1118,83 +1122,266 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
     final roster = ref.read(rosterProvider);
     if (roster.staffMembers.isEmpty) return;
 
-    String selectedPerson = roster.staffMembers.first.name;
-    final shiftController = TextEditingController(text: 'D');
+    final staff = roster.getActiveStaffNames();
+    final selectedStaff = <String>{staff.first};
+    final shiftOptions = <String>{
+      ...roster.getShiftTypes(),
+      'OFF',
+      'L',
+    }.where((s) => s.trim().isNotEmpty).toList();
+    shiftOptions.sort();
+    String selectedShift = shiftOptions.isNotEmpty ? shiftOptions.first : 'D';
+    bool useCustomShift = false;
+    final customShiftController = TextEditingController();
     DateTime startDate = DateTime.now();
     DateTime endDate = DateTime.now();
     final reasonController = TextEditingController();
+    bool overwriteExisting = true;
+    final weekdays = <int>{1, 2, 3, 4, 5, 6, 7};
+
+    int estimateCount() {
+      int days = 0;
+      for (var date = startDate;
+          date.isBefore(endDate) || date.isAtSameMomentAs(endDate);
+          date = date.add(const Duration(days: 1))) {
+        if (!weekdays.contains(date.weekday)) continue;
+        days += 1;
+      }
+      if (days == 0) return 0;
+      if (overwriteExisting) return days * selectedStaff.length;
+      int count = 0;
+      for (final person in selectedStaff) {
+        for (var date = startDate;
+            date.isBefore(endDate) || date.isAtSameMomentAs(endDate);
+            date = date.add(const Duration(days: 1))) {
+          if (!weekdays.contains(date.weekday)) continue;
+          final existing = roster.overrides.any(
+            (o) =>
+                o.personName == person &&
+                o.date.year == date.year &&
+                o.date.month == date.month &&
+                o.date.day == date.day,
+          );
+          if (!existing) {
+            count += 1;
+          }
+        }
+      }
+      return count;
+    }
 
     await showDialog(
       context: context,
       builder: (context) => StatefulBuilder(
         builder: (context, setState) {
+          final shiftValue =
+              useCustomShift ? customShiftController.text : selectedShift;
+          final totalEstimate = estimateCount();
           return AlertDialog(
             title: const Text('Bulk Edit Shifts'),
-            content: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                DropdownButtonFormField<String>(
-                  value: selectedPerson,
-                  items: roster.staffMembers
-                      .map((s) => DropdownMenuItem(
-                            value: s.name,
-                            child: Text(s.name),
-                          ))
-                      .toList(),
-                  onChanged: (value) {
-                    if (value != null) {
-                      setState(() => selectedPerson = value);
-                    }
-                  },
-                  decoration: const InputDecoration(labelText: 'Staff'),
-                ),
-                const SizedBox(height: 12),
-                TextField(
-                  decoration: const InputDecoration(labelText: 'Shift'),
-                  controller: shiftController,
-                ),
-                const SizedBox(height: 12),
-                Row(
-                  children: [
-                    Expanded(
-                      child: TextButton(
-                        onPressed: () async {
-                          final date = await showDatePicker(
-                            context: context,
-                            initialDate: startDate,
-                            firstDate: DateTime(2020),
-                            lastDate: DateTime(2035),
-                          );
-                          if (date != null) {
-                            setState(() => startDate = date);
-                          }
+            content: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Staff',
+                    style: Theme.of(context).textTheme.labelLarge,
+                  ),
+                  const SizedBox(height: 6),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: staff.map((name) {
+                      final isSelected = selectedStaff.contains(name);
+                      return FilterChip(
+                        label: Text(name),
+                        selected: isSelected,
+                        onSelected: (value) {
+                          setState(() {
+                            if (value) {
+                              selectedStaff.add(name);
+                            } else {
+                              selectedStaff.remove(name);
+                            }
+                          });
                         },
-                        child: Text('Start: ${_formatDate(startDate)}'),
+                      );
+                    }).toList(),
+                  ),
+                  CheckboxListTile(
+                    contentPadding: EdgeInsets.zero,
+                    value: selectedStaff.length == staff.length,
+                    onChanged: (value) {
+                      setState(() {
+                        if (value == true) {
+                          selectedStaff
+                            ..clear()
+                            ..addAll(staff);
+                        } else {
+                          selectedStaff
+                            ..clear()
+                            ..add(staff.first);
+                        }
+                      });
+                    },
+                    title: const Text('Select all staff'),
+                  ),
+                  const SizedBox(height: 12),
+                  DropdownButtonFormField<String>(
+                    value: useCustomShift ? 'Custom' : selectedShift,
+                    items: [
+                      ...shiftOptions.map(
+                        (shift) => DropdownMenuItem(
+                          value: shift,
+                          child: Text(shift),
+                        ),
+                      ),
+                      const DropdownMenuItem(
+                        value: 'Custom',
+                        child: Text('Custom'),
+                      ),
+                    ],
+                    onChanged: (value) {
+                      if (value == null) return;
+                      setState(() {
+                        if (value == 'Custom') {
+                          useCustomShift = true;
+                        } else {
+                          useCustomShift = false;
+                          selectedShift = value;
+                        }
+                      });
+                    },
+                    decoration: const InputDecoration(labelText: 'Shift'),
+                  ),
+                  if (useCustomShift)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 8),
+                      child: TextField(
+                        controller: customShiftController,
+                        decoration: const InputDecoration(
+                          labelText: 'Custom shift code',
+                        ),
+                        textCapitalization: TextCapitalization.characters,
                       ),
                     ),
-                    Expanded(
-                      child: TextButton(
-                        onPressed: () async {
-                          final date = await showDatePicker(
-                            context: context,
-                            initialDate: endDate,
-                            firstDate: DateTime(2020),
-                            lastDate: DateTime(2035),
-                          );
-                          if (date != null) {
-                            setState(() => endDate = date);
-                          }
-                        },
-                        child: Text('End: ${_formatDate(endDate)}'),
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: TextButton(
+                          onPressed: () async {
+                            final date = await showDatePicker(
+                              context: context,
+                              initialDate: startDate,
+                              firstDate: DateTime(2020),
+                              lastDate: DateTime(2035),
+                            );
+                            if (date != null) {
+                              setState(() => startDate = date);
+                              if (endDate.isBefore(date)) {
+                                endDate = date;
+                              }
+                            }
+                          },
+                          child: Text('Start: ${_formatDate(startDate)}'),
+                        ),
                       ),
+                      Expanded(
+                        child: TextButton(
+                          onPressed: () async {
+                            final date = await showDatePicker(
+                              context: context,
+                              initialDate: endDate,
+                              firstDate: DateTime(2020),
+                              lastDate: DateTime(2035),
+                            );
+                            if (date != null) {
+                              setState(() => endDate = date);
+                              if (startDate.isAfter(date)) {
+                                startDate = date;
+                              }
+                            }
+                          },
+                          child: Text('End: ${_formatDate(endDate)}'),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  Text(
+                    'Days of week',
+                    style: Theme.of(context).textTheme.labelLarge,
+                  ),
+                  const SizedBox(height: 6),
+                  ToggleButtons(
+                    isSelected: List.generate(
+                      7,
+                      (i) => weekdays.contains(i + 1),
                     ),
-                  ],
-                ),
-                TextField(
-                  controller: reasonController,
-                  decoration: const InputDecoration(labelText: 'Reason'),
-                ),
-              ],
+                    onPressed: (index) {
+                      final day = index + 1;
+                      setState(() {
+                        if (weekdays.contains(day)) {
+                          weekdays.remove(day);
+                        } else {
+                          weekdays.add(day);
+                        }
+                      });
+                    },
+                    children: const [
+                      Padding(
+                        padding: EdgeInsets.symmetric(horizontal: 6),
+                        child: Text('Mon'),
+                      ),
+                      Padding(
+                        padding: EdgeInsets.symmetric(horizontal: 6),
+                        child: Text('Tue'),
+                      ),
+                      Padding(
+                        padding: EdgeInsets.symmetric(horizontal: 6),
+                        child: Text('Wed'),
+                      ),
+                      Padding(
+                        padding: EdgeInsets.symmetric(horizontal: 6),
+                        child: Text('Thu'),
+                      ),
+                      Padding(
+                        padding: EdgeInsets.symmetric(horizontal: 6),
+                        child: Text('Fri'),
+                      ),
+                      Padding(
+                        padding: EdgeInsets.symmetric(horizontal: 6),
+                        child: Text('Sat'),
+                      ),
+                      Padding(
+                        padding: EdgeInsets.symmetric(horizontal: 6),
+                        child: Text('Sun'),
+                      ),
+                    ],
+                  ),
+                  SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    value: overwriteExisting,
+                    onChanged: (value) {
+                      setState(() => overwriteExisting = value);
+                    },
+                    title: const Text('Overwrite existing overrides'),
+                  ),
+                  TextField(
+                    controller: reasonController,
+                    decoration: const InputDecoration(
+                      labelText: 'Reason (optional)',
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Applying to $totalEstimate shifts',
+                    style: Theme.of(context).textTheme.labelMedium,
+                  ),
+                ],
+              ),
             ),
             actions: [
               TextButton(
@@ -1203,12 +1390,20 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
               ),
               FilledButton(
                 onPressed: () {
-                  roster.addBulkOverrides(
-                    selectedPerson,
-                    startDate,
-                    endDate,
-                    shiftController.text,
-                    reasonController.text,
+                  if (selectedStaff.isEmpty || weekdays.isEmpty) {
+                    return;
+                  }
+                  final shift =
+                      useCustomShift ? shiftValue.trim() : selectedShift;
+                  if (shift.isEmpty) return;
+                  roster.addBulkOverridesAdvanced(
+                    people: selectedStaff.toList(),
+                    startDate: startDate,
+                    endDate: endDate,
+                    shift: shift.toUpperCase(),
+                    reason: reasonController.text.trim(),
+                    weekdays: weekdays,
+                    overwriteExisting: overwriteExisting,
                   );
                   Navigator.pop(context);
                 },
@@ -1219,6 +1414,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
         },
       ),
     );
+    customShiftController.dispose();
+    reasonController.dispose();
   }
 
   String _formatDate(DateTime date) {

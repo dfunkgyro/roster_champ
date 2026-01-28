@@ -17,6 +17,10 @@ enum EventType {
   birthday,
   anniversary,
   custom,
+  payday,
+  religious,
+  cultural,
+  sports,
 }
 
 enum SuggestionPriority {
@@ -1290,12 +1294,20 @@ class AppSettings {
   final String holidayCountryCode;
   final List<String> holidayTypes;
   final bool showHolidayOverlay;
+  final bool showObservanceOverlay;
+  final bool showSportsOverlay;
+  final List<String> observanceTypes;
+  final String calendarificApiKey;
+  final String sportsApiKey;
+  final List<String> sportsLeagueIds;
+  final List<String> hiddenOverlayDates;
   final String timeZone;
   final String siteName;
   final double? siteLat;
   final double? siteLon;
   final bool showWeatherOverlay;
   final bool showMapPreview;
+  final double monthSnapOffsetPx;
 
   const AppSettings({
     this.darkMode = false,
@@ -1309,13 +1321,21 @@ class AppSettings {
     this.colorScheme = ColorSchemeType.blue,
     this.holidayCountryCode = 'US',
     this.holidayTypes = const ['Public', 'Bank'],
-    this.showHolidayOverlay = false,
+    this.showHolidayOverlay = true,
+    this.showObservanceOverlay = true,
+    this.showSportsOverlay = false,
+    this.observanceTypes = const ['religious', 'observance'],
+    this.calendarificApiKey = '',
+    this.sportsApiKey = '',
+    this.sportsLeagueIds = const [],
+    this.hiddenOverlayDates = const [],
     this.timeZone = 'UTC',
     this.siteName = '',
     this.siteLat,
     this.siteLon,
-    this.showWeatherOverlay = false,
+    this.showWeatherOverlay = true,
     this.showMapPreview = true,
+    this.monthSnapOffsetPx = 1200.0,
   });
 
   AppSettings copyWith({
@@ -1331,12 +1351,20 @@ class AppSettings {
     String? holidayCountryCode,
     List<String>? holidayTypes,
     bool? showHolidayOverlay,
+    bool? showObservanceOverlay,
+    bool? showSportsOverlay,
+    List<String>? observanceTypes,
+    String? calendarificApiKey,
+    String? sportsApiKey,
+    List<String>? sportsLeagueIds,
+    List<String>? hiddenOverlayDates,
     String? timeZone,
     String? siteName,
     double? siteLat,
     double? siteLon,
     bool? showWeatherOverlay,
     bool? showMapPreview,
+    double? monthSnapOffsetPx,
   }) {
     return AppSettings(
       darkMode: darkMode ?? this.darkMode,
@@ -1351,12 +1379,21 @@ class AppSettings {
       holidayCountryCode: holidayCountryCode ?? this.holidayCountryCode,
       holidayTypes: holidayTypes ?? this.holidayTypes,
       showHolidayOverlay: showHolidayOverlay ?? this.showHolidayOverlay,
+      showObservanceOverlay:
+          showObservanceOverlay ?? this.showObservanceOverlay,
+      showSportsOverlay: showSportsOverlay ?? this.showSportsOverlay,
+      observanceTypes: observanceTypes ?? this.observanceTypes,
+      calendarificApiKey: calendarificApiKey ?? this.calendarificApiKey,
+      sportsApiKey: sportsApiKey ?? this.sportsApiKey,
+      sportsLeagueIds: sportsLeagueIds ?? this.sportsLeagueIds,
+      hiddenOverlayDates: hiddenOverlayDates ?? this.hiddenOverlayDates,
       timeZone: timeZone ?? this.timeZone,
       siteName: siteName ?? this.siteName,
       siteLat: siteLat ?? this.siteLat,
       siteLon: siteLon ?? this.siteLon,
       showWeatherOverlay: showWeatherOverlay ?? this.showWeatherOverlay,
       showMapPreview: showMapPreview ?? this.showMapPreview,
+      monthSnapOffsetPx: monthSnapOffsetPx ?? this.monthSnapOffsetPx,
     );
   }
 
@@ -1370,15 +1407,23 @@ class AppSettings {
         'compactView': compactView,
         'themeMode': themeMode.index,
         'colorScheme': colorScheme.index,
-        'holidayCountryCode': holidayCountryCode,
-        'holidayTypes': holidayTypes,
-        'showHolidayOverlay': showHolidayOverlay,
-        'timeZone': timeZone,
+      'holidayCountryCode': holidayCountryCode,
+      'holidayTypes': holidayTypes,
+      'showHolidayOverlay': showHolidayOverlay,
+      'showObservanceOverlay': showObservanceOverlay,
+      'showSportsOverlay': showSportsOverlay,
+      'observanceTypes': observanceTypes,
+      'calendarificApiKey': calendarificApiKey,
+      'sportsApiKey': sportsApiKey,
+      'sportsLeagueIds': sportsLeagueIds,
+      'hiddenOverlayDates': hiddenOverlayDates,
+      'timeZone': timeZone,
         'siteName': siteName,
         'siteLat': siteLat,
         'siteLon': siteLon,
         'showWeatherOverlay': showWeatherOverlay,
         'showMapPreview': showMapPreview,
+        'monthSnapOffsetPx': monthSnapOffsetPx,
       };
 
   factory AppSettings.fromJson(Map<String, dynamic> json) => AppSettings(
@@ -1391,21 +1436,40 @@ class AppSettings {
         compactView: json['compactView'] as bool? ?? false,
         themeMode: AppThemeMode.values[json['themeMode'] as int? ?? 0],
         colorScheme: ColorSchemeType.values[json['colorScheme'] as int? ?? 0],
-        holidayCountryCode:
-            json['holidayCountryCode'] as String? ?? 'US',
-        holidayTypes: (json['holidayTypes'] as List<dynamic>?)
-                ?.map((e) => e.toString())
-                .toList() ??
-            const ['Public', 'Bank'],
-        showHolidayOverlay:
-            json['showHolidayOverlay'] as bool? ?? false,
-        timeZone: json['timeZone'] as String? ?? 'UTC',
+      holidayCountryCode:
+          json['holidayCountryCode'] as String? ?? 'US',
+      holidayTypes: (json['holidayTypes'] as List<dynamic>?)
+              ?.map((e) => e.toString())
+              .toList() ??
+          const ['Public', 'Bank'],
+      showHolidayOverlay:
+          json['showHolidayOverlay'] as bool? ?? true,
+      showObservanceOverlay:
+          json['showObservanceOverlay'] as bool? ?? true,
+      showSportsOverlay: json['showSportsOverlay'] as bool? ?? false,
+      observanceTypes: (json['observanceTypes'] as List<dynamic>?)
+              ?.map((e) => e.toString())
+              .toList() ??
+          const ['religious', 'observance'],
+      calendarificApiKey: json['calendarificApiKey'] as String? ?? '',
+      sportsApiKey: json['sportsApiKey'] as String? ?? '',
+      sportsLeagueIds: (json['sportsLeagueIds'] as List<dynamic>?)
+              ?.map((e) => e.toString())
+              .toList() ??
+          const [],
+      hiddenOverlayDates: (json['hiddenOverlayDates'] as List<dynamic>?)
+              ?.map((e) => e.toString())
+              .toList() ??
+          const [],
+      timeZone: json['timeZone'] as String? ?? 'UTC',
         siteName: json['siteName'] as String? ?? '',
         siteLat: (json['siteLat'] as num?)?.toDouble(),
         siteLon: (json['siteLon'] as num?)?.toDouble(),
         showWeatherOverlay:
-            json['showWeatherOverlay'] as bool? ?? false,
+            json['showWeatherOverlay'] as bool? ?? true,
         showMapPreview: json['showMapPreview'] as bool? ?? true,
+        monthSnapOffsetPx:
+            (json['monthSnapOffsetPx'] as num?)?.toDouble() ?? 1200.0,
       );
 }
 

@@ -39,6 +39,12 @@ class AwsService {
   String? _currentRosterId;
   Timer? _updatesTimer;
   String? _lastUpdateTimestamp;
+  bool _offlineAuthenticated = false;
+  String? _offlineEmail;
+  String? _offlineUserId;
+  String? _offlineDisplayName;
+  String? _offlineSalt;
+  String? _offlinePasswordHash;
 
   Function(bool isAuthenticated)? _onAuthStateChanged;
 
@@ -104,6 +110,11 @@ class AwsService {
     _awsSessionToken = prefs.getString('aws_session_token');
     _awsExpireTime = prefs.getInt('aws_expire_time');
     _currentRosterId = prefs.getString('aws_current_roster_id');
+    _offlineEmail = prefs.getString('offline_email');
+    _offlineUserId = prefs.getString('offline_user_id');
+    _offlineDisplayName = prefs.getString('offline_display_name');
+    _offlineSalt = prefs.getString('offline_salt');
+    _offlinePasswordHash = prefs.getString('offline_password_hash');
     _hydrateFromToken();
   }
 
@@ -272,7 +283,9 @@ class AwsService {
       _identityPoolId != null &&
       _identityPoolId!.isNotEmpty;
 
-  bool get isAuthenticated => _accessToken != null || _idToken != null;
+  bool get isAuthenticated =>
+      _offlineAuthenticated || _accessToken != null || _idToken != null;
+  bool get isOfflineAuthenticated => _offlineAuthenticated;
   String? get apiUrl => _apiUrl;
   String? get userId => _userId;
   String? get userEmail => _userEmail;
@@ -348,6 +361,8 @@ class AwsService {
       await _loadAwsCredentials(_idToken!);
     }
     await _saveSession();
+    await _cacheOfflineAuth(email, password);
+    _offlineAuthenticated = false;
     _onAuthStateChanged?.call(true);
   }
 
@@ -377,9 +392,50 @@ class AwsService {
     _userEmail = null;
     _displayName = null;
     _currentRosterId = null;
+    _offlineAuthenticated = false;
     _updatesTimer?.cancel();
     await _clearSession();
     _onAuthStateChanged?.call(false);
+  }
+
+  String _hashPassword(String password, String salt) {
+    final bytes = utf8.encode('$salt$password');
+    return sha256.convert(bytes).toString();
+  }
+
+  Future<void> _cacheOfflineAuth(String email, String password) async {
+    final prefs = await SharedPreferences.getInstance();
+    final salt = DateTime.now().millisecondsSinceEpoch.toString();
+    final hash = _hashPassword(password, salt);
+    await prefs.setString('offline_email', email);
+    await prefs.setString('offline_user_id', _userId ?? '');
+    await prefs.setString('offline_display_name', _displayName ?? '');
+    await prefs.setString('offline_salt', salt);
+    await prefs.setString('offline_password_hash', hash);
+    _offlineEmail = email;
+    _offlineUserId = _userId;
+    _offlineDisplayName = _displayName;
+    _offlineSalt = salt;
+    _offlinePasswordHash = hash;
+  }
+
+  Future<bool> signInOffline(String email, String password) async {
+    if (_offlineEmail == null ||
+        _offlinePasswordHash == null ||
+        _offlineSalt == null) {
+      return false;
+    }
+    if (_offlineEmail!.toLowerCase() != email.toLowerCase()) {
+      return false;
+    }
+    final hash = _hashPassword(password, _offlineSalt!);
+    if (hash != _offlinePasswordHash) return false;
+    _offlineAuthenticated = true;
+    _userEmail = _offlineEmail;
+    _userId = _offlineUserId;
+    _displayName = _offlineDisplayName;
+    _onAuthStateChanged?.call(true);
+    return true;
   }
 
 

@@ -4,6 +4,7 @@ import 'package:google_fonts/google_fonts.dart';
 import '../aws_service.dart';
 import '../utils/error_handler.dart';
 import '../home_screen.dart';
+import '../providers.dart';
 import 'roster_sharing_screen.dart';
 
 class LoginScreen extends ConsumerStatefulWidget {
@@ -103,6 +104,31 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
     } catch (e) {
       if (mounted) {
         final message = e.toString();
+        final lower = message.toLowerCase();
+        final offlineEligible = lower.contains('socketexception') ||
+            lower.contains('failed host lookup') ||
+            lower.contains('timed out') ||
+            lower.contains('connection refused') ||
+            lower.contains('network');
+        if (!_isSignUp && offlineEligible) {
+          final offlineSignedIn = await AwsService.instance.signInOffline(
+            _emailController.text.trim(),
+            _passwordController.text,
+          );
+          if (offlineSignedIn) {
+            await ref.read(rosterProvider).loadFromLocal();
+            if (mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(
+                  content: Text('Offline mode enabled. Using cached roster.'),
+                  backgroundColor: Colors.orange,
+                ),
+              );
+              _handleAuthNavigation();
+              return;
+            }
+          }
+        }
         if (!_isSignUp && message.contains('Account not confirmed')) {
           final signedIn = await _showConfirmDialog(
             _emailController.text.trim(),

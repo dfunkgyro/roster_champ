@@ -648,6 +648,25 @@ class SettingsView extends ConsumerWidget {
               secondary: const Icon(Icons.event_available),
             ),
             ListTile(
+              leading: const Icon(Icons.align_horizontal_left),
+              title: const Text('Month snap offset'),
+              subtitle: Text(
+                '${settings.monthSnapOffsetPx.toStringAsFixed(0)} px',
+              ),
+            ),
+            Slider(
+              value: settings.monthSnapOffsetPx,
+              min: -2000,
+              max: 2000,
+              divisions: 400,
+              label: '${settings.monthSnapOffsetPx.toStringAsFixed(0)} px',
+              onChanged: (value) {
+                ref.read(settingsProvider.notifier).updateSettings(
+                      settings.copyWith(monthSnapOffsetPx: value),
+                    );
+              },
+            ),
+            ListTile(
               leading: const Icon(Icons.date_range),
               title: const Text('Date Format'),
               subtitle: Text(settings.dateFormat),
@@ -681,14 +700,20 @@ class SettingsView extends ConsumerWidget {
     dynamic roster,
   ) {
     final isReadOnly = roster.readOnly as bool? ?? false;
-    const allTypes = [
-      'Public',
-      'Bank',
-      'Observance',
-      'Optional',
-      'School',
-      'Authorities',
-    ];
+      const allTypes = [
+        'Public',
+        'Bank',
+        'Observance',
+        'Optional',
+        'School',
+        'Authorities',
+      ];
+      const observanceTypes = [
+        'religious',
+        'observance',
+        'national',
+        'local',
+      ];
 
     return Card(
       child: Padding(
@@ -766,12 +791,12 @@ class SettingsView extends ConsumerWidget {
               style: Theme.of(context).textTheme.titleSmall,
             ),
             const SizedBox(height: 8),
-            Wrap(
-              spacing: 8,
-              children: allTypes.map((type) {
-                final selected = settings.holidayTypes.contains(type);
-                return FilterChip(
-                  label: Text(type),
+              Wrap(
+                spacing: 8,
+                children: allTypes.map((type) {
+                  final selected = settings.holidayTypes.contains(type);
+                  return FilterChip(
+                    label: Text(type),
                   selected: selected,
                   onSelected: isReadOnly
                       ? null
@@ -790,16 +815,136 @@ class SettingsView extends ConsumerWidget {
                               );
                         },
                 );
-              }).toList(),
-            ),
-            const SizedBox(height: 12),
-            Text(
-              'Uses Nager.Date public holiday API.',
-              style: Theme.of(context)
-                  .textTheme
-                  .bodySmall
-                  ?.copyWith(color: Colors.grey[600]),
-            ),
+                }).toList(),
+              ),
+              const SizedBox(height: 12),
+              SwitchListTile(
+                title: const Text('Religious & cultural overlay'),
+                subtitle: const Text('Show religious and cultural observances'),
+                value: settings.showObservanceOverlay,
+                onChanged: (value) {
+                  ref.read(settingsProvider.notifier).updateSettings(
+                        settings.copyWith(showObservanceOverlay: value),
+                      );
+                },
+                secondary: const Icon(Icons.temple_hindu),
+              ),
+              TextFormField(
+                initialValue: settings.calendarificApiKey,
+                decoration: const InputDecoration(
+                  labelText: 'Calendarific API key',
+                  helperText: 'Required for religious/cultural observances',
+                  border: OutlineInputBorder(),
+                ),
+                obscureText: true,
+                enableSuggestions: false,
+                autocorrect: false,
+                onChanged: (value) {
+                  ref.read(settingsProvider.notifier).updateSettings(
+                        settings.copyWith(calendarificApiKey: value.trim()),
+                      );
+                },
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'Observance types',
+                style: Theme.of(context).textTheme.titleSmall,
+              ),
+              const SizedBox(height: 6),
+              Wrap(
+                spacing: 8,
+                children: observanceTypes.map((type) {
+                  final selected =
+                      settings.observanceTypes.contains(type);
+                  return FilterChip(
+                    label: Text(type),
+                    selected: selected,
+                    onSelected: (value) {
+                      final updated =
+                          List<String>.from(settings.observanceTypes);
+                      if (value) {
+                        if (!updated.contains(type)) {
+                          updated.add(type);
+                        }
+                      } else {
+                        updated.remove(type);
+                      }
+                      ref.read(settingsProvider.notifier).updateSettings(
+                            settings.copyWith(observanceTypes: updated),
+                          );
+                    },
+                  );
+                }).toList(),
+              ),
+              const SizedBox(height: 12),
+              SwitchListTile(
+                title: const Text('Sports overlay'),
+                subtitle: const Text('Show major sporting events'),
+                value: settings.showSportsOverlay,
+                onChanged: (value) {
+                  ref.read(settingsProvider.notifier).updateSettings(
+                        settings.copyWith(showSportsOverlay: value),
+                      );
+                },
+                secondary: const Icon(Icons.sports_soccer),
+              ),
+              TextFormField(
+                initialValue: settings.sportsApiKey,
+                decoration: const InputDecoration(
+                  labelText: 'Sports API key',
+                  helperText: 'TheSportsDB API key',
+                  border: OutlineInputBorder(),
+                ),
+                obscureText: true,
+                enableSuggestions: false,
+                autocorrect: false,
+                onChanged: (value) {
+                  ref.read(settingsProvider.notifier).updateSettings(
+                        settings.copyWith(sportsApiKey: value.trim()),
+                      );
+                },
+              ),
+              const SizedBox(height: 8),
+              TextFormField(
+                initialValue: settings.sportsLeagueIds.join(','),
+                decoration: const InputDecoration(
+                  labelText: 'Sports league IDs',
+                  helperText: 'Comma-separated league IDs',
+                  border: OutlineInputBorder(),
+                ),
+                onChanged: (value) {
+                  final ids = value
+                      .split(',')
+                      .map((e) => e.trim())
+                      .where((e) => e.isNotEmpty)
+                      .toList();
+                  ref.read(settingsProvider.notifier).updateSettings(
+                        settings.copyWith(sportsLeagueIds: ids),
+                      );
+                },
+              ),
+              const SizedBox(height: 12),
+              if (settings.hiddenOverlayDates.isNotEmpty) ...[
+                OutlinedButton.icon(
+                  onPressed: () {
+                    ref.read(settingsProvider.notifier).updateSettings(
+                          settings.copyWith(hiddenOverlayDates: []),
+                        );
+                  },
+                  icon: const Icon(Icons.visibility),
+                  label: Text(
+                    'Show ${settings.hiddenOverlayDates.length} hidden overlays',
+                  ),
+                ),
+                const SizedBox(height: 8),
+              ],
+              Text(
+                'Uses Nager.Date for public holidays, Calendarific for observances, and TheSportsDB for sports.',
+                style: Theme.of(context)
+                    .textTheme
+                    .bodySmall
+                    ?.copyWith(color: Colors.grey[600]),
+              ),
             const SizedBox(height: 16),
             _buildLocaleSection(context, ref, settings, roster),
             const SizedBox(height: 12),

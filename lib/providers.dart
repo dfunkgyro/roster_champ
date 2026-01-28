@@ -804,6 +804,7 @@ class RosterNotifier extends ChangeNotifier {
   Timer? _autoSaveTimer;
   Timer? _syncTimer;
   Timer? _presenceTimer;
+  Timer? _cloudSyncTimer;
   String? _lastSavedHash;
   DateTime? _lastBackupAt;
   int _lastSyncedVersion = 0;
@@ -824,8 +825,12 @@ class RosterNotifier extends ChangeNotifier {
 
   void _startAutoSave() {
     _autoSaveTimer?.cancel();
-    _autoSaveTimer = Timer.periodic(_autoSaveDelay, (_) {
-      _autoSave();
+  }
+
+  void _scheduleAutoSave() {
+    _autoSaveTimer?.cancel();
+    _autoSaveTimer = Timer(_autoSaveDelay, () async {
+      await _autoSave();
     });
   }
 
@@ -839,9 +844,35 @@ class RosterNotifier extends ChangeNotifier {
   Future<void> _autoSave() async {
     try {
       await saveToLocal();
+      _scheduleCloudSync();
     } catch (e) {
       debugPrint('Auto-save error: $e');
     }
+  }
+
+  void _scheduleCloudSync() {
+    if (readOnly) return;
+    if (!AwsService.instance.isAuthenticated) return;
+    if (AwsService.instance.currentRosterId == null) return;
+
+    _cloudSyncTimer?.cancel();
+    _cloudSyncTimer = Timer(const Duration(seconds: 6), () async {
+      try {
+        await autoSyncToAWS();
+      } catch (e) {
+        debugPrint('Auto-sync error: $e');
+      }
+    });
+
+    _queueSyncOperation(
+      models.SyncOperation(
+        id: DateTime.now().millisecondsSinceEpoch.toString(),
+        type: models.SyncOperationType.bulkUpdate,
+        timestamp: DateTime.now(),
+        data: toJson(),
+      ),
+    );
+    _processPendingSync();
   }
 
   Future<void> _processPendingSync() async {
@@ -898,6 +929,7 @@ class RosterNotifier extends ChangeNotifier {
     _autoSaveTimer?.cancel();
     _syncTimer?.cancel();
     _presenceTimer?.cancel();
+    _cloudSyncTimer?.cancel();
     super.dispose();
   }
 
@@ -1010,7 +1042,8 @@ class RosterNotifier extends ChangeNotifier {
     staffMembers.add(newStaff);
     _addHistory('Staff Added', 'Added staff member: $name');
     _rememberStaffNames([newStaff.name]);
-    _autoSave();
+    _scheduleAutoSave();
+    _scheduleCloudSync();
     notifyListeners();
   }
 
@@ -1018,7 +1051,8 @@ class RosterNotifier extends ChangeNotifier {
     staffMembers.removeWhere((s) => s.name == name);
     overrides.removeWhere((o) => o.personName == name);
     _addHistory('Staff Removed', 'Removed staff member: $name');
-    _autoSave();
+    _scheduleAutoSave();
+    _scheduleCloudSync();
     notifyListeners();
   }
 
@@ -1027,7 +1061,8 @@ class RosterNotifier extends ChangeNotifier {
     staffMembers.removeWhere((s) => s.id == staffId);
     overrides.removeWhere((o) => o.personName == staff.name);
     _addHistory('Staff Removed', 'Removed staff member: ${staff.name}');
-    _autoSave();
+    _scheduleAutoSave();
+    _scheduleCloudSync();
     notifyListeners();
   }
 
@@ -1054,7 +1089,8 @@ class RosterNotifier extends ChangeNotifier {
 
       _addHistory('Staff Renamed', 'Renamed $oldName to ${newName.trim()}');
       _rememberStaffNames([newName.trim()]);
-      _autoSave();
+      _scheduleAutoSave();
+      _scheduleCloudSync();
       notifyListeners();
     }
   }
@@ -1074,7 +1110,8 @@ class RosterNotifier extends ChangeNotifier {
         'Staff Status',
         'Set ${staffMembers[index].name} status to ${newStatus ? 'active' : 'inactive'}',
       );
-      _autoSave();
+      _scheduleAutoSave();
+      _scheduleCloudSync();
       notifyListeners();
     }
   }
@@ -1429,6 +1466,7 @@ class RosterNotifier extends ChangeNotifier {
         sharedRosterName = null;
         sharedRole = null;
         _addHistory('Sync', 'Loaded roster from cloud');
+        await saveToLocal();
         notifyListeners();
       }
     } catch (e) {
@@ -2430,38 +2468,88 @@ class RosterNotifier extends ChangeNotifier {
     String shift,
     String reason,
   ) {
+    addBulkOverridesAdvanced(
+      people: [person],
+      startDate: startDate,
+      endDate: endDate,
+      shift: shift,
+      reason: reason,
+    );
+  }
+
+  void addBulkOverridesAdvanced({
+    required List<String> people,
+    required DateTime startDate,
+    required DateTime endDate,
+    required String shift,
+    String? reason,
+    Set<int>? weekdays,
+    bool overwriteExisting = true,
+  }) {
+    if (people.isEmpty) return;
+    final selectedWeekdays =
+        weekdays ?? {1, 2, 3, 4, 5, 6, 7};
+    if (selectedWeekdays.isEmpty) return;
+
     unawaited(_storeBackupNow(reason: 'Bulk overrides'));
     final bulkId = DateTime.now().millisecondsSinceEpoch.toString();
+    final reasonTag = '[bulk:$bulkId]';
+    final baseReason = reason?.trim() ?? '';
+    final fullReason =
+        baseReason.isEmpty ? reasonTag : '$baseReason $reasonTag';
     final newOverrides = <models.Override>[];
 
-    overrides.removeWhere(
-      (o) =>
-          o.personName == person &&
-          !o.date.isBefore(startDate) &&
-          !o.date.isAfter(endDate),
-    );
-
-    for (var date = startDate;
-        date.isBefore(endDate) || date.isAtSameMomentAs(endDate);
-        date = date.add(const Duration(days: 1))) {
+    for (final person in people) {
       final staffIndex = staffMembers.indexWhere((s) => s.name == person);
       if (staffIndex == -1) continue;
 
-      newOverrides.add(
-        models.Override(
-          id: DateTime.now().millisecondsSinceEpoch.toString(),
-          personName: person,
-          date: date,
-          shift: shift,
-          reason: reason,
-          createdAt: DateTime.now(),
-        ),
-      );
-
-      if (shift == 'L') {
-        staffMembers[staffIndex] = staffMembers[staffIndex].copyWith(
-          leaveBalance: staffMembers[staffIndex].leaveBalance - 1,
+      for (var date = startDate;
+          date.isBefore(endDate) || date.isAtSameMomentAs(endDate);
+          date = date.add(const Duration(days: 1))) {
+        if (!selectedWeekdays.contains(date.weekday)) continue;
+        final existingIndex = overrides.indexWhere(
+          (o) =>
+              o.personName == person &&
+              o.date.year == date.year &&
+              o.date.month == date.month &&
+              o.date.day == date.day,
         );
+
+        if (existingIndex != -1) {
+          if (!overwriteExisting) continue;
+          final existing = overrides[existingIndex];
+          if (_isShiftLocked(date, existing.shift, person) ||
+              _isShiftLocked(date, shift, person)) {
+            continue;
+          }
+          if (existing.shift == 'L') {
+            staffMembers[staffIndex] = staffMembers[staffIndex].copyWith(
+              leaveBalance: staffMembers[staffIndex].leaveBalance + 1,
+            );
+          }
+          overrides.removeAt(existingIndex);
+        } else {
+          if (_isShiftLocked(date, shift, person)) {
+            continue;
+          }
+        }
+
+        newOverrides.add(
+          models.Override(
+            id: DateTime.now().millisecondsSinceEpoch.toString(),
+            personName: person,
+            date: date,
+            shift: shift,
+            reason: fullReason,
+            createdAt: DateTime.now(),
+          ),
+        );
+
+        if (shift == 'L') {
+          staffMembers[staffIndex] = staffMembers[staffIndex].copyWith(
+            leaveBalance: staffMembers[staffIndex].leaveBalance - 1,
+          );
+        }
       }
     }
 
@@ -2469,9 +2557,10 @@ class RosterNotifier extends ChangeNotifier {
 
     _addHistory(
       'Bulk Override',
-      'Added ${newOverrides.length} overrides for $person',
+      'Added ${newOverrides.length} overrides for ${people.length} staff',
     );
 
+    _scheduleCloudSync();
     notifyListeners();
   }
 
@@ -2577,6 +2666,7 @@ class RosterNotifier extends ChangeNotifier {
       'Override Set',
       'Set $person on ${_formatDate(date)} to $newShift',
     );
+    _scheduleCloudSync();
     notifyListeners();
   }
 
@@ -2949,12 +3039,14 @@ class RosterNotifier extends ChangeNotifier {
   void addEvent(models.Event event) {
     events.add(event);
     _addHistory('Event Added', 'Added event: ${event.title}');
+    _scheduleCloudSync();
     notifyListeners();
   }
 
   void addBulkEvents(List<models.Event> newEvents) {
     events.addAll(newEvents);
     _addHistory('Bulk Events', 'Added ${newEvents.length} events');
+    _scheduleCloudSync();
     notifyListeners();
   }
 
@@ -2962,17 +3054,23 @@ class RosterNotifier extends ChangeNotifier {
     final event = events.firstWhere((e) => e.id == eventId);
     events.removeWhere((e) => e.id == eventId);
     _addHistory('Event Deleted', 'Deleted event: ${event.title}');
+    _scheduleCloudSync();
     notifyListeners();
   }
 
   void deleteRecurringEvents(String recurringId) {
     final count = events
-        .where((e) => e.description?.contains(recurringId) == true)
+        .where((e) =>
+            e.recurringId == recurringId ||
+            e.description?.contains(recurringId) == true)
         .length;
-    events.removeWhere((e) => e.description?.contains(recurringId) == true);
+    events.removeWhere((e) =>
+        e.recurringId == recurringId ||
+        e.description?.contains(recurringId) == true);
 
     _addHistory('Recurring Events Deleted', 'Deleted $count recurring events');
 
+    _scheduleCloudSync();
     notifyListeners();
   }
 
@@ -3855,3 +3953,4 @@ extension FirstWhereOrNullExtension<E> on Iterable<E> {
     return last;
   }
 }
+
