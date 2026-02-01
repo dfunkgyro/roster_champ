@@ -327,7 +327,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
               ),
               const SizedBox(height: 12),
               Text(
-                'Roster Champ Pro',
+                'Roster Champion',
                 style: GoogleFonts.inter(
                   fontSize: 26,
                   fontWeight: FontWeight.bold,

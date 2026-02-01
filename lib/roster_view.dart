@@ -29,6 +29,8 @@ class _OverlayBundle {
   });
 }
 
+enum _RosterViewMode { month, week }
+
 class RosterView extends ConsumerStatefulWidget {
   const RosterView({super.key});
 
@@ -43,6 +45,7 @@ class _RosterViewState extends ConsumerState<RosterView> {
   final ScrollController _scrollController = ScrollController();
   final ScrollController _monthScrollController = ScrollController();
   final Map<String, ScrollController> _monthHorizontalControllers = {};
+  final Map<String, ScrollController> _monthVerticalControllers = {};
   late final PageController _weekPageController;
   final int _weekPageBase = 10000;
   int _currentWeekPage = 10000;
@@ -53,19 +56,24 @@ class _RosterViewState extends ConsumerState<RosterView> {
   final Map<String, List<HolidayItem>> _holidayCache = {};
   final Map<String, List<HolidayItem>> _observanceCache = {};
   String? _selectedStaffName;
-  bool _showMonthOverview = true;
+  _RosterViewMode _viewMode = _RosterViewMode.month;
   bool _focusMode = true;
   double _cellScale = 1.0;
   double _scaleStart = 1.0;
-  final GlobalKey _todayMonthKey = GlobalKey();
+  final Map<String, GlobalKey> _monthCardKeys = {};
   bool _showTodayChip = false;
   Timer? _todayChipTimer;
   bool _ignoreScrollNotifications = false;
   DateTime? _focusedDate;
   bool _monthAutoSnapEnabled = true;
   bool _initialMonthSnapDone = false;
+  static const int _monthsBack = 12;
+  static const int _monthsForward = 12;
   Future<_OverlayBundle>? _monthOverlayFuture;
   String? _monthOverlayKey;
+  bool get _isMonthView => _viewMode == _RosterViewMode.month;
+  bool get _isWeekView => _viewMode == _RosterViewMode.week;
+  bool get _isMonthLike => _isMonthView || _isWeekView;
 
   double get _headerHeight => 56 * _cellScale;
   double get _rowHeight => 56 * _cellScale;
@@ -79,6 +87,24 @@ class _RosterViewState extends ConsumerState<RosterView> {
       (48 * _cellScale).clamp(24, 70).toDouble();
   double get _dayCellHeightMonth =>
       (36 * _cellScale).clamp(20, 56).toDouble();
+
+  String _formatLeaveLabel(String? leaveType) {
+    if (leaveType == null || leaveType.isEmpty) return 'Leave';
+    if (leaveType.startsWith('custom:')) {
+      final label = leaveType.substring('custom:'.length).trim();
+      return label.isEmpty ? 'Custom Leave' : label;
+    }
+    switch (leaveType) {
+      case 'secondment':
+        return 'Secondment';
+      case 'sick':
+        return 'Sick';
+      case 'annual':
+        return 'Annual Leave';
+      default:
+        return 'Leave';
+    }
+  }
 
   @override
   void initState() {
@@ -101,6 +127,7 @@ class _RosterViewState extends ConsumerState<RosterView> {
     'D12': Colors.blueAccent,
     'N': Colors.purple,
     'L': Colors.orange,
+    'AL': Colors.redAccent,
     'OFF': Colors.grey,
     'R': Colors.green,
     'E': Colors.lightBlue,
@@ -119,6 +146,9 @@ class _RosterViewState extends ConsumerState<RosterView> {
     _todayChipTimer?.cancel();
     _weekPageController.dispose();
     for (final controller in _monthHorizontalControllers.values) {
+      controller.dispose();
+    }
+    for (final controller in _monthVerticalControllers.values) {
       controller.dispose();
     }
     for (final controller in _nameControllers.values) {
@@ -207,22 +237,18 @@ class _RosterViewState extends ConsumerState<RosterView> {
         if (settings.showWeatherOverlay &&
             settings.siteLat != null &&
             settings.siteLon != null &&
-            !_showMonthOverview &&
             !_focusMode)
           _buildWeatherStrip(settings),
         _buildViewModeToggle(context),
-          _showMonthOverview
-              ? const SizedBox.shrink()
-              : _buildWeekNavigator(context),
         _buildDateRibbon(context),
         const Divider(height: 1),
         Expanded(
           child: Stack(
             children: [
-              _showMonthOverview
-                  ? _buildMonthOverview(context, roster, settings)
-                  : _buildWeekTimeline(context, roster, settings, isCompactLayout),
-              if (_showTodayChip && !_showMonthOverview)
+              _isWeekView
+                  ? _buildMonthOverviewHorizontal(context, roster, settings)
+                  : _buildMonthOverview(context, roster, settings),
+              if (_showTodayChip && !_isMonthLike)
                 Positioned(
                   right: 16,
                   bottom: 16,
@@ -247,15 +273,12 @@ class _RosterViewState extends ConsumerState<RosterView> {
       child: Row(
         children: [
           ToggleButtons(
-            isSelected: [_showMonthOverview == false, _showMonthOverview == true],
+            isSelected: [_isWeekView, _isMonthView],
             onPressed: (index) {
               setState(() {
-                _showMonthOverview = index == 1;
-                if (_showMonthOverview) {
-                  _focusedDate = _currentMonthAnchor;
-                } else {
-                  _focusedDate = _currentWeekStart;
-                }
+                _viewMode =
+                    index == 0 ? _RosterViewMode.week : _RosterViewMode.month;
+                _focusedDate = _focusedDate ?? _startOfDay(DateTime.now());
               });
               _scrollToToday(force: true);
             },
@@ -267,7 +290,7 @@ class _RosterViewState extends ConsumerState<RosterView> {
                   children: [
                     Icon(Icons.calendar_view_week_rounded, size: 18),
                     SizedBox(width: 6),
-                    Text('Week'),
+                    Text('Timeline'),
                   ],
                 ),
               ),
@@ -328,6 +351,7 @@ class _RosterViewState extends ConsumerState<RosterView> {
 
   Widget _buildQuickTools(BuildContext context, bool compact) {
     final roster = ref.read(rosterProvider);
+    final settings = ref.watch(settingsProvider);
     final isSignedIn = AwsService.instance.isAuthenticated;
     final accessLabel = roster.readOnly
         ? 'Shared (${roster.sharedRole ?? 'viewer'})'
@@ -381,6 +405,46 @@ class _RosterViewState extends ConsumerState<RosterView> {
                 onPressed: () => _openPatternEditor(context),
                 icon: const Icon(Icons.pattern_rounded),
                 label: const Text('Edit Pattern'),
+              ),
+              OutlinedButton.icon(
+                onPressed: () {
+                  ref.read(settingsProvider.notifier).updateSettings(
+                        settings.copyWith(
+                          showHolidayOverlay: !settings.showHolidayOverlay,
+                        ),
+                      );
+                },
+                icon: Icon(
+                  Icons.celebration_rounded,
+                  color: settings.showHolidayOverlay
+                      ? Theme.of(context).colorScheme.primary
+                      : Theme.of(context).colorScheme.onSurfaceVariant,
+                ),
+                label: Text(
+                  settings.showHolidayOverlay
+                      ? 'Hide holidays'
+                      : 'Show holidays',
+                ),
+              ),
+              OutlinedButton.icon(
+                onPressed: () {
+                  ref.read(settingsProvider.notifier).updateSettings(
+                        settings.copyWith(
+                          showWeatherOverlay: !settings.showWeatherOverlay,
+                        ),
+                      );
+                },
+                icon: Icon(
+                  Icons.cloud_rounded,
+                  color: settings.showWeatherOverlay
+                      ? Theme.of(context).colorScheme.primary
+                      : Theme.of(context).colorScheme.onSurfaceVariant,
+                ),
+                label: Text(
+                  settings.showWeatherOverlay
+                      ? 'Hide weather'
+                      : 'Show weather',
+                ),
               ),
               OutlinedButton.icon(
                 onPressed: () => _openGenerator(context),
@@ -744,69 +808,7 @@ class _RosterViewState extends ConsumerState<RosterView> {
     return DateFormat('MMM d').format(date);
   }
 
-  Widget _buildWeekNavigator(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-      decoration: BoxDecoration(
-        color: Theme.of(context).colorScheme.surfaceVariant.withOpacity(0.3),
-        border: Border(
-          bottom: BorderSide(color: Theme.of(context).dividerColor),
-        ),
-      ),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-        children: [
-          IconButton(
-            icon: const Icon(Icons.chevron_left_rounded),
-            onPressed: () {
-              _animateWeekDelta(-1);
-            },
-          ),
-          GestureDetector(
-            behavior: HitTestBehavior.opaque,
-            onHorizontalDragEnd: (details) {
-              final velocity = details.primaryVelocity ?? 0;
-              if (velocity.abs() < 300) return;
-              _animateWeekDelta(velocity > 0 ? -1 : 1);
-            },
-            child: Column(
-              children: [
-                Text(
-                  'Starting ${DateFormat('MMM d, yyyy').format(_currentWeekStart)}',
-                  style: GoogleFonts.inter(
-                    fontSize: 16,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-                Text(
-                  _getWeekRange(),
-                  style: GoogleFonts.inter(
-                    fontSize: 12,
-                    color: Theme.of(context).colorScheme.onSurfaceVariant,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          IconButton(
-            icon: const Icon(Icons.today_rounded),
-            onPressed: _smartHome,
-          ),
-          IconButton(
-            icon: const Icon(Icons.chevron_right_rounded),
-            onPressed: () {
-              _animateWeekDelta(1);
-            },
-          ),
-        ],
-      ),
-    );
-  }
-
-  String _getWeekRange() {
-    final weekEnd = _currentWeekStart.add(const Duration(days: 6));
-    return '${DateFormat('MMM d').format(_currentWeekStart)} - ${DateFormat('MMM d').format(weekEnd)}';
-  }
+  // Week navigator removed in favor of year timeline view.
 
   DateTime _startOfWeek(DateTime date) {
     return _startOfWeekWithStart(date, _weekStartDay);
@@ -883,16 +885,15 @@ class _RosterViewState extends ConsumerState<RosterView> {
   }
 
   void _animateWeekDelta(int delta) {
-    final target = _currentWeekPage + delta;
-    if (_weekPageController.hasClients) {
-      _weekPageController.animateToPage(
-        target,
-        duration: const Duration(milliseconds: 280),
-        curve: Curves.easeOut,
-      );
-    } else {
-      _onWeekPageChanged(target);
-    }
+    if (!_scrollController.hasClients) return;
+    final shift = delta * 7 * _dayCellWidthWeek;
+    final target = _scrollController.offset + shift;
+    final maxExtent = _scrollController.position.maxScrollExtent;
+    _scrollController.animateTo(
+      target.clamp(0.0, maxExtent),
+      duration: const Duration(milliseconds: 280),
+      curve: Curves.easeOut,
+    );
   }
 
   ScrollController _getMonthScrollController(DateTime monthStart) {
@@ -901,6 +902,19 @@ class _RosterViewState extends ConsumerState<RosterView> {
       key,
       () => ScrollController(),
     );
+  }
+
+  ScrollController _getMonthVerticalController(DateTime monthStart) {
+    final key = 'v-${_monthKey(monthStart)}';
+    return _monthVerticalControllers.putIfAbsent(
+      key,
+      () => ScrollController(),
+    );
+  }
+
+  GlobalKey _getMonthCardKey(DateTime monthStart) {
+    final key = _monthKey(monthStart);
+    return _monthCardKeys.putIfAbsent(key, () => GlobalKey());
   }
 
   void _jumpToToday() {
@@ -935,7 +949,7 @@ class _RosterViewState extends ConsumerState<RosterView> {
       _focusedDate = today;
       _showTodayChip = false;
     });
-    if (_showMonthOverview) {
+    if (_isMonthLike) {
       if (_monthScrollController.hasClients) {
         _monthScrollController.jumpTo(0);
       }
@@ -946,8 +960,6 @@ class _RosterViewState extends ConsumerState<RosterView> {
           _scrollToTodayDayInMonth(today);
         });
       });
-    } else {
-      _jumpToToday();
     }
   }
 
@@ -963,16 +975,30 @@ class _RosterViewState extends ConsumerState<RosterView> {
   }
 
   void _scrollToToday({bool force = false}) {
+    final today = _startOfDay(DateTime.now());
+    final rangeStart =
+        DateTime(_currentMonthAnchor.year, _currentMonthAnchor.month - _monthsBack, 1);
+    final rangeEnd = DateTime(
+      _currentMonthAnchor.year,
+      _currentMonthAnchor.month + _monthsForward + 1,
+      0,
+    );
+    if (today.isBefore(rangeStart) || today.isAfter(rangeEnd)) {
+      setState(() {
+        _currentMonthAnchor = DateTime(today.year, today.month);
+        _monthAutoSnapEnabled = true;
+        _initialMonthSnapDone = false;
+        _focusedDate = today;
+      });
+    }
     _ignoreScrollNotifications = true;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      if (_showMonthOverview) {
+      if (_isMonthLike) {
         if (force || (!_initialMonthSnapDone && _monthAutoSnapEnabled)) {
           _scrollToTodayMonth(force: force);
           _initialMonthSnapDone = true;
         }
-      } else {
-        _scrollToTodayWeek();
       }
       Future.delayed(const Duration(milliseconds: 350), () {
         _ignoreScrollNotifications = false;
@@ -980,42 +1006,37 @@ class _RosterViewState extends ConsumerState<RosterView> {
     });
   }
 
-  void _scrollToTodayWeek() {
-    if (!_scrollController.hasClients) return;
-    final today = _startOfDay(DateTime.now());
-    final weekStart = _startOfWeekWithStart(today, _weekStartDay);
-    final dayIndex = today.difference(weekStart).inDays.clamp(0, 6);
-    final target = dayIndex * _dayCellWidthWeek;
-    final maxExtent = _scrollController.position.maxScrollExtent;
-    _scrollController.jumpTo(target.clamp(0.0, maxExtent));
-  }
-
   void _scrollToTodayMonth({bool force = false}) {
     final today = _startOfDay(DateTime.now());
+    _scrollToMonth(today, alignment: 0.1);
+    _scrollToTodayDayInMonth(today);
+  }
+
+  void _scrollToMonth(DateTime target, {double alignment = 0.1}) {
+    final monthStart = DateTime(target.year, target.month, 1);
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      final context = _todayMonthKey.currentContext;
+      final context = _getMonthCardKey(monthStart).currentContext;
       if (context != null) {
         Scrollable.ensureVisible(
           context,
-          alignment: 0.1,
+          alignment: alignment,
           duration: const Duration(milliseconds: 300),
         );
-      } else {
-        if (_monthScrollController.hasClients) {
-          _monthScrollController.jumpTo(0);
-        }
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          final retryContext = _todayMonthKey.currentContext;
-          if (retryContext != null) {
-            Scrollable.ensureVisible(
-              retryContext,
-              alignment: 0.1,
-              duration: const Duration(milliseconds: 300),
-            );
-          }
-        });
+        return;
       }
-      _scrollToTodayDayInMonth(today);
+      if (_monthScrollController.hasClients) {
+        _monthScrollController.jumpTo(0);
+      }
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        final retryContext = _getMonthCardKey(monthStart).currentContext;
+        if (retryContext != null) {
+          Scrollable.ensureVisible(
+            retryContext,
+            alignment: alignment,
+            duration: const Duration(milliseconds: 300),
+          );
+        }
+      });
     });
   }
 
@@ -1036,7 +1057,7 @@ class _RosterViewState extends ConsumerState<RosterView> {
 
   void _markScrolledAway() {
     if (_ignoreScrollNotifications) return;
-    if (_showMonthOverview) {
+    if (_isMonthLike) {
       _monthAutoSnapEnabled = false;
       return;
     }
@@ -1050,9 +1071,10 @@ class _RosterViewState extends ConsumerState<RosterView> {
   }
 
   List<DateTime> _buildMonthList(DateTime anchor) {
+    final total = _monthsBack + _monthsForward + 1;
     return List.generate(
-      12,
-      (i) => DateTime(anchor.year, anchor.month + i, 1),
+      total,
+      (i) => DateTime(anchor.year, anchor.month + i - _monthsBack, 1),
     );
   }
 
@@ -1088,16 +1110,23 @@ class _RosterViewState extends ConsumerState<RosterView> {
     try {
       final years = <int>{start.year, end.year};
       final all = <HolidayItem>[];
-      for (final year in years) {
-        final key = _holidayCacheKey(settings.holidayCountryCode, year);
-        if (!_holidayCache.containsKey(key)) {
-          final fetched = await HolidayService.instance.getHolidays(
-            countryCode: settings.holidayCountryCode,
-            year: year,
-          );
-          _holidayCache[key] = fetched;
+      final countries = <String>{
+        settings.holidayCountryCode,
+        ...settings.additionalHolidayCountries,
+      };
+      for (final country in countries) {
+        if (country.trim().isEmpty) continue;
+        for (final year in years) {
+          final key = _holidayCacheKey(country, year);
+          if (!_holidayCache.containsKey(key)) {
+            final fetched = await HolidayService.instance.getHolidays(
+              countryCode: country,
+              year: year,
+            );
+            _holidayCache[key] = fetched;
+          }
+          all.addAll(_holidayCache[key]!);
         }
-        all.addAll(_holidayCache[key]!);
       }
       final map = <String, HolidayItem>{};
       for (final item in all) {
@@ -1383,7 +1412,8 @@ class _RosterViewState extends ConsumerState<RosterView> {
     final months = _buildMonthList(_currentMonthAnchor);
     final start = months.first;
     final end = DateTime(months.last.year, months.last.month + 1, 0);
-    final staff = roster.getActiveStaffNames();
+    final staffMembers = roster.getStaffForRange(start, end);
+    final staff = staffMembers.map((s) => s.name).toList();
     final monthKey =
         '${_monthKey(start)}-${_monthKey(end)}-${settings.showHolidayOverlay}-${settings.showObservanceOverlay}-${settings.showSportsOverlay}-${settings.holidayCountryCode}-${settings.holidayTypes.join(',')}-${settings.observanceTypes.join(',')}-${settings.sportsLeagueIds.join(',')}-${settings.calendarificApiKey.isNotEmpty}-${settings.sportsApiKey.isNotEmpty}';
     if (_monthOverlayKey != monthKey) {
@@ -1423,7 +1453,7 @@ class _RosterViewState extends ConsumerState<RosterView> {
               onNotification: (notification) {
                 if (notification is ScrollUpdateNotification) {
                   _markScrolledAway();
-                  if (_showMonthOverview) {
+                  if (_isMonthView) {
                     _monthAutoSnapEnabled = false;
                   }
                 }
@@ -1432,6 +1462,7 @@ class _RosterViewState extends ConsumerState<RosterView> {
               child: ListView.builder(
                 controller: _monthScrollController,
                 padding: const EdgeInsets.all(12),
+                cacheExtent: 50000,
                 itemCount: months.length,
                 itemBuilder: (context, index) {
                   final monthStart = months[index];
@@ -1441,10 +1472,8 @@ class _RosterViewState extends ConsumerState<RosterView> {
                     daysInMonth,
                     (i) => DateTime(monthStart.year, monthStart.month, i + 1),
                   );
-                  final isTodayMonth =
-                      _isSameMonth(monthStart, DateTime.now());
                   return Card(
-                    key: isTodayMonth ? _todayMonthKey : null,
+                    key: _getMonthCardKey(monthStart),
                     margin: const EdgeInsets.only(bottom: 16),
                     child: Padding(
                       padding: const EdgeInsets.all(12),
@@ -1554,7 +1583,8 @@ class _RosterViewState extends ConsumerState<RosterView> {
                                         );
                                       }),
                                     ],
-                                    rows: staff.map((personName) {
+                                    rows: staffMembers.map((staffMember) {
+                                      final personName = staffMember.name;
                                       final isSelected = _selectedStaffName == personName;
                                       return DataRow(
                                         color: WidgetStateProperty.resolveWith(
@@ -1567,13 +1597,31 @@ class _RosterViewState extends ConsumerState<RosterView> {
                                         ),
                                         cells: [
                                           ...days.map((day) {
-                                            final shift = roster.getShiftForDate(personName, day);
-                                            final isToday = _isSameDay(day, DateTime.now());
-                                            final shiftColor = _shiftColors[shift.toUpperCase()] ?? Colors.grey;
+                                            final isToday =
+                                                _isSameDay(day, DateTime.now());
+                                            final unavailable = roster
+                                                .isStaffUnavailableOnDate(staffMember, day);
+                                            final vacant = roster
+                                                    .isStaffVacantOnDate(staffMember, day) &&
+                                                staffMember.employmentType == 'permanent';
+                                            final preStart = staffMember.startDate != null &&
+                                                day.isBefore(DateTime(
+                                                    staffMember.startDate!.year,
+                                                    staffMember.startDate!.month,
+                                                    staffMember.startDate!.day));
+                                            final shift = (vacant || preStart)
+                                                ? roster.getPatternShiftForDate(
+                                                    personName, day)
+                                                : roster.getShiftForDate(personName, day);
+                                            final shiftColor =
+                                                _shiftColors[shift.toUpperCase()] ??
+                                                    Colors.grey;
                                             final holiday = holidayMap[_dateKey(day)];
                                             final events = eventMap[_dateKey(day)] ?? [];
-                                            final observances = observanceMap[_dateKey(day)] ?? [];
-                                            final sportsEvents = sportsMap[_dateKey(day)] ?? [];
+                                            final observances =
+                                                observanceMap[_dateKey(day)] ?? [];
+                                            final sportsEvents =
+                                                sportsMap[_dateKey(day)] ?? [];
                                             final hasOverlayCell = holiday != null ||
                                                 events.isNotEmpty ||
                                                 observances.isNotEmpty ||
@@ -1597,7 +1645,10 @@ class _RosterViewState extends ConsumerState<RosterView> {
                                                   height: _dayCellHeightMonth,
                                                   alignment: Alignment.center,
                                                   decoration: BoxDecoration(
-                                                    color: shiftColor.withOpacity(0.15),
+                                                    color: shiftColor.withOpacity(
+                                                        (vacant || unavailable || preStart)
+                                                            ? 0.08
+                                                            : 0.15),
                                                     border: Border.all(
                                                       color: shiftColor,
                                                       width: 1.5,
@@ -1619,13 +1670,49 @@ class _RosterViewState extends ConsumerState<RosterView> {
                                                   child: Stack(
                                                     children: [
                                                       Center(
-                                                        child: Text(
-                                                          shift,
-                                                          style: TextStyle(
-                                                            fontWeight: FontWeight.bold,
-                                                            color: shiftColor,
-                                                            fontSize: 11,
-                                                          ),
+                                                        child: Column(
+                                                          mainAxisAlignment:
+                                                              MainAxisAlignment.center,
+                                                          children: [
+                                                            Text(
+                                                              shift,
+                                                              style: TextStyle(
+                                                                fontWeight: FontWeight.bold,
+                                                                color: (vacant ||
+                                                                        unavailable ||
+                                                                        preStart)
+                                                                    ? Colors.grey
+                                                                    : shiftColor,
+                                                                fontSize: 11,
+                                                              ),
+                                                            ),
+                                                            if (vacant)
+                                                              Text(
+                                                                'Vacant',
+                                                                style: TextStyle(
+                                                                  fontSize: 9,
+                                                                  color: Colors.grey[600],
+                                                                ),
+                                                              )
+                                                            else if (unavailable)
+                                                              Text(
+                                                            _formatLeaveLabel(
+                                                                staffMember
+                                                                    .leaveType),
+                                                                style: TextStyle(
+                                                                  fontSize: 9,
+                                                                  color: Colors.grey[600],
+                                                                ),
+                                                              )
+                                                            else if (preStart)
+                                                              Text(
+                                                                'Not started',
+                                                                style: TextStyle(
+                                                                  fontSize: 9,
+                                                                  color: Colors.grey[600],
+                                                                ),
+                                                              ),
+                                                          ],
                                                         ),
                                                       ),
                                                       // Event lines appear only in the date header.
@@ -1644,6 +1731,383 @@ class _RosterViewState extends ConsumerState<RosterView> {
                             ],
                           ),
                         ],
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildMonthOverviewHorizontal(
+    BuildContext context,
+    RosterNotifier roster,
+    models.AppSettings settings,
+  ) {
+    final months = _buildMonthList(_currentMonthAnchor);
+    final start = months.first;
+    final end = DateTime(months.last.year, months.last.month + 1, 0);
+    final staffMembers = roster.getStaffForRange(start, end);
+    final staff = staffMembers.map((s) => s.name).toList();
+    final monthKey =
+        '${_monthKey(start)}-${_monthKey(end)}-${settings.showHolidayOverlay}-${settings.showObservanceOverlay}-${settings.showSportsOverlay}-${settings.holidayCountryCode}-${settings.additionalHolidayCountries.join(',')}-${settings.holidayTypes.join(',')}-${settings.observanceTypes.join(',')}-${settings.sportsLeagueIds.join(',')}-${settings.calendarificApiKey.isNotEmpty}-${settings.sportsApiKey.isNotEmpty}';
+    if (_monthOverlayKey != monthKey) {
+      _monthOverlayKey = monthKey;
+      _monthOverlayFuture = _loadOverlayBundleForRange(settings, start, end);
+    }
+    return FutureBuilder<_OverlayBundle>(
+      future: _monthOverlayFuture,
+      builder: (context, snapshot) {
+        final bundle = snapshot.data ??
+            const _OverlayBundle(
+              holidayMap: {},
+              observanceMap: {},
+              sportsMap: {},
+            );
+        final holidayMap = bundle.holidayMap;
+        final observanceMap = bundle.observanceMap;
+        final sportsMap = bundle.sportsMap;
+        final eventMap = _buildEventMap(roster, start, end);
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          return const Center(child: CircularProgressIndicator());
+        }
+        return GestureDetector(
+          onScaleStart: (details) {
+            _scaleStart = _cellScale;
+          },
+          onScaleUpdate: (details) {
+            if (details.scale == 1.0) return;
+            setState(() {
+              _cellScale =
+                  (_scaleStart * details.scale).clamp(0.45, 1.3).toDouble();
+            });
+          },
+          child: Scrollbar(
+            controller: _monthScrollController,
+            child: NotificationListener<ScrollNotification>(
+              onNotification: (notification) {
+                if (notification is ScrollUpdateNotification) {
+                  _markScrolledAway();
+                  if (_isMonthLike) {
+                    _monthAutoSnapEnabled = false;
+                  }
+                }
+                return false;
+              },
+              child: ListView.builder(
+                controller: _monthScrollController,
+                scrollDirection: Axis.horizontal,
+                padding: const EdgeInsets.all(12),
+                cacheExtent: 50000,
+                itemCount: months.length,
+                itemBuilder: (context, index) {
+                  final monthStart = months[index];
+                  final daysInMonth =
+                      DateTime(monthStart.year, monthStart.month + 1, 0).day;
+                  final days = List.generate(
+                    daysInMonth,
+                    (i) => DateTime(monthStart.year, monthStart.month, i + 1),
+                  );
+                  return SizedBox(
+                    width: MediaQuery.of(context).size.width * 0.92,
+                    child: Card(
+                      key: _getMonthCardKey(monthStart),
+                      margin: const EdgeInsets.only(right: 16),
+                      child: Padding(
+                        padding: const EdgeInsets.all(12),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              DateFormat('MMMM yyyy').format(monthStart),
+                              style: Theme.of(context)
+                                  .textTheme
+                                  .titleMedium
+                                  ?.copyWith(
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                            ),
+                            const SizedBox(height: 12),
+                            SizedBox(
+                              height:
+                                  MediaQuery.of(context).size.height * 0.68,
+                              child: Scrollbar(
+                                controller:
+                                    _getMonthVerticalController(monthStart),
+                                thumbVisibility: true,
+                                child: SingleChildScrollView(
+                                  controller:
+                                      _getMonthVerticalController(monthStart),
+                                  child: Row(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                _buildStaffColumn(
+                                  context,
+                                  roster,
+                                  staff,
+                                  roster.readOnly,
+                                ),
+                                Expanded(
+                                  child: SingleChildScrollView(
+                                    key: PageStorageKey(
+                                      'month-scroll-${_monthKey(monthStart)}',
+                                    ),
+                                    controller:
+                                        _getMonthScrollController(monthStart),
+                                    scrollDirection: Axis.horizontal,
+                                    child: DataTable(
+                                      showCheckboxColumn: false,
+                                      headingRowHeight: _headerHeight,
+                                      dataRowMinHeight: _rowHeight,
+                                      dataRowMaxHeight: _rowHeight,
+                                      headingRowColor:
+                                          WidgetStateProperty.resolveWith(
+                                        (states) => Theme.of(context)
+                                            .colorScheme
+                                            .primaryContainer
+                                            .withOpacity(0.3),
+                                      ),
+                                      border: TableBorder.all(
+                                        color: Theme.of(context).dividerColor,
+                                        width: 1,
+                                      ),
+                                      columns: [
+                                        ...days.map((day) {
+                                          final isToday =
+                                              _isSameDay(day, DateTime.now());
+                                          final holiday =
+                                              holidayMap[_dateKey(day)];
+                                          final dayEvents =
+                                              eventMap[_dateKey(day)] ?? [];
+                                          final obs =
+                                              observanceMap[_dateKey(day)] ?? [];
+                                          final sports =
+                                              sportsMap[_dateKey(day)] ?? [];
+                                          final hasOverlay = holiday != null ||
+                                              dayEvents.isNotEmpty ||
+                                              obs.isNotEmpty ||
+                                              sports.isNotEmpty;
+                                          return DataColumn(
+                                            label: InkWell(
+                                              onTap: hasOverlay
+                                                  ? () => _showOverlaySummary(
+                                                        day,
+                                                        holiday: holiday,
+                                                        observances: obs,
+                                                        sportsEvents: sports,
+                                                      )
+                                                  : null,
+                                              child: SizedBox(
+                                                width: _dayCellWidthMonth,
+                                                child: Column(
+                                                  mainAxisAlignment:
+                                                      MainAxisAlignment.center,
+                                                  children: [
+                                                    Text(
+                                                      DateFormat('E').format(day),
+                                                      style: GoogleFonts.inter(
+                                                        fontSize: 10,
+                                                        fontWeight:
+                                                            FontWeight.bold,
+                                                        color: isToday
+                                                            ? Theme.of(context)
+                                                                .colorScheme
+                                                                .primary
+                                                            : Theme.of(context)
+                                                                .colorScheme
+                                                                .onSurfaceVariant,
+                                                      ),
+                                                    ),
+                                                    Text(
+                                                      DateFormat('d').format(day),
+                                                      style: GoogleFonts.inter(
+                                                        fontSize: 11,
+                                                        color: isToday
+                                                            ? Theme.of(context)
+                                                                .colorScheme
+                                                                .primary
+                                                            : Theme.of(context)
+                                                                .colorScheme
+                                                                .onSurfaceVariant,
+                                                      ),
+                                                    ),
+                                                    if (hasOverlay) ...[
+                                                      const SizedBox(height: 2),
+                                                      _buildEventLine(
+                                                        context,
+                                                        holiday: holiday,
+                                                        events: dayEvents,
+                                                        observances: obs,
+                                                        sportsEvents: sports,
+                                                      ),
+                                                    ],
+                                                  ],
+                                                ),
+                                              ),
+                                            ),
+                                          );
+                                        }),
+                                      ],
+                                      rows: staffMembers.map((staffMember) {
+                                        final personName = staffMember.name;
+                                        final isSelected =
+                                            _selectedStaffName == personName;
+                                        return DataRow(
+                                          color: WidgetStateProperty.resolveWith(
+                                            (states) => isSelected
+                                                ? Theme.of(context)
+                                                    .colorScheme
+                                                    .primaryContainer
+                                                    .withOpacity(0.35)
+                                                : null,
+                                          ),
+                                          cells: [
+                                            ...days.map((day) {
+                                              final isToday =
+                                                  _isSameDay(day, DateTime.now());
+                                              final unavailable = roster
+                                                  .isStaffUnavailableOnDate(
+                                                      staffMember, day);
+                                              final vacant = roster
+                                                      .isStaffVacantOnDate(
+                                                          staffMember, day) &&
+                                                  staffMember.employmentType ==
+                                                      'permanent';
+                                              final preStart =
+                                                  staffMember.startDate != null &&
+                                                      day.isBefore(DateTime(
+                                                          staffMember
+                                                              .startDate!.year,
+                                                          staffMember
+                                                              .startDate!.month,
+                                                          staffMember
+                                                              .startDate!.day));
+                                              final shift = (vacant || preStart)
+                                                  ? roster.getPatternShiftForDate(
+                                                      personName, day)
+                                                  : roster.getShiftForDate(
+                                                      personName, day);
+                                              final shiftColor =
+                                                  _shiftColors[shift.toUpperCase()] ??
+                                                      Colors.grey;
+                                              return DataCell(
+                                                InkWell(
+                                                  onTap: () {
+                                                    _setFocusedDate(day);
+                                                    if (roster.readOnly) {
+                                                      _showDayDetails(
+                                                        personName,
+                                                        day,
+                                                        readOnly: true,
+                                                      );
+                                                    } else {
+                                                      _showShiftOptions(
+                                                          context, personName, day);
+                                                    }
+                                                  },
+                                                  child: Container(
+                                                    width: _dayCellWidthMonth,
+                                                    height: _dayCellHeightMonth,
+                                                    alignment: Alignment.center,
+                                                    decoration: BoxDecoration(
+                                                      color: shiftColor
+                                                          .withOpacity(
+                                                              (vacant ||
+                                                                      unavailable ||
+                                                                      preStart)
+                                                                  ? 0.08
+                                                                  : 0.15),
+                                                      border: Border.all(
+                                                        color: shiftColor,
+                                                        width: 1.5,
+                                                      ),
+                                                      borderRadius:
+                                                          BorderRadius.circular(6),
+                                                      boxShadow: isToday
+                                                          ? [
+                                                              BoxShadow(
+                                                                color: Theme.of(
+                                                                        context)
+                                                                    .colorScheme
+                                                                    .primary
+                                                                    .withOpacity(
+                                                                        0.35),
+                                                                blurRadius: 6,
+                                                                spreadRadius: 1,
+                                                              ),
+                                                            ]
+                                                          : null,
+                                                    ),
+                                                    child: Column(
+                                                      mainAxisAlignment:
+                                                          MainAxisAlignment.center,
+                                                      children: [
+                                                        Text(
+                                                          shift,
+                                                          style: TextStyle(
+                                                            fontWeight:
+                                                                FontWeight.bold,
+                                                            color: (vacant ||
+                                                                    unavailable ||
+                                                                    preStart)
+                                                                ? Colors.grey
+                                                                : shiftColor,
+                                                            fontSize: 11,
+                                                          ),
+                                                        ),
+                                                        if (vacant)
+                                                          Text(
+                                                            'Vacant',
+                                                            style: TextStyle(
+                                                              fontSize: 9,
+                                                              color:
+                                                                  Colors.grey[600],
+                                                            ),
+                                                          )
+                                                        else if (unavailable)
+                                                          Text(
+                                                            _formatLeaveLabel(
+                                                                staffMember
+                                                                    .leaveType),
+                                                            style: TextStyle(
+                                                              fontSize: 9,
+                                                              color:
+                                                                  Colors.grey[600],
+                                                            ),
+                                                          )
+                                                        else if (preStart)
+                                                          Text(
+                                                            'Not started',
+                                                            style: TextStyle(
+                                                              fontSize: 9,
+                                                              color:
+                                                                  Colors.grey[600],
+                                                            ),
+                                                          ),
+                                                      ],
+                                                    ),
+                                                  ),
+                                                ),
+                                              );
+                                            }),
+                                          ],
+                                        );
+                                      }).toList(),
+                                    ),
+                                  ),
+                                ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
                       ),
                     ),
                   );
@@ -1735,6 +2199,25 @@ class _RosterViewState extends ConsumerState<RosterView> {
                       color: staffMember.isActive ? Colors.green : Colors.grey,
                     ),
                     const SizedBox(width: 8),
+                    if (staffMember.employmentType == 'temporary') ...[
+                      Container(
+                        padding:
+                            const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                        decoration: BoxDecoration(
+                          color: Colors.orange.withOpacity(0.15),
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: Text(
+                          'Temp',
+                          style: GoogleFonts.inter(
+                            fontSize: 9,
+                            fontWeight: FontWeight.w600,
+                            color: Colors.orange[800],
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                    ],
                     if (useCompactNames)
                       Container(
                         width: 22,
@@ -1882,126 +2365,61 @@ class _RosterViewState extends ConsumerState<RosterView> {
     );
   }
 
-  Widget _buildWeekTimeline(
+  Widget _buildRibbonCell(
     BuildContext context,
     RosterNotifier roster,
-    models.AppSettings settings,
-    bool isCompactLayout,
+    String personName,
+    DateTime date,
   ) {
-    return PageView.builder(
-      controller: _weekPageController,
-      onPageChanged: _onWeekPageChanged,
-      itemBuilder: (context, index) {
-        final weekStart = _weekStartForPage(index);
-        final eventMap = _buildEventMap(
-          roster,
-          weekStart,
-          weekStart.add(const Duration(days: 6)),
-        );
-          final overlayEnabled = settings.showHolidayOverlay ||
-              settings.showObservanceOverlay ||
-              settings.showSportsOverlay;
-          if (!overlayEnabled) {
-            return isCompactLayout
-                ? _buildRosterCards(
-                    context,
-                    roster,
-                    settings,
-                    const {},
-                    const {},
-                    const {},
-                    eventMap,
-                    weekStart,
-                  )
-                : GestureDetector(
-                    onScaleStart: (details) {
-                    _scaleStart = _cellScale;
-                  },
-                  onScaleUpdate: (details) {
-                    if (details.scale == 1.0) return;
-                    setState(() {
-                      _cellScale = (_scaleStart * details.scale)
-                          .clamp(0.45, 1.3)
-                          .toDouble();
-                    });
-                  },
-                      child: SingleChildScrollView(
-                        child: _buildRosterTable(
-                          context,
-                          roster,
-                          settings,
-                          const {},
-                          const {},
-                          const {},
-                          eventMap,
-                          weekStart,
-                          true,
-                        ),
-                      ),
-                  );
-          }
-
-          return FutureBuilder<_OverlayBundle>(
-            future: _loadOverlayBundleForRange(
-              settings,
-              weekStart,
-              weekStart.add(const Duration(days: 6)),
-            ),
-            builder: (context, snapshot) {
-              final bundle = snapshot.data ??
-                  const _OverlayBundle(
-                    holidayMap: {},
-                    observanceMap: {},
-                    sportsMap: {},
-                  );
-              final holidayMap = bundle.holidayMap;
-              final observanceMap = bundle.observanceMap;
-              final sportsMap = bundle.sportsMap;
-              if (snapshot.connectionState == ConnectionState.waiting) {
-                return const Center(
-                  child: CircularProgressIndicator(),
-                );
-              }
-              return isCompactLayout
-                ? _buildRosterCards(
-                    context,
-                    roster,
-                    settings,
-                    holidayMap,
-                    observanceMap,
-                    sportsMap,
-                    eventMap,
-                    weekStart,
-                  )
-                : GestureDetector(
-                    onScaleStart: (details) {
-                      _scaleStart = _cellScale;
-                    },
-                    onScaleUpdate: (details) {
-                      if (details.scale == 1.0) return;
-                      setState(() {
-                        _cellScale = (_scaleStart * details.scale)
-                            .clamp(0.45, 1.3)
-                            .toDouble();
-                      });
-                    },
-                      child: SingleChildScrollView(
-                        child: _buildRosterTable(
-                          context,
-                          roster,
-                          settings,
-                          holidayMap,
-                          observanceMap,
-                          sportsMap,
-                          eventMap,
-                          weekStart,
-                          true,
-                        ),
-                      ),
-                    );
-            },
-          );
+    final isReadOnly = roster.readOnly;
+    final shift = roster.getShiftForDate(personName, date);
+    final shiftColor = _shiftColors[shift.toUpperCase()] ?? Colors.grey;
+    return InkWell(
+      onTap: () {
+        _setFocusedDate(date);
+        if (isReadOnly) {
+          _showDayDetails(personName, date, readOnly: true);
+        } else {
+          _showShiftOptions(context, personName, date);
+        }
       },
+      child: Container(
+        width: _dayCellWidthWeek,
+        height: _rowHeight,
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: shiftColor.withOpacity(0.15),
+          border: Border(
+            left: BorderSide(
+              color: _isSameDay(date, DateTime.now())
+                  ? Theme.of(context).colorScheme.primary
+                  : Colors.transparent,
+              width: _isSameDay(date, DateTime.now()) ? 2 : 0,
+            ),
+            right: BorderSide(color: Theme.of(context).dividerColor),
+            bottom: BorderSide(color: Theme.of(context).dividerColor),
+          ),
+        ),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Text(
+              shift,
+              style: TextStyle(
+                fontWeight: FontWeight.bold,
+                color: shiftColor,
+                fontSize: 14,
+              ),
+            ),
+            if (shift == 'AL')
+              Icon(
+                Icons.beach_access_rounded,
+                size: 12,
+                color: shiftColor,
+              ),
+          ],
+        ),
+      ),
     );
   }
 
@@ -2010,10 +2428,7 @@ class _RosterViewState extends ConsumerState<RosterView> {
     final today = _startOfDay(DateTime.now());
     final focus = _focusedDate ?? today;
     final isToday = _isSameDay(focus, today);
-    final subtitle = _showMonthOverview
-        ? DateFormat('EEEE, MMM d, yyyy').format(focus)
-        : '${DateFormat('EEE, MMM d').format(_currentWeekStart)}'
-            ' - ${DateFormat('EEE, MMM d').format(_currentWeekStart.add(const Duration(days: 6)))}';
+    final subtitle = DateFormat('EEEE, MMM d, yyyy').format(focus);
 
     return AnimatedContainer(
       duration: const Duration(milliseconds: 250),
@@ -2064,44 +2479,13 @@ class _RosterViewState extends ConsumerState<RosterView> {
           ),
           const SizedBox(width: 8),
           IconButton(
-            tooltip: settings.showHolidayOverlay
-                ? 'Hide holiday overlay'
-                : 'Show holiday overlay',
-            onPressed: () {
-              ref.read(settingsProvider.notifier).updateSettings(
-                    settings.copyWith(
-                      showHolidayOverlay: !settings.showHolidayOverlay,
-                    ),
-                  );
-            },
-            icon: Icon(
-              Icons.event_available,
-              color: settings.showHolidayOverlay
-                  ? Theme.of(context).colorScheme.primary
-                  : Theme.of(context).colorScheme.onSurfaceVariant,
-            ),
+            tooltip: 'Jump to year',
+            onPressed: () => _showYearPicker(context),
+            icon: const Icon(Icons.event),
           ),
-            IconButton(
-              tooltip: settings.showWeatherOverlay
-                  ? 'Hide weather overlay'
-                  : 'Show weather overlay',
-              onPressed: () {
-              ref.read(settingsProvider.notifier).updateSettings(
-                    settings.copyWith(
-                      showWeatherOverlay: !settings.showWeatherOverlay,
-                    ),
-                  );
-            },
-              icon: Icon(
-                Icons.cloud_rounded,
-                color: settings.showWeatherOverlay
-                    ? Theme.of(context).colorScheme.primary
-                    : Theme.of(context).colorScheme.onSurfaceVariant,
-              ),
-            ),
-            FilledButton.tonalIcon(
-              onPressed: _smartHome,
-              icon: const Icon(Icons.home_rounded, size: 16),
+          FilledButton.tonalIcon(
+            onPressed: _smartHome,
+            icon: const Icon(Icons.home_rounded, size: 16),
             label: const Text('Today'),
           ),
         ],
@@ -2263,7 +2647,7 @@ class _RosterViewState extends ConsumerState<RosterView> {
     final shiftTypes = [
       ...roster.getShiftTypes(),
       'OFF',
-      'L',
+      'AL',
     ].toSet().toList();
     if (shiftTypes.isEmpty) return;
     final currentShift = roster.getShiftForDate(personName, date);
@@ -2333,6 +2717,15 @@ class _RosterViewState extends ConsumerState<RosterView> {
                     _showAddEventForDate(date);
               },
             ),
+            ListTile(
+              leading: const Icon(Icons.swap_horiz_rounded),
+              title: const Text('Quick Swap'),
+              subtitle: const Text('Swap this shift with another staff member'),
+              onTap: () {
+                Navigator.pop(context);
+                _showQuickSwapDialog(context, personName, date);
+              },
+            ),
               ListTile(
                 leading: const Icon(Icons.event_available_rounded),
                 title: const Text('View Events on this date'),
@@ -2379,6 +2772,129 @@ class _RosterViewState extends ConsumerState<RosterView> {
         ),
       ),
     );
+  }
+
+  Future<void> _showQuickSwapDialog(
+    BuildContext context,
+    String fromPerson,
+    DateTime date,
+  ) async {
+    final roster = ref.read(rosterProvider);
+    if (roster.readOnly) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Read-only roster cannot be edited.')),
+      );
+      return;
+    }
+    final staff = roster.staffMembers
+        .map((s) => s.name)
+        .where((name) => name != fromPerson)
+        .toList();
+    if (staff.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No other staff available to swap.')),
+      );
+      return;
+    }
+    final preferred = <String>[];
+    final others = <String>[];
+    for (final name in staff) {
+      final shift = roster.getShiftForDate(name, date);
+      if (shift == 'OFF' || shift == 'R') {
+        preferred.add(name);
+      } else {
+        others.add(name);
+      }
+    }
+    final options = [...preferred, ...others];
+    String toPerson = options.first;
+    bool recordDebt = true;
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Quick Swap'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              '${DateFormat('EEE, MMM d').format(date)} · $fromPerson',
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+            const SizedBox(height: 12),
+            DropdownButtonFormField<String>(
+              value: toPerson,
+              items: options
+                  .map(
+                    (name) => DropdownMenuItem(
+                      value: name,
+                      child: Text(
+                        '$name (${roster.getShiftForDate(name, date)})',
+                      ),
+                    ),
+                  )
+                  .toList(),
+              onChanged: (value) {
+                if (value != null) {
+                  toPerson = value;
+                }
+              },
+              decoration: const InputDecoration(
+                labelText: 'Swap with',
+              ),
+            ),
+            const SizedBox(height: 8),
+            CheckboxListTile(
+              contentPadding: EdgeInsets.zero,
+              value: recordDebt,
+              onChanged: (value) {
+                recordDebt = value ?? true;
+              },
+              title: const Text('Record swap debt'),
+              subtitle: const Text('Track owed shift if needed'),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Apply Swap'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true) return;
+    final applied = roster.applySwapForDate(
+      fromPerson: fromPerson,
+      toPerson: toPerson,
+      date: date,
+      reason: 'Quick swap',
+    );
+    if (applied == true && recordDebt) {
+      roster.addSwapDebt(
+        fromPerson: fromPerson,
+        toPerson: toPerson,
+        daysOwed: 1,
+        reason: 'Quick swap',
+      );
+    }
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            applied == true
+                ? 'Swap applied for $fromPerson and $toPerson'
+                : 'Swap failed. Check shifts for both staff.',
+          ),
+        ),
+      );
+    }
   }
 
   Future<void> _showAddOverrideDialog(String personName, DateTime date) async {
@@ -2980,6 +3496,51 @@ class _RosterViewState extends ConsumerState<RosterView> {
     );
   }
 
+  Future<void> _showYearPicker(BuildContext context) async {
+    final now = DateTime.now();
+    int selectedYear = (_focusedDate ?? now).year;
+    final result = await showDialog<int>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Jump to year'),
+        content: SizedBox(
+          width: 300,
+          height: 320,
+          child: YearPicker(
+            firstDate: DateTime(now.year - 20),
+            lastDate: DateTime(now.year + 20),
+            selectedDate: DateTime(selectedYear),
+            onChanged: (date) {
+              Navigator.pop(context, date.year);
+            },
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+        ],
+      ),
+    );
+    if (result == null) return;
+    final target = DateTime(result, (_focusedDate ?? now).month, 1);
+    setState(() {
+      _currentMonthAnchor = DateTime(target.year, target.month);
+      _focusedDate = target;
+      _monthAutoSnapEnabled = false;
+      _initialMonthSnapDone = true;
+    });
+    await Future.delayed(const Duration(milliseconds: 100));
+    if (_monthScrollController.hasClients) {
+      _monthScrollController.jumpTo(0);
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _scrollToMonth(target, alignment: 0.1);
+      _scrollToTodayDayInMonth(target);
+    });
+  }
+
   Widget _buildRosterTable(
     BuildContext context,
     RosterNotifier roster,
@@ -2992,7 +3553,11 @@ class _RosterViewState extends ConsumerState<RosterView> {
     bool timelineMode,
   ) {
     final isReadOnly = roster.readOnly;
-    final staff = roster.getActiveStaffNames();
+    final staffMembers = roster.getStaffForRange(
+      weekStart,
+      weekStart.add(const Duration(days: 6)),
+    );
+    final staff = staffMembers.map((s) => s.name).toList();
     final days = List.generate(7, (i) => weekStart.add(Duration(days: i)));
 
     return Row(
@@ -3082,7 +3647,8 @@ class _RosterViewState extends ConsumerState<RosterView> {
                   );
                 }),
               ],
-              rows: staff.map((personName) {
+              rows: staffMembers.map((staffMember) {
+                final personName = staffMember.name;
                 final isSelected = _selectedStaffName == personName;
                 return DataRow(
                   color: WidgetStateProperty.resolveWith(
@@ -3095,7 +3661,20 @@ class _RosterViewState extends ConsumerState<RosterView> {
                   ),
                   cells: [
                     ...days.map((day) {
-                      final shift = roster.getShiftForDate(personName, day);
+                      final employed =
+                          roster.isStaffEmployedOnDate(staffMember, day);
+                      final unavailable =
+                          roster.isStaffUnavailableOnDate(staffMember, day);
+                      final vacant = roster.isStaffVacantOnDate(staffMember, day) &&
+                          staffMember.employmentType == 'permanent';
+                      final preStart = staffMember.startDate != null &&
+                          day.isBefore(DateTime(
+                              staffMember.startDate!.year,
+                              staffMember.startDate!.month,
+                              staffMember.startDate!.day));
+                      final shift = (vacant || preStart)
+                          ? roster.getPatternShiftForDate(personName, day)
+                          : roster.getShiftForDate(personName, day);
                       final shiftColor =
                           _shiftColors[shift.toUpperCase()] ?? Colors.grey;
                       final holiday = holidayMap[_dateKey(day)];
@@ -3125,7 +3704,10 @@ class _RosterViewState extends ConsumerState<RosterView> {
                             height: _dayCellHeightWeek,
                             alignment: Alignment.center,
                             decoration: BoxDecoration(
-                              color: shiftColor.withOpacity(0.15),
+                              color: shiftColor.withOpacity(
+                                  (vacant || unavailable || preStart)
+                                      ? 0.08
+                                      : 0.15),
                               border: Border.all(
                                 color: shiftColor,
                                 width: 2,
@@ -3142,11 +3724,38 @@ class _RosterViewState extends ConsumerState<RosterView> {
                                         shift,
                                         style: TextStyle(
                                           fontWeight: FontWeight.bold,
-                                          color: shiftColor,
+                                          color: (vacant || unavailable || preStart)
+                                              ? Colors.grey
+                                              : shiftColor,
                                           fontSize: 14,
                                         ),
                                       ),
-                                      if (shift == 'L')
+                                      if (vacant)
+                                        Text(
+                                          'Vacant',
+                                          style: TextStyle(
+                                            fontSize: 9,
+                                            color: Colors.grey[600],
+                                          ),
+                                        )
+                                      else if (unavailable)
+                                        Text(
+                                          _formatLeaveLabel(
+                                              staffMember.leaveType),
+                                          style: TextStyle(
+                                            fontSize: 9,
+                                            color: Colors.grey[600],
+                                          ),
+                                        )
+                                      else if (preStart)
+                                        Text(
+                                          'Not started',
+                                          style: TextStyle(
+                                            fontSize: 9,
+                                            color: Colors.grey[600],
+                                          ),
+                                        ),
+                                      if (shift == 'AL')
                                         Icon(
                                           Icons.beach_access_rounded,
                                           size: 12,
@@ -3264,3 +3873,4 @@ class _RosterViewState extends ConsumerState<RosterView> {
     );
   }
 }
+

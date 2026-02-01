@@ -74,6 +74,31 @@ class CountryService {
         .whereType<CountryInfo>()
         .toList()
       ..sort((a, b) => a.name.compareTo(b.name));
+    final hasIndia = countries.any((c) => c.code.toUpperCase() == 'IN');
+    if (!hasIndia) {
+      countries.add(const CountryInfo(
+        code: 'IN',
+        name: 'India',
+        region: 'Asia',
+        flag: '🇮🇳',
+        timezones: ['UTC+05:30'],
+        lat: 20.5937,
+        lon: 78.9629,
+      ));
+    }
+    final hasTrinidad = countries.any((c) => c.code.toUpperCase() == 'TT');
+    if (!hasTrinidad) {
+      countries.add(const CountryInfo(
+        code: 'TT',
+        name: 'Trinidad and Tobago',
+        region: 'Americas',
+        flag: '🇹🇹',
+        timezones: ['UTC-04:00'],
+        lat: 10.6918,
+        lon: -61.2225,
+      ));
+    }
+    countries.sort((a, b) => a.name.compareTo(b.name));
     _cache = countries;
     _lastFetch = now;
     return countries;

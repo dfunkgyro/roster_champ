@@ -13,6 +13,7 @@ import 'operations_view.dart';
 import 'roster_generator_view.dart';
 import 'activity_log_view.dart';
 import 'system_view.dart';
+import 'analytics_view.dart';
 import 'screens/staff_management_screen.dart';
 import 'screens/pattern_editor_screen.dart';
 import 'screens/login_screen.dart';
@@ -48,7 +49,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 8, vsync: this);
+    _tabController = TabController(length: 10, vsync: this);
     _tabController.addListener(() {
       if (_tabController.indexIsChanging) {
         setState(() {
@@ -88,7 +89,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
             ),
             const SizedBox(width: 8),
             const Text(
-              'Roster Champ Pro',
+              'Roster Champion',
               style: TextStyle(fontWeight: FontWeight.bold),
             ),
             if (widget.isGuestMode) ...[
@@ -133,43 +134,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
         ),
         actions: [
           // Connection status indicator removed in favor of activity log
-          // AI suggestions badge
-          Stack(
-            children: [
-              IconButton(
-                icon: const Icon(Icons.psychology_outlined),
-                onPressed: () {
-                  _tabController.animateTo(4);
-                },
-                tooltip: 'AI Suggestions',
-              ),
-              if (roster.aiSuggestions.where((s) => !s.isRead).isNotEmpty)
-                Positioned(
-                  right: 8,
-                  top: 8,
-                  child: Container(
-                    padding: const EdgeInsets.all(4),
-                    decoration: const BoxDecoration(
-                      color: Colors.red,
-                      shape: BoxShape.circle,
-                    ),
-                    constraints: const BoxConstraints(
-                      minWidth: 16,
-                      minHeight: 16,
-                    ),
-                    child: Text(
-                      '${roster.aiSuggestions.where((s) => !s.isRead).length}',
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 10,
-                        fontWeight: FontWeight.bold,
-                      ),
-                      textAlign: TextAlign.center,
-                    ),
-                  ),
-                ),
-            ],
-          ),
           if (widget.isGuestMode)
             TextButton.icon(
               onPressed: widget.onExitGuestMode,
@@ -245,11 +209,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
               ],
             ),
           IconButton(
-            icon: const Icon(Icons.search),
-            onPressed: _showCommandPalette,
-            tooltip: 'Command Palette',
-          ),
-          IconButton(
             icon: const Icon(Icons.account_circle_outlined),
             onPressed: _showAccountActions,
             tooltip: 'Account',
@@ -310,7 +269,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
                   await _logout();
                   break;
                 case 'account':
-                  _tabController.animateTo(5);
+                  _tabController.animateTo(6);
                   break;
                 case 'back_start':
                   widget.onExitGuestMode?.call();
@@ -481,27 +440,34 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
             isScrollable: true,
             tabs: const [
               Tab(icon: Icon(Icons.calendar_view_month_rounded), text: 'Roster'),
-              Tab(icon: Icon(Icons.bar_chart_rounded), text: 'Stats'),
-              Tab(icon: Icon(Icons.event_rounded), text: 'Events'),
-              Tab(icon: Icon(Icons.workspaces_rounded), text: 'Operations'),
               Tab(icon: Icon(Icons.psychology_rounded), text: 'AI Insights'),
-              Tab(icon: Icon(Icons.settings_rounded), text: 'Settings'),
-              Tab(icon: Icon(Icons.memory_rounded), text: 'System'),
+              Tab(icon: Icon(Icons.workspaces_rounded), text: 'Operations'),
+              Tab(icon: Icon(Icons.bar_chart_rounded), text: 'Stats'),
               Tab(icon: Icon(Icons.people_alt_rounded), text: 'Staff'),
+              Tab(icon: Icon(Icons.event_rounded), text: 'Events'),
+              Tab(icon: Icon(Icons.settings_rounded), text: 'Settings'),
+              Tab(icon: Icon(Icons.analytics_rounded), text: 'Analytics'),
+              Tab(icon: Icon(Icons.memory_rounded), text: 'System'),
+              Tab(icon: Icon(Icons.search_rounded), text: 'Commands'),
             ],
           ),
         ),
       body: TabBarView(
         controller: _tabController,
-        children: const [
-          RosterView(),
-          StatsView(),
-          EventsView(),
-          OperationsView(),
-          AiSuggestionsView(),
-          SettingsView(),
-          SystemView(),
-          StaffManagementScreen(),
+        children: [
+          const RosterView(),
+          const AiSuggestionsView(),
+          const OperationsView(),
+          const StatsView(),
+          const StaffManagementScreen(),
+          const EventsView(),
+          const SettingsView(),
+          const AnalyticsView(),
+          const SystemView(),
+          _CommandCenterView(
+            actions: _buildCommandActions(roster.readOnly),
+            onOpenPalette: _showCommandPalette,
+          ),
         ],
       ),
       floatingActionButton: null,
@@ -589,7 +555,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
     await showDialog(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Welcome to Roster Champ Pro'),
+        title: const Text('Welcome to Roster Champion'),
         content: const Text(
           'Quick start:\n'
           '1) Add staff and set preferences\n'
@@ -738,6 +704,48 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
   List<_CommandAction> _buildCommandActions(bool readOnly) {
     return [
       _CommandAction(
+        label: 'Open Roster',
+        icon: Icons.calendar_view_month_rounded,
+        keywords: const ['roster', 'calendar', 'schedule'],
+        onExecute: () => _tabController.animateTo(0),
+      ),
+      _CommandAction(
+        label: 'AI Insights',
+        icon: Icons.psychology_rounded,
+        keywords: const ['ai', 'insights', 'suggestions'],
+        onExecute: () => _tabController.animateTo(1),
+      ),
+      _CommandAction(
+        label: 'Open Operations',
+        icon: Icons.workspaces_rounded,
+        keywords: const ['operations', 'approvals', 'conflicts'],
+        onExecute: () => _tabController.animateTo(2),
+      ),
+      _CommandAction(
+        label: 'Open Stats',
+        icon: Icons.bar_chart_rounded,
+        keywords: const ['stats', 'kpi', 'metrics'],
+        onExecute: () => _tabController.animateTo(3),
+      ),
+      _CommandAction(
+        label: 'Open Staff',
+        icon: Icons.people_alt_rounded,
+        keywords: const ['staff', 'team', 'people'],
+        onExecute: () => _tabController.animateTo(4),
+      ),
+      _CommandAction(
+        label: 'Open Events',
+        icon: Icons.event_rounded,
+        keywords: const ['events', 'holiday', 'calendar'],
+        onExecute: () => _tabController.animateTo(5),
+      ),
+      _CommandAction(
+        label: 'Open Settings',
+        icon: Icons.settings_rounded,
+        keywords: const ['settings', 'preferences'],
+        onExecute: () => _tabController.animateTo(6),
+      ),
+      _CommandAction(
         label: 'Manage Staff',
         icon: Icons.people_alt_rounded,
         keywords: const ['staff', 'people', 'team'],
@@ -765,10 +773,35 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
         onExecute: _openActivityLog,
       ),
       _CommandAction(
+        label: 'Roster Sharing',
+        icon: Icons.folder_open_rounded,
+        keywords: const ['share', 'roster', 'access'],
+        onExecute: _openRosterSwitcher,
+        enabled: !widget.isGuestMode,
+      ),
+      _CommandAction(
+        label: 'Live Presence',
+        icon: Icons.groups,
+        keywords: const ['presence', 'collaborators', 'live'],
+        onExecute: _showPresenceList,
+      ),
+      _CommandAction(
+        label: 'Offline Queue',
+        icon: Icons.cloud_upload,
+        keywords: const ['offline', 'queue', 'pending'],
+        onExecute: _showOfflineQueue,
+      ),
+      _CommandAction(
+        label: 'Analytics',
+        icon: Icons.analytics_rounded,
+        keywords: const ['analytics', 'metrics', 'insights'],
+        onExecute: () => _tabController.animateTo(7),
+      ),
+      _CommandAction(
         label: 'System Status',
         icon: Icons.memory_rounded,
         keywords: const ['system', 'status', 'aws'],
-        onExecute: () => _tabController.animateTo(6),
+        onExecute: () => _tabController.animateTo(8),
       ),
       _CommandAction(
         label: 'Auto Roster Generator',
@@ -787,12 +820,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
         icon: Icons.event_rounded,
         keywords: const ['event', 'holiday'],
         onExecute: _showAddEventDialog,
-      ),
-      _CommandAction(
-        label: 'Open Operations',
-        icon: Icons.workspaces_rounded,
-        keywords: const ['operations', 'approvals', 'conflicts'],
-        onExecute: () => _tabController.animateTo(3),
       ),
       _CommandAction(
         label: 'Initialize Roster',
@@ -816,6 +843,25 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
         enabled: !widget.isGuestMode && !readOnly,
       ),
       _CommandAction(
+        label: 'Export Roster CSV',
+        icon: Icons.table_view_rounded,
+        keywords: const ['export', 'csv'],
+        onExecute: _exportRosterCsv,
+      ),
+      _CommandAction(
+        label: 'Export Calendar (ICS)',
+        icon: Icons.calendar_month_rounded,
+        keywords: const ['export', 'ics', 'calendar'],
+        onExecute: _exportCalendarIcs,
+      ),
+      _CommandAction(
+        label: 'Export to Cloud',
+        icon: Icons.cloud_upload_rounded,
+        keywords: const ['export', 'cloud'],
+        onExecute: _exportToCloud,
+        enabled: !widget.isGuestMode && !readOnly,
+      ),
+      _CommandAction(
         label: 'Export Data',
         icon: Icons.upload_rounded,
         keywords: const ['export', 'backup'],
@@ -826,6 +872,20 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
         icon: Icons.download_rounded,
         keywords: const ['import', 'restore'],
         onExecute: _importData,
+      ),
+      _CommandAction(
+        label: 'Account Settings',
+        icon: Icons.manage_accounts,
+        keywords: const ['account', 'profile'],
+        onExecute: () => _tabController.animateTo(6),
+        enabled: !widget.isGuestMode,
+      ),
+      _CommandAction(
+        label: 'Logout',
+        icon: Icons.logout_rounded,
+        keywords: const ['logout', 'sign out'],
+        onExecute: _logout,
+        enabled: !widget.isGuestMode,
       ),
       _CommandAction(
         label: 'Refresh AI Suggestions',
@@ -1127,7 +1187,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
     final shiftOptions = <String>{
       ...roster.getShiftTypes(),
       'OFF',
-      'L',
+      'AL',
     }.where((s) => s.trim().isNotEmpty).toList();
     shiftOptions.sort();
     String selectedShift = shiftOptions.isNotEmpty ? shiftOptions.first : 'D';
@@ -1539,7 +1599,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
         final end = _icsDate(date.add(const Duration(days: 1)));
         for (final staff in roster.staffMembers) {
           final shift = roster.getShiftForDate(staff.name, date);
-          if (shift == 'OFF' || shift == 'L') continue;
+          if (shift == 'OFF' || shift == 'AL') continue;
           buffer.writeln('BEGIN:VEVENT');
           buffer.writeln(
             'UID:${date.millisecondsSinceEpoch}_${staff.id}@rosterchamp',
@@ -1766,7 +1826,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
                 title: const Text('Account Settings'),
                 onTap: () {
                   Navigator.pop(context);
-                  _tabController.animateTo(5);
+                  _tabController.animateTo(6);
                 },
               ),
             if (!isGuest)
@@ -1850,4 +1910,82 @@ class _CommandAction {
     required this.onExecute,
     this.enabled = true,
   });
+}
+
+class _CommandCenterView extends StatefulWidget {
+  final List<_CommandAction> actions;
+  final VoidCallback onOpenPalette;
+
+  const _CommandCenterView({
+    required this.actions,
+    required this.onOpenPalette,
+  });
+
+  @override
+  State<_CommandCenterView> createState() => _CommandCenterViewState();
+}
+
+class _CommandCenterViewState extends State<_CommandCenterView> {
+  final TextEditingController _filterController = TextEditingController();
+
+  @override
+  void dispose() {
+    _filterController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final query = _filterController.text.trim().toLowerCase();
+    final actions = widget.actions.where((action) {
+      if (query.isEmpty) return true;
+      return action.label.toLowerCase().contains(query) ||
+          action.keywords.any((k) => k.contains(query));
+    }).toList();
+
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _filterController,
+                    decoration: const InputDecoration(
+                      labelText: 'Search commands',
+                      prefixIcon: Icon(Icons.search),
+                    ),
+                    onChanged: (_) => setState(() {}),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                FilledButton.icon(
+                  onPressed: widget.onOpenPalette,
+                  icon: const Icon(Icons.keyboard_command_key_rounded),
+                  label: const Text('Palette'),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            Expanded(
+              child: ListView.separated(
+                itemCount: actions.length,
+                separatorBuilder: (_, __) => const Divider(height: 1),
+                itemBuilder: (context, index) {
+                  final action = actions[index];
+                  return ListTile(
+                    leading: Icon(action.icon),
+                    title: Text(action.label),
+                    onTap: action.onExecute,
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 }

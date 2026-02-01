@@ -321,39 +321,116 @@ class _OperationsViewState extends ConsumerState<OperationsView>
           title: 'Swap Marketplace',
           onPrimary: () => _showSwapRequestDialog(context),
           primaryLabel: 'New Swap',
+          onSecondary: () => _showQuickSwapDialog(context),
+          secondaryLabel: 'Quick Swap',
         ),
         Expanded(
-          child: ListView.builder(
-            itemCount: roster.swapRequests.length,
-            itemBuilder: (context, index) {
-              final request = roster.swapRequests[index];
-              return ListTile(
-                leading: Icon(
-                  request.status == models.RequestStatus.approved
-                      ? Icons.check_circle
-                      : request.status == models.RequestStatus.denied
-                          ? Icons.cancel
-                          : Icons.swap_horiz,
-                ),
-                title: Text(
-                  '${request.fromPerson} → ${request.toPerson ?? 'Open'}',
-                ),
-                subtitle: Text(
-                  '${_formatDate(request.date)} ${request.shift ?? ''}',
-                ),
-                trailing: _buildDecisionButtons(
-                  context,
-                  onApprove: () => roster.respondSwapRequest(
-                    requestId: request.requestId,
-                    decision: models.RequestStatus.approved,
+          child: ListView(
+            children: [
+              ...roster.swapRequests.map((request) {
+                return ListTile(
+                  leading: Icon(
+                    request.status == models.RequestStatus.approved
+                        ? Icons.check_circle
+                        : request.status == models.RequestStatus.denied
+                            ? Icons.cancel
+                            : Icons.swap_horiz,
                   ),
-                  onDeny: () => roster.respondSwapRequest(
-                    requestId: request.requestId,
-                    decision: models.RequestStatus.denied,
+                  title: Text(
+                    '${request.fromPerson} -> ${request.toPerson ?? 'Open'}',
+                  ),
+                  subtitle: Text(
+                    '${_formatDate(request.date)} ${request.shift ?? ''}',
+                  ),
+                  trailing: _buildDecisionButtons(
+                    context,
+                    onApprove: () => roster.respondSwapRequest(
+                      requestId: request.requestId,
+                      decision: models.RequestStatus.approved,
+                    ),
+                    onDeny: () => roster.respondSwapRequest(
+                      requestId: request.requestId,
+                      decision: models.RequestStatus.denied,
+                    ),
+                  ),
+                );
+              }),
+
+              if (roster.regularSwaps.isNotEmpty) ...[
+                const Divider(),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  child: Text(
+                    'Regular Swaps',
+                    style: Theme.of(context).textTheme.titleMedium,
                   ),
                 ),
-              );
-            },
+                ...roster.regularSwaps.map((swap) {
+                  final endLabel = swap.endDate != null
+                      ? _formatDate(swap.endDate!)
+                      : 'Open';
+                  final weekLabel = swap.weekIndex != null
+                      ? 'Week ${swap.weekIndex! + 1}'
+                      : 'All weeks';
+                  return ListTile(
+                    leading: const Icon(Icons.repeat),
+                    title: Text('${swap.fromPerson} <-> ${swap.toPerson}'),
+                    subtitle: Text(
+                      '${swap.fromShift} <-> ${swap.toShift} | $weekLabel | ${_formatDate(swap.startDate)} to $endLabel',
+                    ),
+                    trailing: IconButton(
+                      icon: const Icon(Icons.delete_outline),
+                      tooltip: 'Cancel swap',
+                      onPressed: () => roster.removeRegularSwap(swap.id),
+                    ),
+                  );
+                }),
+              ],
+              if (roster.swapDebts.isNotEmpty) ...[
+                const Divider(),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  child: Text(
+                    'Swap Debts',
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                ),
+                ...roster.swapDebts.map((debt) {
+                  final outstanding = debt.daysOwed - debt.daysSettled;
+                  return ListTile(
+                    leading: Icon(
+                      debt.isResolved ? Icons.check_circle : Icons.schedule,
+                      color: debt.isResolved
+                          ? Colors.green
+                          : Theme.of(context).colorScheme.primary,
+                    ),
+                    title: Text(
+                      '${debt.fromPerson} owes ${debt.toPerson}',
+                    ),
+                    subtitle: Text(
+                      debt.isIgnored
+                          ? 'Ignored by volunteer'
+                          : 'Owed: ${debt.daysOwed} | Settled: ${debt.daysSettled} | Remaining: $outstanding',
+                    ),
+                    trailing: debt.isResolved
+                        ? const Icon(Icons.done)
+                        : TextButton(
+                            onPressed: () => _showDebtSettlementDialog(
+                              context,
+                              debt,
+                            ),
+                            child: Text(debt.isIgnored ? 'Settle' : 'Settle'),
+                          ),
+                    onLongPress: debt.isResolved
+                        ? null
+                        : () => _showIgnoreDebtDialog(context, debt),
+                    onTap: debt.isIgnored
+                        ? () => _showRestoreDebtDialog(context, debt)
+                        : null,
+                  );
+                }),
+              ],
+            ],
           ),
         ),
       ],
@@ -454,6 +531,8 @@ class _OperationsViewState extends ConsumerState<OperationsView>
     required String title,
     required VoidCallback onPrimary,
     required String primaryLabel,
+    VoidCallback? onSecondary,
+    String? secondaryLabel,
   }) {
     return Padding(
       padding: const EdgeInsets.all(12),
@@ -461,6 +540,14 @@ class _OperationsViewState extends ConsumerState<OperationsView>
         children: [
           Text(title, style: Theme.of(context).textTheme.titleMedium),
           const Spacer(),
+          if (onSecondary != null && secondaryLabel != null) ...[
+            OutlinedButton.icon(
+              onPressed: onSecondary,
+              icon: const Icon(Icons.swap_horiz),
+              label: Text(secondaryLabel),
+            ),
+            const SizedBox(width: 8),
+          ],
           FilledButton.icon(
             onPressed: onPrimary,
             icon: const Icon(Icons.add),
@@ -670,6 +757,338 @@ class _OperationsViewState extends ConsumerState<OperationsView>
         ],
       ),
     );
+  }
+
+  Future<void> _showQuickSwapDialog(BuildContext context) async {
+    final roster = ref.read(rosterProvider);
+    final staff = roster.staffMembers.map((s) => s.name).toList();
+    if (staff.length < 2) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Add at least two staff to swap shifts.')),
+      );
+      return;
+    }
+    String fromPerson = staff.first;
+    String toPerson = staff.length > 1 ? staff[1] : staff.first;
+    DateTime startDate = DateTime.now();
+    DateTime endDate = DateTime.now();
+    bool isRange = false;
+    bool recordDebt = true;
+    final reasonController = TextEditingController();
+
+    await showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Quick Shift Swap'),
+        content: StatefulBuilder(
+          builder: (context, setState) {
+            return Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                DropdownButtonFormField<String>(
+                  value: fromPerson,
+                  items: staff
+                      .map(
+                        (name) => DropdownMenuItem(
+                          value: name,
+                          child: Text(name),
+                        ),
+                      )
+                      .toList(),
+                  onChanged: (value) {
+                    if (value != null) {
+                      fromPerson = value;
+                    }
+                  },
+                  decoration: const InputDecoration(labelText: 'Requester'),
+                ),
+                const SizedBox(height: 12),
+                DropdownButtonFormField<String>(
+                  value: toPerson,
+                  items: staff
+                      .map(
+                        (name) => DropdownMenuItem(
+                          value: name,
+                          child: Text(name),
+                        ),
+                      )
+                      .toList(),
+                  onChanged: (value) {
+                    if (value != null) {
+                      toPerson = value;
+                    }
+                  },
+                  decoration: const InputDecoration(labelText: 'Volunteer'),
+                ),
+                const SizedBox(height: 12),
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('Range swap'),
+                  subtitle: const Text('Swap over a date range'),
+                  value: isRange,
+                  onChanged: (value) => setState(() => isRange = value),
+                ),
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(Icons.calendar_today),
+                  title: const Text('Start date'),
+                  subtitle: Text(_formatDate(startDate)),
+                  onTap: () async {
+                    final picked = await showDatePicker(
+                      context: context,
+                      initialDate: startDate,
+                      firstDate: DateTime(2020),
+                      lastDate: DateTime(2035),
+                    );
+                    if (picked != null) {
+                      setState(() => startDate = picked);
+                      if (endDate.isBefore(startDate)) {
+                        endDate = startDate;
+                      }
+                    }
+                  },
+                ),
+                if (isRange)
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: const Icon(Icons.event_available),
+                    title: const Text('End date'),
+                    subtitle: Text(_formatDate(endDate)),
+                    onTap: () async {
+                      final picked = await showDatePicker(
+                        context: context,
+                        initialDate: endDate,
+                        firstDate: startDate,
+                        lastDate: DateTime(2035),
+                      );
+                      if (picked != null) {
+                        setState(() => endDate = picked);
+                      }
+                    },
+                  ),
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('Record owed days'),
+                  subtitle: const Text('Track days owed to the volunteer'),
+                  value: recordDebt,
+                  onChanged: (value) => setState(() => recordDebt = value),
+                ),
+                TextField(
+                  controller: reasonController,
+                  decoration: const InputDecoration(
+                    labelText: 'Notes',
+                  ),
+                ),
+              ],
+            );
+          },
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () {
+              if (fromPerson == toPerson) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Choose two different staff.')),
+                );
+                return;
+              }
+              final reason = reasonController.text.trim().isEmpty
+                  ? 'Shift swap'
+                  : reasonController.text.trim();
+              if (isRange) {
+                final applied = roster.applySwapRange(
+                  fromPerson: fromPerson,
+                  toPerson: toPerson,
+                  startDate: startDate,
+                  endDate: endDate,
+                  reason: reason,
+                );
+                if (recordDebt && applied > 0) {
+                  roster.addSwapDebt(
+                    fromPerson: fromPerson,
+                    toPerson: toPerson,
+                    daysOwed: applied,
+                    reason: reason,
+                  );
+                }
+              } else {
+                roster.applySwapForDate(
+                  fromPerson: fromPerson,
+                  toPerson: toPerson,
+                  date: startDate,
+                  reason: reason,
+                );
+                if (recordDebt) {
+                  roster.addSwapDebt(
+                    fromPerson: fromPerson,
+                    toPerson: toPerson,
+                    daysOwed: 1,
+                    reason: reason,
+                  );
+                }
+              }
+              Navigator.pop(context);
+            },
+            child: const Text('Apply'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _showDebtSettlementDialog(
+    BuildContext context,
+    models.SwapDebt debt,
+  ) async {
+    final roster = ref.read(rosterProvider);
+    DateTime startDate = DateTime.now();
+    DateTime endDate = DateTime.now();
+    final remaining = debt.daysOwed - debt.daysSettled;
+    await showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Settle Swap Debt'),
+        content: StatefulBuilder(
+          builder: (context, setState) {
+            return Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  '${debt.fromPerson} owes ${debt.toPerson} ($remaining day(s) remaining)',
+                ),
+                const SizedBox(height: 12),
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(Icons.calendar_today),
+                  title: const Text('Start date'),
+                  subtitle: Text(_formatDate(startDate)),
+                  onTap: () async {
+                    final picked = await showDatePicker(
+                      context: context,
+                      initialDate: startDate,
+                      firstDate: DateTime(2020),
+                      lastDate: DateTime(2035),
+                    );
+                    if (picked != null) {
+                      setState(() => startDate = picked);
+                      if (endDate.isBefore(startDate)) {
+                        endDate = startDate;
+                      }
+                    }
+                  },
+                ),
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(Icons.event_available),
+                  title: const Text('End date'),
+                  subtitle: Text(_formatDate(endDate)),
+                  onTap: () async {
+                    final picked = await showDatePicker(
+                      context: context,
+                      initialDate: endDate,
+                      firstDate: startDate,
+                      lastDate: DateTime(2035),
+                    );
+                    if (picked != null) {
+                      setState(() => endDate = picked);
+                    }
+                  },
+                ),
+              ],
+            );
+          },
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () {
+              final dates = <DateTime>[];
+              for (var date = startDate;
+                  !date.isAfter(endDate);
+                  date = date.add(const Duration(days: 1))) {
+                if (dates.length >= remaining) break;
+                dates.add(date);
+              }
+              if (dates.isEmpty) {
+                Navigator.pop(context);
+                return;
+              }
+              roster.settleSwapDebt(
+                debtId: debt.id,
+                dates: dates,
+              );
+              Navigator.pop(context);
+            },
+            child: const Text('Settle'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _showIgnoreDebtDialog(
+    BuildContext context,
+    models.SwapDebt debt,
+  ) async {
+    final roster = ref.read(rosterProvider);
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Ignore Swap Debt'),
+        content: Text(
+          'Mark this debt as ignored? ${debt.fromPerson} will no longer owe ${debt.toPerson}.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Ignore'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true) {
+      roster.ignoreSwapDebt(debt.id);
+    }
+  }
+
+  Future<void> _showRestoreDebtDialog(
+    BuildContext context,
+    models.SwapDebt debt,
+  ) async {
+    final roster = ref.read(rosterProvider);
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Restore Swap Debt'),
+        content: Text(
+          'Restore this debt so ${debt.fromPerson} can pay back ${debt.toPerson}?',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Restore'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true) {
+      roster.restoreSwapDebt(debt.id);
+    }
   }
 
   Future<void> _showProposalDialog(BuildContext context) async {

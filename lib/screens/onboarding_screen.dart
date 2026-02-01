@@ -116,7 +116,7 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
           ),
           const SizedBox(height: 32),
           Text(
-            'Welcome to Roster Champ Pro',
+            'Welcome to Roster Champion',
             style: GoogleFonts.inter(
               fontSize: 28,
               fontWeight: FontWeight.bold,

@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
+import 'dart:math';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:roster_champ/home_screen.dart';
 import 'providers.dart';
@@ -12,6 +14,7 @@ import 'models.dart' as models;
 import 'theme/theme_manager.dart';
 import 'utils/error_handler.dart';
 import 'config/env_loader.dart';
+import 'services/analytics_service.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -23,6 +26,11 @@ void main() async {
   await AwsService.instance.initialize();
   await AiService.instance.initialize();
   await ThemeManager.instance.initialize();
+  await AnalyticsService.instance.initialize();
+  AnalyticsService.instance.trackEvent(
+    'app_start',
+    type: 'lifecycle',
+  );
 
   runApp(const ProviderScope(child: RosterChampApp()));
 }
@@ -234,63 +242,52 @@ class _RosterChampAppState extends ConsumerState<RosterChampApp> {
 
     if (_isInitializing) {
       return MaterialApp(
-        home: Scaffold(
-          backgroundColor: Theme.of(context).colorScheme.background,
-          body: Center(
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Icon(
-                  Icons.calendar_today_rounded,
-                  size: 80,
-                  color: Theme.of(context).colorScheme.primary,
-                ),
-                const SizedBox(height: 20),
-                Text(
-                  'Roster Champ Pro',
-                  style: GoogleFonts.inter(
-                    fontSize: 24,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-                const SizedBox(height: 20),
-                const CircularProgressIndicator(),
-                const SizedBox(height: 10),
-                Text(
-                  'Initializing...',
-                  style: GoogleFonts.inter(
-                    color: Theme.of(context).colorScheme.onSurfaceVariant,
-                  ),
-                ),
-                if (!_awsConfigured) ...[
-                  const SizedBox(height: 10),
-                  Text(
-                    'AWS: Not configured',
-                    style: GoogleFonts.inter(
-                      color: Colors.orange,
-                      fontSize: 12,
-                    ),
-                  ),
-                ],
-                if (!_aiConfigured) ...[
-                  Text(
-                    'AI: Not configured',
-                    style: GoogleFonts.inter(
-                      color: Colors.orange,
-                      fontSize: 12,
-                    ),
-                  ),
-                ],
-              ],
-            ),
-          ),
+        locale: Locale(settings.languageCode),
+        supportedLocales: const [
+          Locale('en'),
+          Locale('es'),
+          Locale('fr'),
+          Locale('de'),
+          Locale('it'),
+          Locale('pt'),
+          Locale('zh'),
+          Locale('ja'),
+          Locale('ko'),
+          Locale('ar'),
+        ],
+        localizationsDelegates: const [
+          GlobalMaterialLocalizations.delegate,
+          GlobalWidgetsLocalizations.delegate,
+          GlobalCupertinoLocalizations.delegate,
+        ],
+        home: AnimatedLaunchScreen(
+          awsConfigured: _awsConfigured,
+          aiConfigured: _aiConfigured,
         ),
       );
     }
 
     return MaterialApp(
-      title: 'Roster Champ Pro',
+      title: 'Roster Champion',
       debugShowCheckedModeBanner: false,
+      locale: Locale(settings.languageCode),
+      supportedLocales: const [
+        Locale('en'),
+        Locale('es'),
+        Locale('fr'),
+        Locale('de'),
+        Locale('it'),
+        Locale('pt'),
+        Locale('zh'),
+        Locale('ja'),
+        Locale('ko'),
+        Locale('ar'),
+      ],
+      localizationsDelegates: const [
+        GlobalMaterialLocalizations.delegate,
+        GlobalWidgetsLocalizations.delegate,
+        GlobalCupertinoLocalizations.delegate,
+      ],
       theme: ThemeManager.instance.getLightTheme(settings.colorScheme),
       darkTheme: ThemeManager.instance.getDarkTheme(settings.colorScheme),
       themeMode: themeMode,
@@ -314,5 +311,279 @@ class _RosterChampAppState extends ConsumerState<RosterChampApp> {
         onExitGuestMode: _exitGuestMode,
       );
     }
+  }
+}
+
+class AnimatedLaunchScreen extends StatefulWidget {
+  final bool awsConfigured;
+  final bool aiConfigured;
+
+  const AnimatedLaunchScreen({
+    super.key,
+    required this.awsConfigured,
+    required this.aiConfigured,
+  });
+
+  @override
+  State<AnimatedLaunchScreen> createState() => _AnimatedLaunchScreenState();
+}
+
+class _AnimatedLaunchScreenState extends State<AnimatedLaunchScreen>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller =
+        AnimationController(vsync: this, duration: const Duration(seconds: 10))
+          ..repeat();
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _controller,
+      builder: (context, child) {
+        final t = _controller.value;
+        final pulse = (sin(2 * pi * t) + 1) / 2;
+        final pulse2 = (sin(2 * pi * (t + 0.35)) + 1) / 2;
+        final gradient = LinearGradient(
+          begin: Alignment.lerp(Alignment.topLeft, Alignment.centerRight, pulse)!,
+          end: Alignment.lerp(Alignment.bottomRight, Alignment.centerLeft, pulse2)!,
+          colors: [
+            Color.lerp(const Color(0xFF0B132B), const Color(0xFF1F2F55), pulse)!,
+            Color.lerp(const Color(0xFF5A189A), const Color(0xFF0F4C5C), pulse2)!,
+            Color.lerp(const Color(0xFFF72585), const Color(0xFF4CC9F0), pulse)!,
+          ],
+        );
+
+        return Scaffold(
+          body: Stack(
+            children: [
+              Positioned.fill(
+                child: Container(
+                  decoration: BoxDecoration(gradient: gradient),
+                ),
+              ),
+              Positioned.fill(
+                child: CustomPaint(
+                  painter: _PatternPainter(progress: t),
+                ),
+              ),
+              ..._buildOrbs(t),
+              Center(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Container(
+                      width: 82,
+                      height: 82,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: Colors.white.withOpacity(0.15),
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.white.withOpacity(0.2),
+                            blurRadius: 20,
+                            spreadRadius: 2,
+                          ),
+                        ],
+                      ),
+                      child: const Icon(
+                        Icons.calendar_today_rounded,
+                        size: 38,
+                        color: Colors.white,
+                      ),
+                    ),
+                    const SizedBox(height: 24),
+                    Text(
+                      'Roster Champion',
+                      style: GoogleFonts.spaceGrotesk(
+                        fontSize: 34,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: 0.5,
+                        color: Colors.white,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      'Plan. Align. Deliver.',
+                      style: GoogleFonts.spaceGrotesk(
+                        fontSize: 15,
+                        color: Colors.white.withOpacity(0.75),
+                      ),
+                    ),
+                    const SizedBox(height: 30),
+                    const SizedBox(
+                      width: 42,
+                      height: 42,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 3,
+                        valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    Text(
+                      'Initializing...',
+                      style: GoogleFonts.spaceGrotesk(
+                        fontSize: 14,
+                        color: Colors.white70,
+                      ),
+                    ),
+                    if (!widget.awsConfigured || !widget.aiConfigured) ...[
+                      const SizedBox(height: 18),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        alignment: WrapAlignment.center,
+                        children: [
+                          if (!widget.awsConfigured)
+                            const _StatusChip(
+                              label: 'AWS not configured',
+                              color: Colors.orangeAccent,
+                            ),
+                          if (!widget.aiConfigured)
+                            const _StatusChip(
+                              label: 'AI not configured',
+                              color: Colors.orangeAccent,
+                            ),
+                        ],
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  List<Widget> _buildOrbs(double t) {
+    return [
+      _FloatingOrb(
+        size: 160,
+        color: const Color(0xFF4CC9F0),
+        x: 40 + 30 * sin(2 * pi * t),
+        y: 110 + 40 * cos(2 * pi * t),
+        opacity: 0.25,
+      ),
+      _FloatingOrb(
+        size: 220,
+        color: const Color(0xFFF72585),
+        x: 240 + 35 * cos(2 * pi * (t + 0.2)),
+        y: 420 + 45 * sin(2 * pi * (t + 0.15)),
+        opacity: 0.2,
+      ),
+      _FloatingOrb(
+        size: 120,
+        color: const Color(0xFF80FFDB),
+        x: 280 + 28 * sin(2 * pi * (t + 0.4)),
+        y: 180 + 30 * cos(2 * pi * (t + 0.35)),
+        opacity: 0.18,
+      ),
+    ];
+  }
+}
+
+class _FloatingOrb extends StatelessWidget {
+  final double size;
+  final Color color;
+  final double x;
+  final double y;
+  final double opacity;
+
+  const _FloatingOrb({
+    required this.size,
+    required this.color,
+    required this.x,
+    required this.y,
+    required this.opacity,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Positioned(
+      left: x,
+      top: y,
+      child: Container(
+        width: size,
+        height: size,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color: color.withOpacity(opacity),
+          boxShadow: [
+            BoxShadow(
+              color: color.withOpacity(opacity * 0.8),
+              blurRadius: 40,
+              spreadRadius: 6,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _PatternPainter extends CustomPainter {
+  final double progress;
+
+  _PatternPainter({required this.progress});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = Colors.white.withOpacity(0.08)
+      ..strokeWidth = 1.2;
+
+    final spacing = 28.0;
+    final offset = spacing * progress;
+    for (double x = -size.height; x < size.width + size.height; x += spacing) {
+      final start = Offset(x + offset, 0);
+      final end = Offset(x - size.height + offset, size.height);
+      canvas.drawLine(start, end, paint);
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _PatternPainter oldDelegate) {
+    return oldDelegate.progress != progress;
+  }
+}
+
+class _StatusChip extends StatelessWidget {
+  final String label;
+  final Color color;
+
+  const _StatusChip({
+    required this.label,
+    required this.color,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.2),
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: color.withOpacity(0.6)),
+      ),
+      child: Text(
+        label,
+        style: GoogleFonts.spaceGrotesk(
+          fontSize: 12,
+          color: Colors.white,
+        ),
+      ),
+    );
   }
 }

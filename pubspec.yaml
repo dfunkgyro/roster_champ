@@ -9,6 +9,8 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  flutter_localizations:
+    sdk: flutter
   crypto: ^3.0.3
   device_info_plus: ^9.1.2
   package_info_plus: ^4.2.0
@@ -32,6 +34,9 @@ dependencies:
   intl: ^0.20.2
   uuid: ^3.0.7
   http: ^1.5.0
+  speech_to_text: ^7.3.0
+  flutter_tts: ^4.0.2
+  audioplayers: ^6.1.0
   
   # Cloud Services
   amazon_cognito_identity_dart_2: ^3.6.5

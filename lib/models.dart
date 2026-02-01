@@ -80,6 +80,82 @@ enum ActivityLogLevel {
   error,
 }
 
+class AnalyticsEvent {
+  final String id;
+  final String name;
+  final String type;
+  final DateTime timestamp;
+  final String? userId;
+  final String? rosterId;
+  final String? sessionId;
+  final Map<String, dynamic> properties;
+  final DateTime? uploadedAt;
+
+  AnalyticsEvent({
+    required this.id,
+    required this.name,
+    required this.type,
+    required this.timestamp,
+    this.userId,
+    this.rosterId,
+    this.sessionId,
+    this.properties = const {},
+    this.uploadedAt,
+  });
+
+  AnalyticsEvent copyWith({
+    String? id,
+    String? name,
+    String? type,
+    DateTime? timestamp,
+    String? userId,
+    String? rosterId,
+    String? sessionId,
+    Map<String, dynamic>? properties,
+    DateTime? uploadedAt,
+  }) {
+    return AnalyticsEvent(
+      id: id ?? this.id,
+      name: name ?? this.name,
+      type: type ?? this.type,
+      timestamp: timestamp ?? this.timestamp,
+      userId: userId ?? this.userId,
+      rosterId: rosterId ?? this.rosterId,
+      sessionId: sessionId ?? this.sessionId,
+      properties: properties ?? this.properties,
+      uploadedAt: uploadedAt ?? this.uploadedAt,
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'name': name,
+        'type': type,
+        'timestamp': timestamp.toIso8601String(),
+        'userId': userId,
+        'rosterId': rosterId,
+        'sessionId': sessionId,
+        'properties': properties,
+        'uploadedAt': uploadedAt?.toIso8601String(),
+      };
+
+  factory AnalyticsEvent.fromJson(Map<String, dynamic> json) => AnalyticsEvent(
+        id: json['id'] as String? ?? '',
+        name: json['name'] as String? ?? 'event',
+        type: json['type'] as String? ?? 'custom',
+        timestamp: DateTime.tryParse(json['timestamp'] as String? ?? '') ??
+            DateTime.now(),
+        userId: json['userId'] as String?,
+        rosterId: json['rosterId'] as String?,
+        sessionId: json['sessionId'] as String?,
+        properties:
+            Map<String, dynamic>.from(json['properties'] as Map? ?? {}),
+        uploadedAt: json['uploadedAt'] != null
+            ? DateTime.tryParse(json['uploadedAt'] as String)
+            : null,
+      );
+}
+
 enum OperationType {
   bulkUpdate,
   singleUpdate,
@@ -650,6 +726,12 @@ class StaffMember {
   final String name;
   final bool isActive;
   final double leaveBalance;
+  final DateTime? startDate;
+  final DateTime? endDate;
+  final String employmentType;
+  final String? leaveType;
+  final DateTime? leaveStart;
+  final DateTime? leaveEnd;
   final Map<String, dynamic>? metadata;
   final StaffPreferences? preferences;
 
@@ -658,6 +740,12 @@ class StaffMember {
     required this.name,
     this.isActive = true,
     this.leaveBalance = 31.0, // Changed from 20.0 to 31.0 days
+    this.startDate,
+    this.endDate,
+    this.employmentType = 'permanent',
+    this.leaveType,
+    this.leaveStart,
+    this.leaveEnd,
     this.metadata,
     this.preferences,
   });
@@ -667,6 +755,12 @@ class StaffMember {
     String? name,
     bool? isActive,
     double? leaveBalance,
+    DateTime? startDate,
+    DateTime? endDate,
+    String? employmentType,
+    String? leaveType,
+    DateTime? leaveStart,
+    DateTime? leaveEnd,
     Map<String, dynamic>? metadata,
     StaffPreferences? preferences,
   }) {
@@ -675,6 +769,12 @@ class StaffMember {
       name: name ?? this.name,
       isActive: isActive ?? this.isActive,
       leaveBalance: leaveBalance ?? this.leaveBalance,
+      startDate: startDate ?? this.startDate,
+      endDate: endDate ?? this.endDate,
+      employmentType: employmentType ?? this.employmentType,
+      leaveType: leaveType ?? this.leaveType,
+      leaveStart: leaveStart ?? this.leaveStart,
+      leaveEnd: leaveEnd ?? this.leaveEnd,
       metadata: metadata ?? this.metadata,
       preferences: preferences ?? this.preferences,
     );
@@ -685,6 +785,12 @@ class StaffMember {
         'name': name,
         'isActive': isActive,
         'leaveBalance': leaveBalance,
+        'startDate': startDate?.toIso8601String(),
+        'endDate': endDate?.toIso8601String(),
+        'employmentType': employmentType,
+        'leaveType': leaveType,
+        'leaveStart': leaveStart?.toIso8601String(),
+        'leaveEnd': leaveEnd?.toIso8601String(),
         'metadata': metadata,
         'preferences': preferences?.toJson(),
       };
@@ -695,6 +801,20 @@ class StaffMember {
         isActive: json['isActive'] as bool? ?? true,
         leaveBalance: (json['leaveBalance'] as num?)?.toDouble() ??
             31.0, // Changed from 20.0 to 31.0
+        startDate: json['startDate'] != null
+            ? DateTime.parse(json['startDate'] as String)
+            : null,
+        endDate: json['endDate'] != null
+            ? DateTime.parse(json['endDate'] as String)
+            : null,
+        employmentType: json['employmentType'] as String? ?? 'permanent',
+        leaveType: json['leaveType'] as String?,
+        leaveStart: json['leaveStart'] != null
+            ? DateTime.parse(json['leaveStart'] as String)
+            : null,
+        leaveEnd: json['leaveEnd'] != null
+            ? DateTime.parse(json['leaveEnd'] as String)
+            : null,
         metadata: json['metadata'] as Map<String, dynamic>?,
         preferences: json['preferences'] != null
             ? StaffPreferences.fromJson(
@@ -1293,6 +1413,7 @@ class AppSettings {
   final ColorSchemeType colorScheme;
   final String holidayCountryCode;
   final List<String> holidayTypes;
+  final List<String> additionalHolidayCountries;
   final bool showHolidayOverlay;
   final bool showObservanceOverlay;
   final bool showSportsOverlay;
@@ -1308,6 +1429,14 @@ class AppSettings {
   final bool showWeatherOverlay;
   final bool showMapPreview;
   final double monthSnapOffsetPx;
+  final String languageCode;
+  final bool voiceEnabled;
+  final bool voiceAlwaysListening;
+  final String voiceInputEngine;
+  final String voiceOutputEngine;
+  final List<String> voiceWakeWords;
+  final bool analyticsEnabled;
+  final bool analyticsCloudEnabled;
 
   const AppSettings({
     this.darkMode = false,
@@ -1321,6 +1450,7 @@ class AppSettings {
     this.colorScheme = ColorSchemeType.blue,
     this.holidayCountryCode = 'US',
     this.holidayTypes = const ['Public', 'Bank'],
+    this.additionalHolidayCountries = const [],
     this.showHolidayOverlay = true,
     this.showObservanceOverlay = true,
     this.showSportsOverlay = false,
@@ -1336,6 +1466,18 @@ class AppSettings {
     this.showWeatherOverlay = true,
     this.showMapPreview = true,
     this.monthSnapOffsetPx = 1200.0,
+    this.languageCode = 'en',
+    this.voiceEnabled = true,
+    this.voiceAlwaysListening = false,
+    this.voiceInputEngine = 'onDevice',
+    this.voiceOutputEngine = 'aws',
+    this.voiceWakeWords = const [
+      'rc',
+      'roster champ',
+      'roster champion',
+    ],
+    this.analyticsEnabled = true,
+    this.analyticsCloudEnabled = true,
   });
 
   AppSettings copyWith({
@@ -1350,6 +1492,7 @@ class AppSettings {
     ColorSchemeType? colorScheme,
     String? holidayCountryCode,
     List<String>? holidayTypes,
+    List<String>? additionalHolidayCountries,
     bool? showHolidayOverlay,
     bool? showObservanceOverlay,
     bool? showSportsOverlay,
@@ -1365,6 +1508,14 @@ class AppSettings {
     bool? showWeatherOverlay,
     bool? showMapPreview,
     double? monthSnapOffsetPx,
+    String? languageCode,
+    bool? voiceEnabled,
+    bool? voiceAlwaysListening,
+    String? voiceInputEngine,
+    String? voiceOutputEngine,
+    List<String>? voiceWakeWords,
+    bool? analyticsEnabled,
+    bool? analyticsCloudEnabled,
   }) {
     return AppSettings(
       darkMode: darkMode ?? this.darkMode,
@@ -1378,6 +1529,8 @@ class AppSettings {
       colorScheme: colorScheme ?? this.colorScheme,
       holidayCountryCode: holidayCountryCode ?? this.holidayCountryCode,
       holidayTypes: holidayTypes ?? this.holidayTypes,
+      additionalHolidayCountries:
+          additionalHolidayCountries ?? this.additionalHolidayCountries,
       showHolidayOverlay: showHolidayOverlay ?? this.showHolidayOverlay,
       showObservanceOverlay:
           showObservanceOverlay ?? this.showObservanceOverlay,
@@ -1394,6 +1547,15 @@ class AppSettings {
       showWeatherOverlay: showWeatherOverlay ?? this.showWeatherOverlay,
       showMapPreview: showMapPreview ?? this.showMapPreview,
       monthSnapOffsetPx: monthSnapOffsetPx ?? this.monthSnapOffsetPx,
+      languageCode: languageCode ?? this.languageCode,
+      voiceEnabled: voiceEnabled ?? this.voiceEnabled,
+      voiceAlwaysListening: voiceAlwaysListening ?? this.voiceAlwaysListening,
+      voiceInputEngine: voiceInputEngine ?? this.voiceInputEngine,
+      voiceOutputEngine: voiceOutputEngine ?? this.voiceOutputEngine,
+      voiceWakeWords: voiceWakeWords ?? this.voiceWakeWords,
+      analyticsEnabled: analyticsEnabled ?? this.analyticsEnabled,
+      analyticsCloudEnabled:
+          analyticsCloudEnabled ?? this.analyticsCloudEnabled,
     );
   }
 
@@ -1409,6 +1571,7 @@ class AppSettings {
         'colorScheme': colorScheme.index,
       'holidayCountryCode': holidayCountryCode,
       'holidayTypes': holidayTypes,
+      'additionalHolidayCountries': additionalHolidayCountries,
       'showHolidayOverlay': showHolidayOverlay,
       'showObservanceOverlay': showObservanceOverlay,
       'showSportsOverlay': showSportsOverlay,
@@ -1424,6 +1587,14 @@ class AppSettings {
         'showWeatherOverlay': showWeatherOverlay,
         'showMapPreview': showMapPreview,
         'monthSnapOffsetPx': monthSnapOffsetPx,
+        'languageCode': languageCode,
+        'voiceEnabled': voiceEnabled,
+        'voiceAlwaysListening': voiceAlwaysListening,
+      'voiceInputEngine': voiceInputEngine,
+      'voiceOutputEngine': voiceOutputEngine,
+      'voiceWakeWords': voiceWakeWords,
+      'analyticsEnabled': analyticsEnabled,
+      'analyticsCloudEnabled': analyticsCloudEnabled,
       };
 
   factory AppSettings.fromJson(Map<String, dynamic> json) => AppSettings(
@@ -1442,6 +1613,11 @@ class AppSettings {
               ?.map((e) => e.toString())
               .toList() ??
           const ['Public', 'Bank'],
+      additionalHolidayCountries:
+          (json['additionalHolidayCountries'] as List<dynamic>?)
+                  ?.map((e) => e.toString())
+                  .toList() ??
+              const [],
       showHolidayOverlay:
           json['showHolidayOverlay'] as bool? ?? true,
       showObservanceOverlay:
@@ -1470,6 +1646,20 @@ class AppSettings {
         showMapPreview: json['showMapPreview'] as bool? ?? true,
         monthSnapOffsetPx:
             (json['monthSnapOffsetPx'] as num?)?.toDouble() ?? 1200.0,
+        languageCode: json['languageCode'] as String? ?? 'en',
+        voiceEnabled: json['voiceEnabled'] as bool? ?? true,
+        voiceAlwaysListening:
+            json['voiceAlwaysListening'] as bool? ?? false,
+        voiceInputEngine:
+            json['voiceInputEngine'] as String? ?? 'onDevice',
+        voiceOutputEngine:
+            json['voiceOutputEngine'] as String? ?? 'aws',
+        voiceWakeWords: (json['voiceWakeWords'] as List<dynamic>?)
+                ?.map((e) => e.toString())
+                .toList() ??
+            const ['rc', 'roster champ', 'roster champion'],
+        analyticsEnabled: json['analyticsEnabled'] as bool? ?? true,
+        analyticsCloudEnabled: json['analyticsCloudEnabled'] as bool? ?? true,
       );
 }
 
@@ -1512,6 +1702,7 @@ class RegularShiftSwap {
   final DateTime startDate;
   final DateTime? endDate;
   final bool isActive;
+  final int? weekIndex;
 
   RegularShiftSwap({
     required this.id,
@@ -1522,6 +1713,7 @@ class RegularShiftSwap {
     required this.startDate,
     this.endDate,
     this.isActive = true,
+    this.weekIndex,
   });
 
   Map<String, dynamic> toJson() => {
@@ -1533,6 +1725,7 @@ class RegularShiftSwap {
         'startDate': startDate.toIso8601String(),
         'endDate': endDate?.toIso8601String(),
         'isActive': isActive,
+        'weekIndex': weekIndex,
       };
 
   factory RegularShiftSwap.fromJson(Map<String, dynamic> json) =>
@@ -1547,7 +1740,95 @@ class RegularShiftSwap {
             ? DateTime.parse(json['endDate'] as String)
             : null,
         isActive: json['isActive'] as bool? ?? true,
+        weekIndex: json['weekIndex'] as int?,
       );
+}
+
+class SwapDebt {
+  final String id;
+  final String fromPerson;
+  final String toPerson;
+  final int daysOwed;
+  final int daysSettled;
+  final String reason;
+  final DateTime createdAt;
+  final DateTime? resolvedAt;
+  final bool isIgnored;
+  final DateTime? ignoredAt;
+  final List<String> settledDates;
+
+  const SwapDebt({
+    required this.id,
+    required this.fromPerson,
+    required this.toPerson,
+    required this.daysOwed,
+    required this.daysSettled,
+    required this.reason,
+    required this.createdAt,
+    this.resolvedAt,
+    this.isIgnored = false,
+    this.ignoredAt,
+    this.settledDates = const [],
+  });
+
+  bool get isResolved => isIgnored || daysSettled >= daysOwed;
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'fromPerson': fromPerson,
+        'toPerson': toPerson,
+        'daysOwed': daysOwed,
+        'daysSettled': daysSettled,
+        'reason': reason,
+        'createdAt': createdAt.toIso8601String(),
+        'resolvedAt': resolvedAt?.toIso8601String(),
+        'isIgnored': isIgnored,
+        'ignoredAt': ignoredAt?.toIso8601String(),
+        'settledDates': settledDates,
+      };
+
+  factory SwapDebt.fromJson(Map<String, dynamic> json) => SwapDebt(
+        id: json['id'] as String,
+        fromPerson: json['fromPerson'] as String,
+        toPerson: json['toPerson'] as String,
+        daysOwed: json['daysOwed'] as int? ?? 0,
+        daysSettled: json['daysSettled'] as int? ?? 0,
+        reason: json['reason'] as String? ?? '',
+        createdAt: DateTime.parse(json['createdAt'] as String),
+        resolvedAt: json['resolvedAt'] != null
+            ? DateTime.parse(json['resolvedAt'] as String)
+            : null,
+        isIgnored: json['isIgnored'] as bool? ?? false,
+        ignoredAt: json['ignoredAt'] != null
+            ? DateTime.parse(json['ignoredAt'] as String)
+            : null,
+        settledDates: (json['settledDates'] as List<dynamic>?)
+                ?.map((e) => e.toString())
+                .toList() ??
+            const [],
+      );
+
+  SwapDebt copyWith({
+    int? daysSettled,
+    DateTime? resolvedAt,
+    bool? isIgnored,
+    DateTime? ignoredAt,
+    List<String>? settledDates,
+  }) {
+    return SwapDebt(
+      id: id,
+      fromPerson: fromPerson,
+      toPerson: toPerson,
+      daysOwed: daysOwed,
+      daysSettled: daysSettled ?? this.daysSettled,
+      reason: reason,
+      createdAt: createdAt,
+      resolvedAt: resolvedAt ?? this.resolvedAt,
+      isIgnored: isIgnored ?? this.isIgnored,
+      ignoredAt: ignoredAt ?? this.ignoredAt,
+      settledDates: settledDates ?? this.settledDates,
+    );
+  }
 }
 
 // Pattern Propagation Settings

@@ -287,6 +287,7 @@ class AwsService {
       _offlineAuthenticated || _accessToken != null || _idToken != null;
   bool get isOfflineAuthenticated => _offlineAuthenticated;
   String? get apiUrl => _apiUrl;
+  String? get region => _region;
   String? get userId => _userId;
   String? get userEmail => _userEmail;
   String? get displayName => _displayName;
@@ -526,6 +527,13 @@ class AwsService {
       'feedback': feedback,
       'impact': impact,
       'notes': notes ?? '',
+    });
+  }
+
+  Future<void> sendAnalyticsEvents(List<models.AnalyticsEvent> events) async {
+    if (events.isEmpty) return;
+    await _post('/analytics/track', {
+      'events': events.map((e) => e.toJson()).toList(),
     });
   }
 
@@ -964,6 +972,84 @@ class AwsService {
     String body,
   ) async {
     return _authHeaders(method, uri, body);
+  }
+
+  Future<Map<String, String>> signedAwsHeaders({
+    required String method,
+    required Uri uri,
+    required String body,
+    required String service,
+    Map<String, String> extraHeaders = const {},
+  }) async {
+    await _refreshSessionIfNeeded();
+    final accessKey = _awsAccessKeyId;
+    final secretKey = _awsSecretAccessKey;
+    if (accessKey == null || secretKey == null) {
+      throw Exception('AWS credentials are not available.');
+    }
+    final regionName = _region ?? 'us-east-1';
+    final now = DateTime.now().toUtc();
+    final amzDate = _formatAmzDate(now);
+    final dateStamp = _formatDate(now);
+
+    final canonicalUri = uri.path.isEmpty ? '/' : uri.path;
+    final canonicalQuery = _canonicalQuery(uri.queryParametersAll);
+
+    final canonicalHeadersMap = <String, String>{
+      'host': uri.host,
+      'x-amz-date': amzDate,
+    };
+    if (_awsSessionToken != null) {
+      canonicalHeadersMap['x-amz-security-token'] = _awsSessionToken!;
+    }
+    for (final entry in extraHeaders.entries) {
+      canonicalHeadersMap[entry.key.toLowerCase()] = entry.value.trim();
+    }
+    final sortedHeaderKeys = canonicalHeadersMap.keys.toList()..sort();
+    final canonicalHeaders = sortedHeaderKeys
+        .map((k) => '$k:${canonicalHeadersMap[k]!.trim()}\n')
+        .join();
+    final signedHeaders = sortedHeaderKeys.join(';');
+
+    final payloadHash = sha256.convert(utf8.encode(body)).toString();
+    final canonicalRequest = [
+      method,
+      canonicalUri,
+      canonicalQuery,
+      canonicalHeaders,
+      signedHeaders,
+      payloadHash,
+    ].join('\n');
+
+    final credentialScope =
+        '$dateStamp/$regionName/$service/aws4_request';
+    final stringToSign = [
+      'AWS4-HMAC-SHA256',
+      amzDate,
+      credentialScope,
+      sha256.convert(utf8.encode(canonicalRequest)).toString(),
+    ].join('\n');
+
+    final signingKey =
+        _getSignatureKey(secretKey, dateStamp, regionName, service);
+    final signature = Hmac(sha256, signingKey)
+        .convert(utf8.encode(stringToSign))
+        .toString();
+
+    final authorizationHeader =
+        'AWS4-HMAC-SHA256 Credential=$accessKey/$credentialScope, '
+        'SignedHeaders=$signedHeaders, Signature=$signature';
+
+    final headers = <String, String>{
+      'Authorization': authorizationHeader,
+      'x-amz-date': amzDate,
+      'host': uri.host,
+      ...extraHeaders,
+    };
+    if (_awsSessionToken != null) {
+      headers['x-amz-security-token'] = _awsSessionToken!;
+    }
+    return headers;
   }
 
   Future<Map<String, String>> _authHeaders(

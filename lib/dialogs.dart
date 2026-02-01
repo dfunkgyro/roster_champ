@@ -402,7 +402,7 @@ class _AddOverrideDialogState extends State<AddOverrideDialog> {
             controller: _shiftController,
             decoration: const InputDecoration(
               labelText: 'New Shift',
-              hintText: 'e.g., D, N, L, OFF',
+              hintText: 'e.g., D, N, L, AL, OFF',
             ),
             autofocus: true,
             textCapitalization: TextCapitalization.characters,
@@ -516,7 +516,7 @@ class _BulkOverrideDialogState extends State<BulkOverrideDialog> {
               controller: _shiftController,
               decoration: const InputDecoration(
                 labelText: 'Shift',
-                hintText: 'e.g., L (for leave)',
+                hintText: 'e.g., AL (for leave)',
               ),
               textCapitalization: TextCapitalization.characters,
             ),

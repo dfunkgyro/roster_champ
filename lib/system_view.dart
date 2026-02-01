@@ -152,6 +152,13 @@ class SystemView extends ConsumerWidget {
         enabled: awsConfigured,
       ),
       _AwsServiceInfo(
+        name: 'Analytics (DynamoDB)',
+        detail: awsConfigured
+            ? 'Usage analytics and event telemetry'
+            : 'Not configured',
+        enabled: awsConfigured,
+      ),
+      _AwsServiceInfo(
         name: 'Cognito User Pool',
         detail: awsConfigured ? 'Email/password auth' : 'Not configured',
         enabled: awsConfigured,

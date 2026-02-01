@@ -9,6 +9,9 @@
     <!-- Storage permissions for import/export functionality -->
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
+
+    <!-- Voice assistant -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
     
     <!-- For Android 10+ scoped storage -->
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" 
@@ -16,7 +19,7 @@
         android:maxSdkVersion="32" />
 
     <application
-        android:label="Roster Champ Pro"
+        android:label="Roster Champion"
         android:name="${applicationName}"
         android:icon="@mipmap/launcher_icon"
         android:allowBackup="true"

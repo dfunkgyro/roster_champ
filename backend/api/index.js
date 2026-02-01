@@ -28,6 +28,7 @@ const {
   PRESENCE_TABLE,
   TIME_CLOCK_TABLE,
   AI_FEEDBACK_TABLE,
+  ANALYTICS_TABLE,
   EXPORTS_BUCKET,
   CLOUDFRONT_URL,
   SNS_TOPIC_ARN,
@@ -147,6 +148,25 @@ const writeAuditLog = async ({
       },
     })
     .promise();
+};
+
+const writeAnalyticsEvents = async (events) => {
+  if (!ANALYTICS_TABLE || events.length === 0) return 0;
+  let accepted = 0;
+  for (const event of events) {
+    try {
+      await dynamodb
+        .put({
+          TableName: ANALYTICS_TABLE,
+          Item: event,
+        })
+        .promise();
+      accepted += 1;
+    } catch (err) {
+      console.error("Analytics put error:", err);
+    }
+  }
+  return accepted;
 };
 
 const generateShareCode = (length = 8) => {
@@ -601,6 +621,7 @@ exports.handler = async (event) => {
     await deleteByRosterId(PRESENCE_TABLE, "userId");
     await deleteByRosterId(TIME_CLOCK_TABLE, "entryId");
     await deleteByRosterId(AI_FEEDBACK_TABLE, "feedbackId");
+    await deleteByRosterId(ANALYTICS_TABLE, "eventId");
     await deleteShareCodes();
 
     await dynamodb
@@ -1812,6 +1833,53 @@ exports.handler = async (event) => {
       })
       .promise();
     return jsonResponse(200, query.Items || []);
+  }
+
+  if (method === "POST" && path === "/analytics/track") {
+    const body = parseBody(event);
+    const rawEvents = Array.isArray(body.events)
+      ? body.events
+      : body.event
+      ? [body.event]
+      : [];
+    if (rawEvents.length === 0) {
+      return jsonResponse(400, { error: "Missing analytics events" });
+    }
+
+    const acceptedItems = [];
+    let rejected = 0;
+    for (const raw of rawEvents) {
+      const rosterId = raw.rosterId || (userId ? `user#${userId}` : null);
+      if (!rosterId) {
+        rejected += 1;
+        continue;
+      }
+      if (!rosterId.startsWith("user#")) {
+        const hasAccess = await ensureRosterAccess(rosterId, userId);
+        if (!hasAccess) {
+          rejected += 1;
+          continue;
+        }
+      }
+      const eventId =
+        raw.id || `${Date.now()}_${crypto.randomBytes(4).toString("hex")}`;
+      acceptedItems.push({
+        rosterId,
+        eventId,
+        userId: userId ?? raw.userId ?? "unknown",
+        name: raw.name || "event",
+        type: raw.type || "custom",
+        timestamp: raw.timestamp || new Date().toISOString(),
+        sessionId: raw.sessionId ?? null,
+        properties: raw.properties ?? {},
+      });
+    }
+
+    const accepted = await writeAnalyticsEvents(acceptedItems);
+    return jsonResponse(200, {
+      accepted,
+      rejected: rejected + (acceptedItems.length - accepted),
+    });
   }
 
   if (method === "POST" && path === "/ai/feedback") {

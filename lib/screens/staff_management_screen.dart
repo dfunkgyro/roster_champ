@@ -1,9 +1,34 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:intl/intl.dart';
 import '../providers.dart';
 import '../models.dart' as models;
 import '../services/staff_name_store.dart';
+
+String _formatLeaveLabel(String? leaveType) {
+  if (leaveType == null || leaveType.isEmpty) return 'Leave';
+  if (leaveType.startsWith('custom:')) {
+    final label = leaveType.substring('custom:'.length).trim();
+    return label.isEmpty ? 'Custom Leave' : label;
+  }
+  switch (leaveType) {
+    case 'secondment':
+      return 'Secondment';
+    case 'sick':
+      return 'Sick';
+    case 'annual':
+      return 'Annual Leave';
+    default:
+      return 'Leave';
+  }
+}
+
+String? _extractCustomLeaveLabel(String? leaveType) {
+  if (leaveType == null) return null;
+  if (!leaveType.startsWith('custom:')) return null;
+  return leaveType.substring('custom:'.length).trim();
+}
 
 class StaffManagementScreen extends ConsumerStatefulWidget {
   const StaffManagementScreen({super.key});
@@ -31,6 +56,9 @@ class _StaffManagementScreenState extends ConsumerState<StaffManagementScreen> {
   Widget build(BuildContext context) {
     final roster = ref.watch(rosterProvider);
     final staff = roster.staffMembers;
+    final activeCount =
+        staff.where((s) => roster.isStaffActiveOnDate(s, DateTime.now())).length;
+    final inactiveCount = staff.length - activeCount;
     ref.watch(staffNameProvider);
 
     return Scaffold(
@@ -62,7 +90,7 @@ class _StaffManagementScreenState extends ConsumerState<StaffManagementScreen> {
                 _buildSummaryCard(
                   context,
                   'Active',
-                  '${staff.where((s) => s.isActive).length}',
+                  '$activeCount',
                   Icons.check_circle,
                   Colors.green,
                 ),
@@ -70,7 +98,7 @@ class _StaffManagementScreenState extends ConsumerState<StaffManagementScreen> {
                 _buildSummaryCard(
                   context,
                   'Inactive',
-                  '${staff.where((s) => !s.isActive).length}',
+                  '$inactiveCount',
                   Icons.person_off,
                   Colors.orange,
                 ),
@@ -153,34 +181,111 @@ class _StaffManagementScreenState extends ConsumerState<StaffManagementScreen> {
 
   void _showAddStaffDialog() {
     final nameStore = ref.read(staffNameProvider);
+    DateTime startDate = DateTime.now();
+    String employmentType = 'permanent';
+    DateTime? endDate;
     showDialog(
       context: context,
-      builder: (context) => AlertDialog(
+      builder: (context) => StatefulBuilder(
+        builder: (context, setState) => AlertDialog(
         title: const Text('Add Staff Member'),
-        content: Autocomplete<String>(
-          optionsBuilder: (value) {
-            final query = value.text.trim().toLowerCase();
-            if (query.isEmpty) return const Iterable<String>.empty();
-            return nameStore.names.where(
-              (name) => name.toLowerCase().contains(query),
-            );
-          },
-          fieldViewBuilder: (context, controller, focusNode, onFieldSubmitted) {
-            _addStaffController.value = controller.value;
-            return TextField(
-              controller: _addStaffController,
-              focusNode: focusNode,
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Autocomplete<String>(
+              optionsBuilder: (value) {
+                final query = value.text.trim().toLowerCase();
+                if (query.isEmpty) return const Iterable<String>.empty();
+                return nameStore.names.where(
+                  (name) => name.toLowerCase().contains(query),
+                );
+              },
+              fieldViewBuilder:
+                  (context, controller, focusNode, onFieldSubmitted) {
+                _addStaffController.value = controller.value;
+                return TextField(
+                  controller: _addStaffController,
+                  focusNode: focusNode,
+                  decoration: const InputDecoration(
+                    labelText: 'Staff Name',
+                    hintText: 'Enter staff member name',
+                    border: OutlineInputBorder(),
+                  ),
+                  autofocus: true,
+                );
+              },
+              onSelected: (selection) {
+                _addStaffController.text = selection;
+              },
+            ),
+            const SizedBox(height: 12),
+            DropdownButtonFormField<String>(
+              value: employmentType,
               decoration: const InputDecoration(
-                labelText: 'Staff Name',
-                hintText: 'Enter staff member name',
+                labelText: 'Employment type',
                 border: OutlineInputBorder(),
               ),
-              autofocus: true,
-            );
-          },
-          onSelected: (selection) {
-            _addStaffController.text = selection;
-          },
+              items: const [
+                DropdownMenuItem(value: 'permanent', child: Text('Permanent')),
+                DropdownMenuItem(value: 'temporary', child: Text('Temporary')),
+              ],
+              onChanged: (value) {
+                if (value == null) return;
+                setState(() {
+                  employmentType = value;
+                  if (employmentType == 'permanent') {
+                    endDate = null;
+                  }
+                });
+              },
+            ),
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                const Text('Start date'),
+                const Spacer(),
+                OutlinedButton(
+                  onPressed: () async {
+                    final picked = await showDatePicker(
+                      context: context,
+                      initialDate: startDate,
+                      firstDate: DateTime(DateTime.now().year - 10),
+                      lastDate: DateTime(DateTime.now().year + 10),
+                    );
+                    if (picked != null) {
+                      setState(() => startDate = picked);
+                    }
+                  },
+                  child: Text(DateFormat('MMM d, yyyy').format(startDate)),
+                ),
+              ],
+            ),
+            if (employmentType == 'temporary') ...[
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  const Text('End date'),
+                  const Spacer(),
+                  OutlinedButton(
+                    onPressed: () async {
+                      final picked = await showDatePicker(
+                        context: context,
+                        initialDate: endDate ?? startDate,
+                        firstDate: startDate,
+                        lastDate: DateTime(DateTime.now().year + 10),
+                      );
+                      if (picked != null) {
+                        setState(() => endDate = picked);
+                      }
+                    },
+                    child: Text(endDate == null
+                        ? 'Select'
+                        : DateFormat('MMM d, yyyy').format(endDate!)),
+                  ),
+                ],
+              ),
+            ],
+          ],
         ),
         actions: [
           TextButton(
@@ -191,7 +296,18 @@ class _StaffManagementScreenState extends ConsumerState<StaffManagementScreen> {
             onPressed: () {
               if (_addStaffController.text.trim().isNotEmpty) {
                 final name = _addStaffController.text.trim();
-                ref.read(rosterProvider).addStaff(name);
+                final roster = ref.read(rosterProvider);
+                roster.addStaff(name);
+                final created = roster.staffMembers
+                    .where((s) => s.name == name)
+                    .lastOrNull;
+                if (created != null) {
+                  roster.setStaffStartDate(created.id, startDate);
+                  roster.setStaffEmploymentType(created.id, employmentType);
+                  if (employmentType == 'temporary' && endDate != null) {
+                    roster.setStaffEndDate(created.id, endDate);
+                  }
+                }
                 nameStore.addName(name);
                 _addStaffController.clear();
                 Navigator.pop(context);
@@ -204,6 +320,7 @@ class _StaffManagementScreenState extends ConsumerState<StaffManagementScreen> {
             child: const Text('Add'),
           ),
         ],
+      ),
       ),
     );
   }
@@ -253,9 +370,9 @@ class _StaffManagementScreenState extends ConsumerState<StaffManagementScreen> {
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Delete Staff Member?'),
+        title: const Text('End Employment?'),
         content: const Text(
-            'This will remove the staff member and all their associated overrides. This action cannot be undone.'),
+            'This will set an end date for the staff member. Past rosters remain intact and you can clear the end date later if needed.'),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
@@ -267,11 +384,11 @@ class _StaffManagementScreenState extends ConsumerState<StaffManagementScreen> {
               Navigator.pop(context);
               ScaffoldMessenger.of(context).showSnackBar(
                 const SnackBar(
-                    content: Text('Staff member deleted successfully')),
+                    content: Text('Staff employment ended successfully')),
               );
             },
             style: FilledButton.styleFrom(backgroundColor: Colors.red),
-            child: const Text('Delete'),
+            child: const Text('End'),
           ),
         ],
       ),
@@ -408,6 +525,22 @@ class _StaffCard extends ConsumerWidget {
                         case 'edit':
                           onEditStart();
                           break;
+                        case 'startDate':
+                          _showStartDateDialog(context, roster, staffMember);
+                          break;
+                        case 'endDate':
+                          _showEndDateDialog(context, roster, staffMember);
+                          break;
+                        case 'clearEnd':
+                          roster.setStaffEndDate(staffMember.id, null);
+                          break;
+                        case 'leaveStatus':
+                          _showLeaveStatusDialog(
+                              context, roster, staffMember);
+                          break;
+                        case 'clearLeave':
+                          roster.clearStaffLeaveStatus(staffMember.id);
+                          break;
                         case 'leave':
                           _showLeaveDialog(context, staffMember.name);
                           break;
@@ -431,6 +564,46 @@ class _StaffCard extends ConsumerWidget {
                         child: ListTile(
                           leading: Icon(Icons.edit),
                           title: Text('Edit Name'),
+                          contentPadding: EdgeInsets.zero,
+                        ),
+                      ),
+                      const PopupMenuItem(
+                        value: 'startDate',
+                        child: ListTile(
+                          leading: Icon(Icons.event_available),
+                          title: Text('Set Start Date'),
+                          contentPadding: EdgeInsets.zero,
+                        ),
+                      ),
+                      const PopupMenuItem(
+                        value: 'endDate',
+                        child: ListTile(
+                          leading: Icon(Icons.event_busy),
+                          title: Text('Set End Date'),
+                          contentPadding: EdgeInsets.zero,
+                        ),
+                      ),
+                      const PopupMenuItem(
+                        value: 'clearEnd',
+                        child: ListTile(
+                          leading: Icon(Icons.event_repeat),
+                          title: Text('Clear End Date'),
+                          contentPadding: EdgeInsets.zero,
+                        ),
+                      ),
+                      const PopupMenuItem(
+                        value: 'leaveStatus',
+                        child: ListTile(
+                          leading: Icon(Icons.airline_seat_recline_extra),
+                          title: Text('Set Leave/Secondment'),
+                          contentPadding: EdgeInsets.zero,
+                        ),
+                      ),
+                      const PopupMenuItem(
+                        value: 'clearLeave',
+                        child: ListTile(
+                          leading: Icon(Icons.event_available),
+                          title: Text('Clear Leave/Secondment'),
                           contentPadding: EdgeInsets.zero,
                         ),
                       ),
@@ -472,8 +645,8 @@ class _StaffCard extends ConsumerWidget {
                       const PopupMenuItem(
                         value: 'delete',
                         child: ListTile(
-                          leading: Icon(Icons.delete, color: Colors.red),
-                          title: Text('Delete',
+                          leading: Icon(Icons.person_off, color: Colors.red),
+                          title: Text('End Employment',
                               style: TextStyle(color: Colors.red)),
                           contentPadding: EdgeInsets.zero,
                         ),
@@ -497,8 +670,53 @@ class _StaffCard extends ConsumerWidget {
                   Icons.edit_calendar,
                   '${overrides.length} overrides',
                 ),
+                const SizedBox(width: 8),
+                _buildInfoChip(
+                  context,
+                  Icons.badge,
+                  staffMember.employmentType == 'temporary'
+                      ? 'Temporary'
+                      : 'Permanent',
+                ),
               ],
             ),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Icon(Icons.event_available,
+                    size: 14, color: Theme.of(context).colorScheme.primary),
+                const SizedBox(width: 6),
+                Text(
+                  'Start: ${staffMember.startDate != null ? DateFormat('MMM d, yyyy').format(staffMember.startDate!) : 'Not set'}',
+                  style: GoogleFonts.inter(fontSize: 12),
+                ),
+                const SizedBox(width: 12),
+                Icon(Icons.event_busy,
+                    size: 14, color: Theme.of(context).colorScheme.error),
+                const SizedBox(width: 6),
+                Text(
+                  'End: ${staffMember.endDate != null ? DateFormat('MMM d, yyyy').format(staffMember.endDate!) : 'Active'}',
+                  style: GoogleFonts.inter(fontSize: 12),
+                ),
+              ],
+            ),
+            if (staffMember.leaveType != null &&
+                staffMember.leaveStart != null &&
+                staffMember.leaveEnd != null) ...[
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  Icon(Icons.airline_seat_recline_extra,
+                      size: 14,
+                      color: Theme.of(context).colorScheme.onSurfaceVariant),
+                  const SizedBox(width: 6),
+                  Text(
+                    '${_formatLeaveLabel(staffMember.leaveType)}: ${DateFormat('MMM d, yyyy').format(staffMember.leaveStart!)} → ${DateFormat('MMM d, yyyy').format(staffMember.leaveEnd!)}',
+                    style: GoogleFonts.inter(fontSize: 12),
+                  ),
+                ],
+              ),
+            ],
             if (!staffMember.isActive) ...[
               const SizedBox(height: 8),
               Container(
@@ -541,6 +759,162 @@ class _StaffCard extends ConsumerWidget {
             style: const TextStyle(fontSize: 12),
           ),
         ],
+      ),
+    );
+  }
+
+  Future<void> _showStartDateDialog(
+    BuildContext context,
+    RosterNotifier roster,
+    models.StaffMember staff,
+  ) async {
+    final now = DateTime.now();
+    final initial = staff.startDate ?? now;
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: initial,
+      firstDate: DateTime(now.year - 10),
+      lastDate: DateTime(now.year + 10),
+    );
+    if (picked != null) {
+      roster.setStaffStartDate(staff.id, picked);
+    }
+  }
+
+  Future<void> _showEndDateDialog(
+    BuildContext context,
+    RosterNotifier roster,
+    models.StaffMember staff,
+  ) async {
+    final now = DateTime.now();
+    final initial = staff.endDate ?? now;
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: initial,
+      firstDate: DateTime(now.year - 10),
+      lastDate: DateTime(now.year + 10),
+    );
+    if (picked != null) {
+      roster.setStaffEndDate(staff.id, picked);
+    }
+  }
+
+  Future<void> _showLeaveStatusDialog(
+    BuildContext context,
+    RosterNotifier roster,
+    models.StaffMember staff,
+  ) async {
+    String leaveType = staff.leaveType ?? 'leave';
+    String customLabel = _extractCustomLeaveLabel(leaveType) ?? '';
+    if (leaveType.startsWith('custom:')) {
+      leaveType = 'custom';
+    }
+    DateTime startDate = staff.leaveStart ?? DateTime.now();
+    DateTime endDate = staff.leaveEnd ?? DateTime.now().add(const Duration(days: 7));
+    await showDialog(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setState) => AlertDialog(
+          title: const Text('Set Leave/Secondment'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              DropdownButtonFormField<String>(
+                value: leaveType,
+                decoration: const InputDecoration(
+                  labelText: 'Type',
+                  border: OutlineInputBorder(),
+                ),
+                items: const [
+                  DropdownMenuItem(value: 'leave', child: Text('Leave')),
+                  DropdownMenuItem(value: 'annual', child: Text('Annual Leave')),
+                  DropdownMenuItem(value: 'sick', child: Text('Sick')),
+                  DropdownMenuItem(value: 'secondment', child: Text('Secondment')),
+                  DropdownMenuItem(value: 'custom', child: Text('Custom')),
+                ],
+                onChanged: (value) {
+                  if (value == null) return;
+                  setState(() => leaveType = value);
+                },
+              ),
+              if (leaveType == 'custom') ...[
+                const SizedBox(height: 12),
+                TextField(
+                  decoration: const InputDecoration(
+                    labelText: 'Custom leave label',
+                    border: OutlineInputBorder(),
+                    hintText: 'e.g. Compassionate Leave',
+                  ),
+                  onChanged: (value) => setState(() => customLabel = value),
+                  controller: TextEditingController(text: customLabel),
+                ),
+              ],
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  const Text('Start date'),
+                  const Spacer(),
+                  OutlinedButton(
+                    onPressed: () async {
+                      final picked = await showDatePicker(
+                        context: context,
+                        initialDate: startDate,
+                        firstDate: DateTime(DateTime.now().year - 10),
+                        lastDate: DateTime(DateTime.now().year + 10),
+                      );
+                      if (picked != null) {
+                        setState(() => startDate = picked);
+                      }
+                    },
+                    child: Text(DateFormat('MMM d, yyyy').format(startDate)),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  const Text('End date'),
+                  const Spacer(),
+                  OutlinedButton(
+                    onPressed: () async {
+                      final picked = await showDatePicker(
+                        context: context,
+                        initialDate: endDate,
+                        firstDate: startDate,
+                        lastDate: DateTime(DateTime.now().year + 10),
+                      );
+                      if (picked != null) {
+                        setState(() => endDate = picked);
+                      }
+                    },
+                    child: Text(DateFormat('MMM d, yyyy').format(endDate)),
+                  ),
+                ],
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () {
+                final effectiveType = leaveType == 'custom'
+                    ? 'custom:${customLabel.trim()}'
+                    : leaveType;
+                roster.setStaffLeaveStatus(
+                  staffId: staff.id,
+                  leaveType: effectiveType,
+                  startDate: startDate,
+                  endDate: endDate,
+                );
+                Navigator.pop(context);
+              },
+              child: const Text('Save'),
+            ),
+          ],
+        ),
       ),
     );
   }

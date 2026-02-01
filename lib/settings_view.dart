@@ -1,14 +1,23 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'providers.dart';
 import 'models.dart' as models;
 import 'aws_service.dart';
 import 'services/holiday_service.dart';
 import 'services/country_service.dart';
 import 'services/location_service.dart';
+import 'services/analytics_service.dart';
 
 class SettingsView extends ConsumerWidget {
   const SettingsView({super.key});
+
+  static const String _privacyUrl =
+      'https://github.com/dfunkgyro/roster_champ/blob/main/PRIVACY.md';
+  static const String _termsUrl =
+      'https://github.com/dfunkgyro/roster_champ/blob/main/TERMS.md';
+  static const String _issuesUrl =
+      'https://github.com/dfunkgyro/roster_champ/issues';
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -26,9 +35,15 @@ class SettingsView extends ConsumerWidget {
         const SizedBox(height: 16),
         _buildSyncSection(context, ref, settings),
         const SizedBox(height: 16),
+        _buildAnalyticsSection(context, ref, settings),
+        const SizedBox(height: 16),
         _buildDisplaySection(context, ref, settings),
         const SizedBox(height: 16),
+        _buildVoiceSection(context, ref, settings),
+        const SizedBox(height: 16),
         _buildHolidaySection(context, ref, settings, roster),
+        const SizedBox(height: 16),
+        _buildMultiCountryHolidaySection(context, ref, settings),
         const SizedBox(height: 16),
         _buildAccountSection(context),
         const SizedBox(height: 16),
@@ -36,6 +51,129 @@ class SettingsView extends ConsumerWidget {
         const SizedBox(height: 16),
         _buildAboutSection(context),
       ],
+    );
+  }
+
+  Widget _buildMultiCountryHolidaySection(
+    BuildContext context,
+    WidgetRef ref,
+    models.AppSettings settings,
+  ) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(
+                  Icons.public,
+                  color: Theme.of(context).colorScheme.primary,
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  'Additional Holiday Countries',
+                  style: Theme.of(context).textTheme.titleLarge,
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            Text(
+              'Overlay holidays from multiple countries.',
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+            const SizedBox(height: 12),
+            if (settings.additionalHolidayCountries.isEmpty)
+              const Text('No additional countries selected.'),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: settings.additionalHolidayCountries
+                  .map(
+                    (code) => Chip(
+                      label: Text(code),
+                      onDeleted: () {
+                        final updated =
+                            List<String>.from(settings.additionalHolidayCountries)
+                              ..remove(code);
+                        ref.read(settingsProvider.notifier).updateSettings(
+                              settings.copyWith(
+                                additionalHolidayCountries: updated,
+                              ),
+                            );
+                      },
+                    ),
+                  )
+                  .toList(),
+            ),
+            const SizedBox(height: 12),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: OutlinedButton.icon(
+                onPressed: () => _showAddHolidayCountryDialog(
+                  context,
+                  ref,
+                  settings,
+                ),
+                icon: const Icon(Icons.add),
+                label: const Text('Add Country'),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _showAddHolidayCountryDialog(
+    BuildContext context,
+    WidgetRef ref,
+    models.AppSettings settings,
+  ) async {
+    final countries = await HolidayService.instance.getCountries();
+    String? selectedCode;
+    await showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Add Holiday Country'),
+        content: DropdownButtonFormField<String>(
+          value: selectedCode,
+          items: countries
+              .map(
+                (c) => DropdownMenuItem(
+                  value: c.code,
+                  child: Text('${c.name} (${c.code})'),
+                ),
+              )
+              .toList(),
+          onChanged: (value) => selectedCode = value,
+          decoration: const InputDecoration(labelText: 'Country'),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () {
+              if (selectedCode == null) return;
+              final updated =
+                  List<String>.from(settings.additionalHolidayCountries);
+              if (!updated.contains(selectedCode)) {
+                updated.add(selectedCode!);
+              }
+              ref.read(settingsProvider.notifier).updateSettings(
+                    settings.copyWith(
+                      additionalHolidayCountries: updated,
+                    ),
+                  );
+              Navigator.pop(context);
+            },
+            child: const Text('Add'),
+          ),
+        ],
+      ),
     );
   }
 
@@ -192,6 +330,87 @@ class SettingsView extends ConsumerWidget {
                   }
                 },
               ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildAnalyticsSection(
+    BuildContext context,
+    WidgetRef ref,
+    models.AppSettings settings,
+  ) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(
+                  Icons.analytics,
+                  color: Theme.of(context).colorScheme.primary,
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  'Analytics',
+                  style: Theme.of(context).textTheme.titleLarge,
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            SwitchListTile(
+              title: const Text('In-app Analytics'),
+              subtitle: const Text('Track usage for dashboards and insights'),
+              value: settings.analyticsEnabled,
+              onChanged: (value) {
+                ref.read(settingsProvider.notifier).updateSettings(
+                      settings.copyWith(analyticsEnabled: value),
+                    );
+              },
+              secondary: const Icon(Icons.insights),
+            ),
+            SwitchListTile(
+              title: const Text('Cloud Analytics (AWS)'),
+              subtitle: const Text('Upload anonymized events to AWS'),
+              value: settings.analyticsCloudEnabled,
+              onChanged: settings.analyticsEnabled
+                  ? (value) {
+                      ref.read(settingsProvider.notifier).updateSettings(
+                            settings.copyWith(analyticsCloudEnabled: value),
+                          );
+                    }
+                  : null,
+              secondary: const Icon(Icons.cloud_upload),
+            ),
+            ListTile(
+              leading: const Icon(Icons.refresh),
+              title: const Text('Sync Analytics Now'),
+              subtitle: const Text('Push local analytics to AWS'),
+              onTap: () async {
+                await AnalyticsService.instance.flushToAws();
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('Analytics sync triggered')),
+                  );
+                }
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.delete_outline),
+              title: const Text('Clear Local Analytics'),
+              subtitle: const Text('Remove analytics stored on this device'),
+              onTap: () async {
+                await AnalyticsService.instance.clearLocal();
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('Local analytics cleared')),
+                  );
+                }
+              },
             ),
           ],
         ),
@@ -687,6 +906,154 @@ class SettingsView extends ConsumerWidget {
                 },
               ),
             ),
+            ListTile(
+              leading: const Icon(Icons.language),
+              title: const Text('Language'),
+              subtitle: const Text('Change app language'),
+              trailing: DropdownButton<String>(
+                value: settings.languageCode,
+                items: const {
+                  'en': 'English',
+                  'es': 'Spanish',
+                  'fr': 'French',
+                  'de': 'German',
+                  'it': 'Italian',
+                  'pt': 'Portuguese',
+                  'zh': 'Chinese',
+                  'ja': 'Japanese',
+                  'ko': 'Korean',
+                  'ar': 'Arabic',
+                }.entries.map((entry) {
+                  return DropdownMenuItem(
+                    value: entry.key,
+                    child: Text(entry.value),
+                  );
+                }).toList(),
+                onChanged: (value) {
+                  if (value != null) {
+                    ref.read(settingsProvider.notifier).updateSettings(
+                          settings.copyWith(languageCode: value),
+                        );
+                  }
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildVoiceSection(
+    BuildContext context,
+    WidgetRef ref,
+    models.AppSettings settings,
+  ) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(
+                  Icons.record_voice_over_rounded,
+                  color: Theme.of(context).colorScheme.primary,
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  'Voice Assistant',
+                  style: Theme.of(context).textTheme.titleMedium,
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            SwitchListTile(
+              title: const Text('Enable voice'),
+              subtitle: const Text('Let RC listen and respond with speech'),
+              value: settings.voiceEnabled,
+              onChanged: (value) {
+                ref.read(settingsProvider.notifier).updateSettings(
+                      settings.copyWith(voiceEnabled: value),
+                    );
+              },
+              secondary: const Icon(Icons.mic_rounded),
+            ),
+            SwitchListTile(
+              title: const Text('Always listening'),
+              subtitle: const Text(
+                'Wake word: "RC", "Roster Champ", or "Roster Champion"',
+              ),
+              value: settings.voiceAlwaysListening,
+              onChanged: settings.voiceEnabled
+                  ? (value) {
+                      ref.read(settingsProvider.notifier).updateSettings(
+                            settings.copyWith(voiceAlwaysListening: value),
+                          );
+                    }
+                  : null,
+              secondary: const Icon(Icons.hearing_rounded),
+            ),
+            const SizedBox(height: 8),
+            DropdownButtonFormField<String>(
+              value: settings.voiceInputEngine,
+              decoration: const InputDecoration(
+                labelText: 'Input engine',
+              ),
+              items: const [
+                DropdownMenuItem(
+                  value: 'onDevice',
+                  child: Text('On-device (offline)'),
+                ),
+                DropdownMenuItem(
+                  value: 'aws',
+                  child: Text('AWS (online)'),
+                ),
+              ],
+              onChanged: settings.voiceEnabled
+                  ? (value) {
+                      if (value != null) {
+                        ref.read(settingsProvider.notifier).updateSettings(
+                              settings.copyWith(voiceInputEngine: value),
+                            );
+                      }
+                    }
+                  : null,
+            ),
+            const SizedBox(height: 12),
+            DropdownButtonFormField<String>(
+              value: settings.voiceOutputEngine,
+              decoration: const InputDecoration(
+                labelText: 'Voice response engine',
+              ),
+              items: const [
+                DropdownMenuItem(
+                  value: 'aws',
+                  child: Text('AWS Polly (online)'),
+                ),
+                DropdownMenuItem(
+                  value: 'onDevice',
+                  child: Text('On-device TTS'),
+                ),
+              ],
+              onChanged: settings.voiceEnabled
+                  ? (value) {
+                      if (value != null) {
+                        ref.read(settingsProvider.notifier).updateSettings(
+                              settings.copyWith(voiceOutputEngine: value),
+                            );
+                      }
+                    }
+                  : null,
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'If offline, RC automatically falls back to on-device speech.',
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
+            ),
           ],
         ),
       ),
@@ -1124,30 +1491,34 @@ class SettingsView extends ConsumerWidget {
               leading: const Icon(Icons.privacy_tip),
               title: const Text('Privacy Policy'),
               trailing: const Icon(Icons.open_in_new),
-              onTap: () {
-                // TODO: Open privacy policy
-              },
+              onTap: () => _openExternal(context, _privacyUrl),
             ),
             ListTile(
               leading: const Icon(Icons.description),
               title: const Text('Terms of Service'),
               trailing: const Icon(Icons.open_in_new),
-              onTap: () {
-                // TODO: Open terms of service
-              },
+              onTap: () => _openExternal(context, _termsUrl),
             ),
             ListTile(
               leading: const Icon(Icons.bug_report),
               title: const Text('Report an Issue'),
               trailing: const Icon(Icons.open_in_new),
-              onTap: () {
-                // TODO: Open issue tracker
-              },
+              onTap: () => _openExternal(context, _issuesUrl),
             ),
           ],
         ),
       ),
     );
+  }
+
+  Future<void> _openExternal(BuildContext context, String url) async {
+    final uri = Uri.parse(url);
+    final ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
+    if (!ok && context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Unable to open link.')),
+      );
+    }
   }
 
   Widget _buildAccountSection(BuildContext context) {
@@ -1348,7 +1719,7 @@ class SettingsView extends ConsumerWidget {
                   ),
                   SwitchListTile(
                     title: const Text('Apply leave overrides'),
-                    subtitle: const Text('Set selected staff to L on holidays'),
+                    subtitle: const Text('Set selected staff to AL on holidays'),
                     value: applyLeave,
                     onChanged: (value) => setState(() => applyLeave = value),
                   ),

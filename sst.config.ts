@@ -366,6 +366,28 @@ export default $config({
       },
     });
 
+    const analyticsTable = new aws.dynamodb.Table("analytics-events", {
+      attributes: [
+        { name: "rosterId", type: "S" },
+        { name: "eventId", type: "S" },
+        { name: "userId", type: "S" },
+      ],
+      hashKey: "rosterId",
+      rangeKey: "eventId",
+      billingMode: "PAY_PER_REQUEST",
+      serverSideEncryption: {
+        enabled: true,
+        kmsKeyArn: kmsKey.arn,
+      },
+      globalSecondaryIndexes: [
+        {
+          name: "userId-index",
+          hashKey: "userId",
+          projectionType: "ALL",
+        },
+      ],
+    });
+
     const userProfilesTable = new aws.dynamodb.Table("user-profiles", {
       attributes: [{ name: "userId", type: "S" }],
       hashKey: "userId",
@@ -487,6 +509,7 @@ export default $config({
         presenceTable.arn,
         timeClockTable.arn,
         aiFeedbackTable.arn,
+        analyticsTable.arn,
         exportsBucket.arn,
         notificationsTopic.arn,
         userProfilesTable.arn,
@@ -511,6 +534,7 @@ export default $config({
           presenceArn,
           timeClockArn,
           aiFeedbackArn,
+          analyticsArn,
           exportsArn,
           notificationsArn,
           profilesArn,
@@ -548,6 +572,7 @@ export default $config({
                   presenceArn,
                   timeClockArn,
                   aiFeedbackArn,
+                  analyticsArn,
                   exportsArn,
                   `${exportsArn}/*`,
                   profilesArn,
@@ -556,6 +581,7 @@ export default $config({
                   `${teamMembersArn}/index/*`,
                   `${availabilityArn}/index/*`,
                   `${swapArn}/index/*`,
+                  `${analyticsArn}/index/*`,
                 ],
               },
               {
@@ -639,6 +665,7 @@ export default $config({
           PRESENCE_TABLE: presenceTable.name,
           TIME_CLOCK_TABLE: timeClockTable.name,
           AI_FEEDBACK_TABLE: aiFeedbackTable.name,
+          ANALYTICS_TABLE: analyticsTable.name,
           EXPORTS_BUCKET: exportsBucket.bucket,
           CLOUDFRONT_URL: exportsDistribution.domainName,
           SNS_TOPIC_ARN: notificationsTopic.arn,
@@ -728,6 +755,7 @@ export default $config({
       { key: "POST /ai/feedback", auth: true },
       { key: "GET /roles/templates", auth: true },
       { key: "POST /ai/suggestions", auth: true },
+      { key: "POST /analytics/track", auth: true },
     ];
 
     routes.forEach((route) => {
