@@ -1433,9 +1433,7 @@ class _RosterViewState extends ConsumerState<RosterView> {
         final observanceMap = bundle.observanceMap;
         final sportsMap = bundle.sportsMap;
         final eventMap = _buildEventMap(roster, start, end);
-        if (snapshot.connectionState == ConnectionState.waiting) {
-          return const Center(child: CircularProgressIndicator());
-        }
+        // Keep showing previous content while loading to preserve scroll position
         return GestureDetector(
           onScaleStart: (details) {
             _scaleStart = _cellScale;
@@ -1460,6 +1458,7 @@ class _RosterViewState extends ConsumerState<RosterView> {
                 return false;
               },
               child: ListView.builder(
+                key: const ValueKey('month_view_list'),
                 controller: _monthScrollController,
                 padding: const EdgeInsets.all(12),
                 cacheExtent: 50000,
@@ -1772,9 +1771,7 @@ class _RosterViewState extends ConsumerState<RosterView> {
         final observanceMap = bundle.observanceMap;
         final sportsMap = bundle.sportsMap;
         final eventMap = _buildEventMap(roster, start, end);
-        if (snapshot.connectionState == ConnectionState.waiting) {
-          return const Center(child: CircularProgressIndicator());
-        }
+        // Keep showing previous content while loading to preserve scroll position
         return GestureDetector(
           onScaleStart: (details) {
             _scaleStart = _cellScale;
@@ -1799,6 +1796,7 @@ class _RosterViewState extends ConsumerState<RosterView> {
                 return false;
               },
               child: ListView.builder(
+                key: const ValueKey('timeline_view_list'),
                 controller: _monthScrollController,
                 scrollDirection: Axis.horizontal,
                 padding: const EdgeInsets.all(12),
