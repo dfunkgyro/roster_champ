@@ -47,6 +47,13 @@ class SystemView extends ConsumerWidget {
                     : models.ConnectionStatus.disconnected,
                 detail: awsAuthenticated ? 'Signed in' : 'Signed out',
               ),
+              ListTile(
+                leading: const Icon(Icons.verified_user),
+                title: const Text('Auth Provider'),
+                subtitle: Text(
+                  AwsService.instance.authProvider ?? 'Unknown',
+                ),
+              ),
             ],
           ),
         ),
@@ -95,6 +102,35 @@ class SystemView extends ConsumerWidget {
                 },
                 icon: const Icon(Icons.copy),
                 label: const Text('Copy Diagnostic Report'),
+              ),
+              const SizedBox(height: 12),
+              FilledButton.icon(
+                onPressed: () async {
+                  final oauthReport = StringBuffer()
+                    ..writeln('OAuth Diagnostics')
+                    ..writeln('Error: ${AwsService.instance.lastOAuthError ?? 'None'}')
+                    ..writeln(
+                      'Error Description: ${AwsService.instance.lastOAuthErrorDescription ?? 'None'}',
+                    )
+                    ..writeln(
+                      'Redirect URI: ${AwsService.instance.lastOAuthRedirect?.toString() ?? 'None'}',
+                    )
+                    ..writeln(
+                      'Authorize URL: ${AwsService.instance.lastOAuthAuthorizeUrl?.toString() ?? 'None'}',
+                    );
+                  await Clipboard.setData(
+                    ClipboardData(text: oauthReport.toString()),
+                  );
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text('OAuth diagnostics copied'),
+                      ),
+                    );
+                  }
+                },
+                icon: const Icon(Icons.shield_outlined),
+                label: const Text('Copy OAuth Diagnostics'),
               ),
             ],
           ),

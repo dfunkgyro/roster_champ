@@ -1,4 +1,8 @@
 import 'package:flutter/material.dart';
+import 'package:pdf/widgets.dart' as pw;
+import 'package:pdf/pdf.dart';
+import 'package:image/image.dart' as img;
+import 'dart:typed_data';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:file_picker/file_picker.dart';
 import 'dart:async';
@@ -18,12 +22,15 @@ import 'screens/staff_management_screen.dart';
 import 'screens/pattern_editor_screen.dart';
 import 'screens/login_screen.dart';
 import 'screens/roster_sharing_screen.dart';
+import 'import_roster_screen.dart';
 import 'providers.dart';
 import 'models.dart' as models;
 import 'dialogs.dart';
 import 'aws_service.dart';
 import 'utils/error_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:roster_champ/safe_text_field.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 class HomeScreen extends ConsumerStatefulWidget {
   final bool isGuestMode;
@@ -43,8 +50,14 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
     with SingleTickerProviderStateMixin {
   late TabController _tabController;
   int _currentIndex = 0;
+  bool _didInitialRosterSnap = false;
+  bool _chromeHidden = false;
+  models.AppLayoutStyle? _lastLayoutStyle;
+  final GlobalKey<RosterViewState> _rosterViewKey =
+      GlobalKey<RosterViewState>();
   final TextEditingController _commandController = TextEditingController();
   Timer? _autoSyncTimer;
+  bool _requestedMicPermission = false;
 
   @override
   void initState() {
@@ -55,11 +68,19 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
         setState(() {
           _currentIndex = _tabController.index;
         });
+        if (_tabController.index == 0) {
+          _rosterViewKey.currentState?.snapToTodayOnFocus();
+        }
       }
     });
     _configureAutoSync(ref.read(settingsProvider));
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _maybeShowOnboarding();
+      _requestMicPermissionOnce();
+      if (!_didInitialRosterSnap) {
+        _rosterViewKey.currentState?.snapToTodayOnFocus();
+        _didInitialRosterSnap = true;
+      }
     });
   }
 
@@ -71,15 +92,47 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
     super.dispose();
   }
 
+  Future<void> _requestMicPermissionOnce() async {
+    if (_requestedMicPermission) return;
+    _requestedMicPermission = true;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final alreadyAsked = prefs.getBool('micPermissionAsked') ?? false;
+      if (alreadyAsked) return;
+      final status = await Permission.microphone.status;
+      if (!status.isGranted) {
+        await Permission.microphone.request();
+      }
+      await prefs.setBool('micPermissionAsked', true);
+    } catch (_) {
+      // Ignore permission errors; voice can still be enabled later.
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     ref.listen<models.AppSettings>(settingsProvider, (_, next) {
       _configureAutoSync(next);
     });
     final roster = ref.watch(rosterProvider);
+    final settings = ref.watch(settingsProvider);
+
+    if (_lastLayoutStyle != settings.layoutStyle) {
+      final shouldHide = settings.layoutStyle ==
+              models.AppLayoutStyle.sophisticated ||
+          settings.layoutStyle == models.AppLayoutStyle.ambience;
+      _chromeHidden = shouldHide;
+      _lastLayoutStyle = settings.layoutStyle;
+    }
+
+    final hideChrome = _chromeHidden &&
+        (settings.layoutStyle == models.AppLayoutStyle.sophisticated ||
+            settings.layoutStyle == models.AppLayoutStyle.ambience);
 
     return Scaffold(
-      appBar: AppBar(
+      appBar: hideChrome
+          ? null
+          : AppBar(
         title: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -253,6 +306,15 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
                 case 'export_csv':
                   await _exportRosterCsv();
                   break;
+                case 'export_pdf':
+                  await _exportRosterPdf();
+                  break;
+                case 'export_png':
+                  await _exportRosterPng();
+                  break;
+                case 'export_jpg':
+                  await _exportRosterJpg();
+                  break;
                 case 'export_ics':
                   await _exportCalendarIcs();
                   break;
@@ -377,6 +439,30 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
                 ),
               ),
               const PopupMenuItem(
+                value: 'export_pdf',
+                child: ListTile(
+                  leading: Icon(Icons.picture_as_pdf_outlined),
+                  title: Text('Export Roster PDF'),
+                  contentPadding: EdgeInsets.zero,
+                ),
+              ),
+              const PopupMenuItem(
+                value: 'export_png',
+                child: ListTile(
+                  leading: Icon(Icons.image_outlined),
+                  title: Text('Export Roster PNG'),
+                  contentPadding: EdgeInsets.zero,
+                ),
+              ),
+              const PopupMenuItem(
+                value: 'export_jpg',
+                child: ListTile(
+                  leading: Icon(Icons.image_rounded),
+                  title: Text('Export Roster JPG'),
+                  contentPadding: EdgeInsets.zero,
+                ),
+              ),
+              const PopupMenuItem(
                 value: 'export_ics',
                 child: ListTile(
                   leading: Icon(Icons.calendar_month_rounded),
@@ -452,22 +538,43 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
             ],
           ),
         ),
-      body: TabBarView(
-        controller: _tabController,
+      body: Stack(
         children: [
-          const RosterView(),
-          const AiSuggestionsView(),
-          const OperationsView(),
-          const StatsView(),
-          const StaffManagementScreen(),
-          const EventsView(),
-          const SettingsView(),
-          const AnalyticsView(),
-          const SystemView(),
-          _CommandCenterView(
-            actions: _buildCommandActions(roster.readOnly),
-            onOpenPalette: _showCommandPalette,
+          TabBarView(
+            controller: _tabController,
+            children: [
+              RosterView(key: _rosterViewKey),
+              const AiSuggestionsView(),
+              const OperationsView(),
+              const StatsView(),
+              const StaffManagementScreen(),
+              const EventsView(),
+              const SettingsView(),
+              const AnalyticsView(),
+              const SystemView(),
+              _CommandCenterView(
+                actions: _buildCommandActions(roster.readOnly),
+                onOpenPalette: _showCommandPalette,
+              ),
+            ],
           ),
+          if (settings.layoutStyle == models.AppLayoutStyle.sophisticated ||
+              settings.layoutStyle == models.AppLayoutStyle.ambience)
+            Positioned(
+              top: 12,
+              right: 12,
+              child: SafeArea(
+                child: FloatingActionButton.small(
+                  heroTag: 'chromeToggle',
+                  onPressed: () {
+                    setState(() => _chromeHidden = !_chromeHidden);
+                  },
+                  child: Icon(
+                    _chromeHidden ? Icons.menu_open : Icons.menu,
+                  ),
+                ),
+              ),
+            ),
         ],
       ),
       floatingActionButton: null,
@@ -542,6 +649,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
       return;
     }
 
+    // Auto-sync is intentionally throttled for responsiveness.
     final interval = Duration(minutes: settings.syncInterval);
     _autoSyncTimer = Timer.periodic(interval, (_) {
       ref.read(rosterProvider).autoSyncToAWS();
@@ -662,7 +770,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  TextField(
+                  SafeTextField(
                     controller: _commandController,
                     decoration: const InputDecoration(
                       hintText: 'Type a command...',
@@ -822,6 +930,16 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
         onExecute: _showAddEventDialog,
       ),
       _CommandAction(
+        label: 'Import Roster',
+        icon: Icons.upload_file_rounded,
+        keywords: const ['import', 'csv'],
+        onExecute: () {
+          Navigator.of(context).push(
+            MaterialPageRoute(builder: (_) => const ImportRosterScreen()),
+          );
+        },
+      ),
+      _CommandAction(
         label: 'Initialize Roster',
         icon: Icons.restart_alt_rounded,
         keywords: const ['initialize', 'reset'],
@@ -847,6 +965,24 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
         icon: Icons.table_view_rounded,
         keywords: const ['export', 'csv'],
         onExecute: _exportRosterCsv,
+      ),
+      _CommandAction(
+        label: 'Export Roster PDF',
+        icon: Icons.picture_as_pdf_outlined,
+        keywords: const ['export', 'pdf'],
+        onExecute: _exportRosterPdf,
+      ),
+      _CommandAction(
+        label: 'Export Roster PNG',
+        icon: Icons.image_outlined,
+        keywords: const ['export', 'png', 'image'],
+        onExecute: _exportRosterPng,
+      ),
+      _CommandAction(
+        label: 'Export Roster JPG',
+        icon: Icons.image_rounded,
+        keywords: const ['export', 'jpg', 'jpeg', 'image'],
+        onExecute: _exportRosterJpg,
       ),
       _CommandAction(
         label: 'Export Calendar (ICS)',
@@ -1171,7 +1307,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
         ),
         const Divider(),
         row('Staff', local['staff'], remote['staff']),
-        row('Overrides', local['overrides'], remote['overrides']),
+        row('Changes', local['overrides'], remote['overrides']),
         row('Events', local['events'], remote['events']),
         row('Pattern weeks', local['patternWeeks'], remote['patternWeeks']),
       ],
@@ -1318,7 +1454,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
                   if (useCustomShift)
                     Padding(
                       padding: const EdgeInsets.only(top: 8),
-                      child: TextField(
+                      child: SafeTextField(
                         controller: customShiftController,
                         decoration: const InputDecoration(
                           labelText: 'Custom shift code',
@@ -1427,9 +1563,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
                     onChanged: (value) {
                       setState(() => overwriteExisting = value);
                     },
-                    title: const Text('Overwrite existing overrides'),
+                    title: const Text('Overwrite existing changes'),
                   ),
-                  TextField(
+                  SafeTextField(
                     controller: reasonController,
                     decoration: const InputDecoration(
                       labelText: 'Reason (optional)',
@@ -1576,6 +1712,104 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
             ),
           );
         }
+      }
+    } catch (e) {
+      if (mounted) {
+        ErrorHandler.showErrorSnackBar(context, e);
+      }
+    }
+  }
+
+  Future<void> _exportRosterPng() async {
+    await _exportRosterImage(format: 'png');
+  }
+
+  Future<void> _exportRosterJpg() async {
+    await _exportRosterImage(format: 'jpg');
+  }
+
+  Future<void> _exportRosterPdf() async {
+    try {
+      final bytes = await _rosterViewKey.currentState
+          ?.captureRosterPng(pixelRatio: 2.0);
+      if (bytes == null) {
+        throw Exception('Unable to capture roster view.');
+      }
+      final doc = pw.Document();
+      final image = pw.MemoryImage(bytes);
+      doc.addPage(
+        pw.Page(
+          pageFormat: PdfPageFormat.a4,
+          build: (context) => pw.Center(
+            child: pw.Image(image, fit: pw.BoxFit.contain),
+          ),
+        ),
+      );
+      final fileName =
+          'roster_export_${DateTime.now().millisecondsSinceEpoch}.pdf';
+      String? outputFile = await FilePicker.platform.saveFile(
+        dialogTitle: 'Export Roster PDF',
+        fileName: fileName,
+        type: FileType.custom,
+        allowedExtensions: ['pdf'],
+      );
+      if (outputFile == null) return;
+      if (!outputFile.endsWith('.pdf')) {
+        outputFile = '$outputFile.pdf';
+      }
+      final file = File(outputFile);
+      await file.writeAsBytes(await doc.save());
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('PDF exported to: ${file.path}'),
+            backgroundColor: Colors.green,
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ErrorHandler.showErrorSnackBar(context, e);
+      }
+    }
+  }
+
+  Future<void> _exportRosterImage({required String format}) async {
+    try {
+      final pngBytes = await _rosterViewKey.currentState
+          ?.captureRosterPng(pixelRatio: 2.0);
+      if (pngBytes == null) {
+        throw Exception('Unable to capture roster view.');
+      }
+      Uint8List bytesOut = pngBytes;
+      if (format == 'jpg') {
+        final decoded = img.decodeImage(pngBytes);
+        if (decoded == null) {
+          throw Exception('Failed to encode JPG.');
+        }
+        bytesOut = Uint8List.fromList(img.encodeJpg(decoded, quality: 90));
+      }
+      final fileName =
+          'roster_export_${DateTime.now().millisecondsSinceEpoch}.$format';
+      String? outputFile = await FilePicker.platform.saveFile(
+        dialogTitle: 'Export Roster ${format.toUpperCase()}',
+        fileName: fileName,
+        type: FileType.custom,
+        allowedExtensions: [format],
+      );
+      if (outputFile == null) return;
+      if (!outputFile.toLowerCase().endsWith('.$format')) {
+        outputFile = '$outputFile.$format';
+      }
+      final file = File(outputFile);
+      await file.writeAsBytes(bytesOut);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('${format.toUpperCase()} exported to: ${file.path}'),
+            backgroundColor: Colors.green,
+          ),
+        );
       }
     } catch (e) {
       if (mounted) {
@@ -1736,7 +1970,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
       builder: (context) => AlertDialog(
         title: const Text('Clear All Data?'),
         content: const Text(
-          'This will permanently delete all roster data, including staff, overrides, and events. This action cannot be undone.',
+          'This will permanently delete all roster data, including staff, changes, and events. This action cannot be undone.',
         ),
         actions: [
           TextButton(
@@ -1951,7 +2185,7 @@ class _CommandCenterViewState extends State<_CommandCenterView> {
             Row(
               children: [
                 Expanded(
-                  child: TextField(
+                  child: SafeTextField(
                     controller: _filterController,
                     decoration: const InputDecoration(
                       labelText: 'Search commands',

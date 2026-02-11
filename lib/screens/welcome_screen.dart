@@ -2,14 +2,13 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'login_screen.dart';
 import '../utils/error_handler.dart';
+import 'package:roster_champ/safe_text_field.dart';
 
 class WelcomeScreen extends StatefulWidget {
-  final VoidCallback onGuestMode;
   final Future<void> Function(String code) onAccessCode;
 
   const WelcomeScreen({
     super.key,
-    required this.onGuestMode,
     required this.onAccessCode,
   });
 
@@ -76,7 +75,7 @@ class _WelcomeScreenState extends State<WelcomeScreen>
                     const Spacer(flex: 2),
                     _buildActions(context),
                     const SizedBox(height: 20),
-                    _buildGuestInfo(context),
+                    const SizedBox.shrink(),
                     const Spacer(),
                   ],
                 ),
@@ -282,22 +281,9 @@ class _WelcomeScreenState extends State<WelcomeScreen>
         const SizedBox(height: 12),
         SizedBox(
           width: double.infinity,
-          child: OutlinedButton(
-            onPressed: _isLoading ? null : widget.onGuestMode,
-            style: OutlinedButton.styleFrom(
-              padding: const EdgeInsets.symmetric(vertical: 16),
-              foregroundColor: Theme.of(context).colorScheme.onSurface,
-              side: BorderSide(
-                color: Theme.of(context).colorScheme.onSurface.withOpacity(0.4),
-              ),
-            ),
-            child: const Text(
-              'Continue as Guest',
-              style: TextStyle(fontSize: 16),
-            ),
-          ),
+          child: const SizedBox.shrink(),
         ),
-        const SizedBox(height: 12),
+        const SizedBox(height: 0),
         SizedBox(
           width: double.infinity,
           child: OutlinedButton.icon(
@@ -321,50 +307,7 @@ class _WelcomeScreenState extends State<WelcomeScreen>
   }
 
   Widget _buildGuestInfo(BuildContext context) {
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: Theme.of(context).colorScheme.surface.withOpacity(0.65),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(
-          color: Theme.of(context).colorScheme.primary.withOpacity(0.15),
-        ),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Icon(
-                Icons.info_outline_rounded,
-                size: 20,
-                color: Theme.of(context).colorScheme.primary,
-              ),
-              const SizedBox(width: 8),
-              Text(
-                'Guest mode',
-                style: GoogleFonts.spaceGrotesk(
-                  fontWeight: FontWeight.bold,
-                  color: Theme.of(context).colorScheme.onSurface,
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          Text(
-            '* Use the app instantly, no account needed.\n'
-            '* Data stays on this device only.\n'
-            '* Try features before syncing.\n'
-            '* Sign in later to share and backup.',
-            style: GoogleFonts.spaceGrotesk(
-              fontSize: 12,
-              color: Theme.of(context).colorScheme.onSurfaceVariant,
-            ),
-          ),
-        ],
-      ),
-    );
+    return const SizedBox.shrink();
   }
 
   Future<void> _openEmailLogin() async {
@@ -380,7 +323,7 @@ class _WelcomeScreenState extends State<WelcomeScreen>
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('Enter Access Code'),
-        content: TextField(
+        content: SafeTextField(
           controller: controller,
           decoration: const InputDecoration(
             labelText: 'Access code',

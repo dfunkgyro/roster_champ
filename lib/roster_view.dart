@@ -1,9 +1,14 @@
 import 'dart:async';
+import 'dart:typed_data';
+import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 import 'providers.dart';
+import 'import_roster_screen.dart';
 import 'models.dart' as models;
 import 'dialogs.dart';
 import 'services/holiday_service.dart';
@@ -11,11 +16,15 @@ import 'services/observance_service.dart';
 import 'services/sports_service.dart';
 import 'services/weather_service.dart';
 import 'services/time_service.dart';
+import 'services/voice_service.dart';
 import 'aws_service.dart';
 import 'screens/pattern_editor_screen.dart';
+import 'ai_suggestions_view.dart';
+import 'safe_text_field.dart';
 import 'screens/roster_sharing_screen.dart';
 import 'roster_generator_view.dart';
 import 'utils/error_handler.dart';
+import 'package:roster_champ/safe_text_field.dart';
 
 class _OverlayBundle {
   final Map<String, HolidayItem> holidayMap;
@@ -35,15 +44,21 @@ class RosterView extends ConsumerStatefulWidget {
   const RosterView({super.key});
 
   @override
-  ConsumerState<RosterView> createState() => _RosterViewState();
+  ConsumerState<RosterView> createState() => RosterViewState();
 }
 
-class _RosterViewState extends ConsumerState<RosterView> {
+class RosterViewState extends ConsumerState<RosterView> {
+  final GlobalKey _captureKey = GlobalKey();
   DateTime _currentWeekStart = _startOfDay(DateTime.now());
   DateTime _currentMonthAnchor =
       DateTime(DateTime.now().year, DateTime.now().month);
   final ScrollController _scrollController = ScrollController();
-  final ScrollController _monthScrollController = ScrollController();
+  final ItemScrollController _monthListController = ItemScrollController();
+  final ItemPositionsListener _monthListPositions =
+      ItemPositionsListener.create();
+  final ItemScrollController _timelineListController = ItemScrollController();
+  final ItemPositionsListener _timelineListPositions =
+      ItemPositionsListener.create();
   final Map<String, ScrollController> _monthHorizontalControllers = {};
   final Map<String, ScrollController> _monthVerticalControllers = {};
   late final PageController _weekPageController;
@@ -53,11 +68,14 @@ class _RosterViewState extends ConsumerState<RosterView> {
   int _weekStartDay = 0;
   final Map<String, TextEditingController> _nameControllers = {};
   final Map<String, FocusNode> _nameFocusNodes = {};
+  final TextEditingController _miniAiController = TextEditingController();
   final Map<String, List<HolidayItem>> _holidayCache = {};
   final Map<String, List<HolidayItem>> _observanceCache = {};
   String? _selectedStaffName;
   _RosterViewMode _viewMode = _RosterViewMode.month;
   bool _focusMode = true;
+  bool _showFloatingAi = false;
+  Offset _floatingAiOffset = const Offset(16, 120);
   double _cellScale = 1.0;
   double _scaleStart = 1.0;
   final Map<String, GlobalKey> _monthCardKeys = {};
@@ -67,8 +85,11 @@ class _RosterViewState extends ConsumerState<RosterView> {
   DateTime? _focusedDate;
   bool _monthAutoSnapEnabled = true;
   bool _initialMonthSnapDone = false;
-  static const int _monthsBack = 12;
-  static const int _monthsForward = 12;
+  int _snapRetryCount = 0;
+  String? _lastRosterSnapshotKey;
+  int _lastFocusRequestToken = 0;
+  int _monthsBack = 12;
+  int _monthsForward = 12;
   Future<_OverlayBundle>? _monthOverlayFuture;
   String? _monthOverlayKey;
   bool get _isMonthView => _viewMode == _RosterViewMode.month;
@@ -106,9 +127,69 @@ class _RosterViewState extends ConsumerState<RosterView> {
     }
   }
 
+  models.Override? _findOverrideForDate(
+    RosterNotifier roster,
+    String personName,
+    DateTime date,
+  ) {
+    final match = roster.overrides.firstWhere(
+      (o) =>
+          o.personName == personName &&
+          o.date.year == date.year &&
+          o.date.month == date.month &&
+          o.date.day == date.day,
+      orElse: () => models.Override(
+        id: '',
+        personName: '',
+        date: DateTime.now(),
+        shift: '',
+        createdAt: DateTime.now(),
+      ),
+    );
+    return match.id.isEmpty ? null : match;
+  }
+
+  String _shiftFullName(String code) {
+    switch (code.toUpperCase()) {
+      case 'E':
+        return 'Early shift';
+      case 'D':
+        return 'Day shift';
+      case 'L':
+        return 'Late shift';
+      case 'N':
+        return 'Night shift';
+      case 'D12':
+        return '12 hour day shift';
+      case 'N12':
+        return '12 hour night shift';
+      case 'AL':
+        return 'Annual leave';
+      case 'R':
+        return 'Rest day';
+      case 'C':
+        return 'Cover';
+      case 'C1':
+        return 'Cover 1';
+      case 'C2':
+        return 'Cover 2';
+      case 'C3':
+        return 'Cover 3';
+      case 'C4':
+        return 'Cover 4';
+      default:
+        return code.toUpperCase();
+    }
+  }
+
   @override
   void initState() {
     super.initState();
+    final settings = ref.read(settingsProvider);
+    if (settings.layoutStyle == models.AppLayoutStyle.sophisticated ||
+        settings.layoutStyle == models.AppLayoutStyle.ambience) {
+      _focusMode = true;
+    }
     _weekPageAnchor =
         _startOfWeekWithStart(DateTime.now(), _weekStartDay);
     _currentWeekStart = _weekPageAnchor;
@@ -142,9 +223,9 @@ class _RosterViewState extends ConsumerState<RosterView> {
   @override
   void dispose() {
     _scrollController.dispose();
-    _monthScrollController.dispose();
     _todayChipTimer?.cancel();
     _weekPageController.dispose();
+    _miniAiController.dispose();
     for (final controller in _monthHorizontalControllers.values) {
       controller.dispose();
     }
@@ -166,7 +247,45 @@ class _RosterViewState extends ConsumerState<RosterView> {
     final settings = ref.watch(settingsProvider);
     final isReadOnly = roster.readOnly;
     final isCompactLayout = MediaQuery.of(context).size.width < 720;
+    if (_monthsBack != settings.monthsBackLimit ||
+        _monthsForward != settings.monthsForwardLimit) {
+      _monthsBack = settings.monthsBackLimit.clamp(1, 120);
+      _monthsForward = settings.monthsForwardLimit.clamp(1, 120);
+    }
     _ensureWeekStartDay(roster.weekStartDay);
+    final today = _startOfDay(DateTime.now());
+    final rosterSnapshotKey =
+        '${AwsService.instance.currentRosterId ?? 'local'}-${roster.lastSyncedAt?.millisecondsSinceEpoch ?? 0}-${roster.getActiveStaffNames().length}';
+    if (_lastRosterSnapshotKey != rosterSnapshotKey) {
+      _lastRosterSnapshotKey = rosterSnapshotKey;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        setState(() {
+          _currentMonthAnchor = DateTime(today.year, today.month);
+          _focusedDate = today;
+          _initialMonthSnapDone = false;
+          _monthAutoSnapEnabled = true;
+        });
+        _snapToTodayViewport();
+      });
+    }
+    final focusToken = roster.focusRequestToken;
+    final focusDate = roster.focusRequestDate;
+    if (focusDate != null && focusToken != _lastFocusRequestToken) {
+      _lastFocusRequestToken = focusToken;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        _jumpToDate(focusDate);
+        roster.clearFocusRequest(focusToken);
+      });
+    }
+    if (_isMonthLike && !_initialMonthSnapDone) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          _snapToTodayViewport();
+        }
+      });
+    }
 
     if (roster.getActiveStaffNames().isEmpty) {
       return Center(
@@ -201,8 +320,10 @@ class _RosterViewState extends ConsumerState<RosterView> {
       );
     }
 
-    return Column(
-      children: [
+    return RepaintBoundary(
+      key: _captureKey,
+      child: Column(
+        children: [
         if (isReadOnly)
           Container(
             width: double.infinity,
@@ -239,113 +360,270 @@ class _RosterViewState extends ConsumerState<RosterView> {
             settings.siteLon != null &&
             !_focusMode)
           _buildWeatherStrip(settings),
-        _buildViewModeToggle(context),
         _buildDateRibbon(context),
         const Divider(height: 1),
         Expanded(
-          child: Stack(
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              final maxX =
+                  (constraints.maxWidth - 64).clamp(8.0, constraints.maxWidth);
+              final maxY = (constraints.maxHeight - 64)
+                  .clamp(8.0, constraints.maxHeight);
+              return Stack(
+                children: [
+                  _isWeekView
+                      ? _buildMonthOverviewHorizontal(context, roster, settings)
+                      : _buildMonthOverview(context, roster, settings),
+                  if (_showTodayChip && !_isMonthLike)
+                    Positioned(
+                      right: 16,
+                      bottom: 16,
+                      child: FilledButton.icon(
+                        onPressed: _smartHome,
+                        icon: const Icon(Icons.today_rounded),
+                        label: const Text('Back to Today'),
+                      ),
+                    ),
+                  if (_showFloatingAi)
+                    Positioned(
+                      left: _floatingAiOffset.dx.clamp(8.0, maxX),
+                      top: _floatingAiOffset.dy.clamp(8.0, maxY),
+                      child: GestureDetector(
+                        onPanUpdate: (details) {
+                          setState(() {
+                            final next = _floatingAiOffset + details.delta;
+                            _floatingAiOffset = Offset(
+                              next.dx.clamp(8.0, maxX),
+                              next.dy.clamp(8.0, maxY),
+                            );
+                          });
+                        },
+                        child: Material(
+                          elevation: 6,
+                          color: Theme.of(context).colorScheme.primaryContainer,
+                          borderRadius: BorderRadius.circular(18),
+                          child: Padding(
+                            padding: const EdgeInsets.all(10),
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Icon(
+                                      Icons.smart_toy_outlined,
+                                      size: 18,
+                                      color: Theme.of(context)
+                                          .colorScheme
+                                          .onPrimaryContainer,
+                                    ),
+                                    const SizedBox(width: 6),
+                                    Text(
+                                      'RC',
+                                      style: TextStyle(
+                                        fontWeight: FontWeight.w700,
+                                        color: Theme.of(context)
+                                            .colorScheme
+                                            .onPrimaryContainer,
+                                      ),
+                                    ),
+                                    const SizedBox(width: 8),
+                                    InkWell(
+                                      onTap: () => _showFloatingAiPanel(context),
+                                      child: Icon(
+                                        Icons.open_in_new_rounded,
+                                        size: 16,
+                                        color: Theme.of(context)
+                                            .colorScheme
+                                            .onPrimaryContainer,
+                                      ),
+                                    ),
+                                    const SizedBox(width: 4),
+                                    InkWell(
+                                      onTap: () {
+                                        setState(() => _showFloatingAi = false);
+                                      },
+                                      child: Icon(
+                                        Icons.close_rounded,
+                                        size: 16,
+                                        color: Theme.of(context)
+                                            .colorScheme
+                                            .onPrimaryContainer
+                                            .withOpacity(0.8),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                const SizedBox(height: 8),
+                                ConstrainedBox(
+                                  constraints: const BoxConstraints(maxWidth: 220),
+                              child: Row(
+                                    children: [
+                                      Expanded(
+                                        child: SafeTextField(
+                                          controller: _miniAiController,
+                                          decoration: InputDecoration(
+                                            hintText: 'Ask RC...',
+                                            isDense: true,
+                                            contentPadding:
+                                                const EdgeInsets.symmetric(
+                                              horizontal: 10,
+                                              vertical: 8,
+                                            ),
+                                            border: OutlineInputBorder(
+                                              borderRadius:
+                                                  BorderRadius.circular(12),
+                                            ),
+                                          ),
+                                          onSubmitted: (_) {
+                                            final text =
+                                                _miniAiController.text.trim();
+                                            if (text.isEmpty) return;
+                                            _miniAiController.clear();
+                                            _showFloatingAiPanel(
+                                              context,
+                                              initialCommand: text,
+                                            );
+                                          },
+                                        ),
+                                      ),
+                                      const SizedBox(width: 6),
+                                      ValueListenableBuilder<bool>(
+                                        valueListenable:
+                                            VoiceService.instance.isListening,
+                                        builder: (context, listening, _) {
+                                          return IconButton(
+                                            padding: EdgeInsets.zero,
+                                            constraints: const BoxConstraints(
+                                              minWidth: 36,
+                                              minHeight: 36,
+                                            ),
+                                            icon: Icon(
+                                              listening
+                                                  ? Icons.mic_rounded
+                                                  : Icons.mic_none_rounded,
+                                              size: 18,
+                                              color: listening
+                                                  ? Theme.of(context)
+                                                      .colorScheme
+                                                      .primary
+                                                  : Theme.of(context)
+                                                      .colorScheme
+                                                      .onSurfaceVariant,
+                                            ),
+                                            onPressed: () {
+                                              if (listening) {
+                                                VoiceService.instance
+                                                    .stopListening();
+                                                return;
+                                              }
+                                              VoiceService.instance.onCommand =
+                                                  (command) {
+                                                final text = command.trim();
+                                                if (text.isEmpty) return;
+                                                _showFloatingAiPanel(
+                                                  context,
+                                                  initialCommand: text,
+                                                );
+                                              };
+                                              VoiceService.instance
+                                                  .startListening(
+                                                      pushToTalk: true);
+                                            },
+                                          );
+                                        },
+                                      ),
+                                      IconButton(
+                                        padding: EdgeInsets.zero,
+                                        constraints: const BoxConstraints(
+                                          minWidth: 36,
+                                          minHeight: 36,
+                                        ),
+                                        icon: Icon(
+                                          Icons.send_rounded,
+                                          size: 18,
+                                          color: Theme.of(context)
+                                              .colorScheme
+                                              .primary,
+                                        ),
+                                        onPressed: () {
+                                          final text =
+                                              _miniAiController.text.trim();
+                                          if (text.isEmpty) return;
+                                          _miniAiController.clear();
+                                          _showFloatingAiPanel(
+                                            context,
+                                            initialCommand: text,
+                                          );
+                                        },
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                ],
+              );
+            },
+          ),
+        ),
+        ],
+      ),
+    );
+  }
+
+  Future<Uint8List?> captureRosterPng({double pixelRatio = 2.0}) async {
+    final context = _captureKey.currentContext;
+    if (context == null) return null;
+    final boundary =
+        context.findRenderObject() as RenderRepaintBoundary?;
+    if (boundary == null) return null;
+    final image = await boundary.toImage(pixelRatio: pixelRatio);
+    final data = await image.toByteData(format: ui.ImageByteFormat.png);
+    return data?.buffer.asUint8List();
+  }
+
+  Widget _buildViewModeToggle(BuildContext context) {
+    return ToggleButtons(
+      isSelected: [_isWeekView, _isMonthView],
+      onPressed: (index) {
+        setState(() {
+          _viewMode =
+              index == 0 ? _RosterViewMode.week : _RosterViewMode.month;
+          _focusedDate = _focusedDate ?? _startOfDay(DateTime.now());
+          _initialMonthSnapDone = false;
+          _monthAutoSnapEnabled = true;
+        });
+        _snapToTodayViewport();
+      },
+      borderRadius: BorderRadius.circular(8),
+      children: const [
+        Padding(
+          padding: EdgeInsets.symmetric(horizontal: 10),
+          child: Row(
             children: [
-              _isWeekView
-                  ? _buildMonthOverviewHorizontal(context, roster, settings)
-                  : _buildMonthOverview(context, roster, settings),
-              if (_showTodayChip && !_isMonthLike)
-                Positioned(
-                  right: 16,
-                  bottom: 16,
-                  child: FilledButton.icon(
-                    onPressed: _smartHome,
-                    icon: const Icon(Icons.today_rounded),
-                    label: const Text('Back to Today'),
-                  ),
-                ),
+              Icon(Icons.calendar_view_week_rounded, size: 16),
+              SizedBox(width: 4),
+              Text('Timeline'),
+            ],
+          ),
+        ),
+        Padding(
+          padding: EdgeInsets.symmetric(horizontal: 10),
+          child: Row(
+            children: [
+              Icon(Icons.calendar_view_month_rounded, size: 16),
+              SizedBox(width: 4),
+              Text('Month'),
             ],
           ),
         ),
       ],
-    );
-  }
-
-  Widget _buildViewModeToggle(BuildContext context) {
-    final useCompactNames = _cellScale < 0.6;
-    final nameFontSize = _cellScale < 0.55 ? 11.0 : 13.0;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      child: Row(
-        children: [
-          ToggleButtons(
-            isSelected: [_isWeekView, _isMonthView],
-            onPressed: (index) {
-              setState(() {
-                _viewMode =
-                    index == 0 ? _RosterViewMode.week : _RosterViewMode.month;
-                _focusedDate = _focusedDate ?? _startOfDay(DateTime.now());
-              });
-              _scrollToToday(force: true);
-            },
-            borderRadius: BorderRadius.circular(8),
-            children: const [
-              Padding(
-                padding: EdgeInsets.symmetric(horizontal: 12),
-                child: Row(
-                  children: [
-                    Icon(Icons.calendar_view_week_rounded, size: 18),
-                    SizedBox(width: 6),
-                    Text('Timeline'),
-                  ],
-                ),
-              ),
-              Padding(
-                padding: EdgeInsets.symmetric(horizontal: 12),
-                child: Row(
-                  children: [
-                    Icon(Icons.calendar_view_month_rounded, size: 18),
-                    SizedBox(width: 6),
-                    Text('Month'),
-                  ],
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(width: 8),
-          IconButton(
-            tooltip: _focusMode ? 'Exit focus mode' : 'Focus mode',
-            onPressed: () {
-              setState(() => _focusMode = !_focusMode);
-            },
-            icon: Icon(
-              _focusMode ? Icons.fullscreen_exit_rounded : Icons.fullscreen_rounded,
-            ),
-          ),
-          TextButton.icon(
-            onPressed: _smartHome,
-            icon: const Icon(Icons.today_rounded, size: 18),
-            label: const Text('Today'),
-          ),
-          PopupMenuButton<double>(
-            tooltip: 'Roster size',
-            onSelected: (value) {
-              setState(() => _cellScale = value);
-            },
-            itemBuilder: (context) => const [
-              PopupMenuItem(value: 1.0, child: Text('Large')),
-              PopupMenuItem(value: 0.85, child: Text('Medium')),
-              PopupMenuItem(value: 0.7, child: Text('Small')),
-              PopupMenuItem(value: 0.6, child: Text('X-Small')),
-              PopupMenuItem(value: 0.5, child: Text('XX-Small')),
-            ],
-            icon: const Icon(Icons.text_fields_rounded),
-          ),
-          const Spacer(),
-          if (_selectedStaffName != null)
-            TextButton.icon(
-              onPressed: () {
-                setState(() => _selectedStaffName = null);
-              },
-              icon: const Icon(Icons.highlight_off, size: 18),
-              label: Text('Clear ${_selectedStaffName!}'),
-            ),
-        ],
-      ),
     );
   }
 
@@ -405,6 +683,11 @@ class _RosterViewState extends ConsumerState<RosterView> {
                 onPressed: () => _openPatternEditor(context),
                 icon: const Icon(Icons.pattern_rounded),
                 label: const Text('Edit Pattern'),
+              ),
+              OutlinedButton.icon(
+                onPressed: () => _showDuplicatePatternDialog(context),
+                icon: const Icon(Icons.copy_rounded),
+                label: const Text('Duplicate Pattern'),
               ),
               OutlinedButton.icon(
                 onPressed: () {
@@ -602,6 +885,12 @@ class _RosterViewState extends ConsumerState<RosterView> {
     );
   }
 
+  Future<void> _openImportRoster(BuildContext context) async {
+    await Navigator.of(context).push(
+      MaterialPageRoute(builder: (_) => const ImportRosterScreen()),
+    );
+  }
+
   Future<void> _showBulkEditDialog(BuildContext context) async {
     final roster = ref.read(rosterProvider);
     if (roster.staffMembers.isEmpty) return;
@@ -637,7 +926,7 @@ class _RosterViewState extends ConsumerState<RosterView> {
                   decoration: const InputDecoration(labelText: 'Staff'),
                 ),
                 const SizedBox(height: 12),
-                TextField(
+                SafeTextField(
                   decoration: const InputDecoration(labelText: 'Shift'),
                   controller: shiftController,
                 ),
@@ -679,7 +968,7 @@ class _RosterViewState extends ConsumerState<RosterView> {
                   ],
                 ),
                 const SizedBox(height: 12),
-                TextField(
+                SafeTextField(
                   controller: reasonController,
                   decoration:
                       const InputDecoration(labelText: 'Reason (optional)'),
@@ -904,6 +1193,10 @@ class _RosterViewState extends ConsumerState<RosterView> {
     );
   }
 
+  void snapToTodayOnFocus() {
+    _smartHome();
+  }
+
   ScrollController _getMonthVerticalController(DateTime monthStart) {
     final key = 'v-${_monthKey(monthStart)}';
     return _monthVerticalControllers.putIfAbsent(
@@ -949,18 +1242,19 @@ class _RosterViewState extends ConsumerState<RosterView> {
       _focusedDate = today;
       _showTodayChip = false;
     });
-    if (_isMonthLike) {
-      if (_monthScrollController.hasClients) {
-        _monthScrollController.jumpTo(0);
-      }
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        _scrollToTodayMonth(force: true);
-        Future.delayed(const Duration(milliseconds: 350), () {
-          if (!mounted) return;
-          _scrollToTodayDayInMonth(today);
-        });
-      });
-    }
+    _snapToTodayViewport();
+  }
+
+  void _jumpToDate(DateTime date) {
+    final target = _startOfDay(date);
+    setState(() {
+      _currentMonthAnchor = DateTime(target.year, target.month);
+      _monthAutoSnapEnabled = true;
+      _initialMonthSnapDone = false;
+      _focusedDate = target;
+      _showTodayChip = false;
+    });
+    _snapToDateViewport(target);
   }
 
   void _snapMonthAndToday() {
@@ -971,7 +1265,30 @@ class _RosterViewState extends ConsumerState<RosterView> {
       _monthAutoSnapEnabled = true;
       _initialMonthSnapDone = false;
     });
-    _scrollToToday(force: true);
+    _snapToTodayViewport();
+  }
+
+  void _snapToTodayViewport() {
+    final today = _startOfDay(DateTime.now());
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _scrollToTodayMonth(force: true);
+      Future.delayed(const Duration(milliseconds: 350), () {
+        if (!mounted) return;
+        _scrollToTodayDayInMonth(today);
+      });
+    });
+  }
+
+  void _snapToDateViewport(DateTime target) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _scrollToMonth(target, alignment: 0.1);
+      Future.delayed(const Duration(milliseconds: 350), () {
+        if (!mounted) return;
+        _scrollToTodayDayInMonth(target);
+      });
+    });
   }
 
   void _scrollToToday({bool force = false}) {
@@ -997,7 +1314,6 @@ class _RosterViewState extends ConsumerState<RosterView> {
       if (_isMonthLike) {
         if (force || (!_initialMonthSnapDone && _monthAutoSnapEnabled)) {
           _scrollToTodayMonth(force: force);
-          _initialMonthSnapDone = true;
         }
       }
       Future.delayed(const Duration(milliseconds: 350), () {
@@ -1008,6 +1324,7 @@ class _RosterViewState extends ConsumerState<RosterView> {
 
   void _scrollToTodayMonth({bool force = false}) {
     final today = _startOfDay(DateTime.now());
+    _snapRetryCount = 0;
     _scrollToMonth(today, alignment: 0.1);
     _scrollToTodayDayInMonth(today);
   }
@@ -1015,28 +1332,25 @@ class _RosterViewState extends ConsumerState<RosterView> {
   void _scrollToMonth(DateTime target, {double alignment = 0.1}) {
     final monthStart = DateTime(target.year, target.month, 1);
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      final context = _getMonthCardKey(monthStart).currentContext;
-      if (context != null) {
-        Scrollable.ensureVisible(
-          context,
-          alignment: alignment,
-          duration: const Duration(milliseconds: 300),
-        );
-        return;
-      }
-      if (_monthScrollController.hasClients) {
-        _monthScrollController.jumpTo(0);
-      }
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        final retryContext = _getMonthCardKey(monthStart).currentContext;
-        if (retryContext != null) {
-          Scrollable.ensureVisible(
-            retryContext,
-            alignment: alignment,
-            duration: const Duration(milliseconds: 300),
-          );
+      final months = _buildMonthList(_currentMonthAnchor);
+      final index = months.indexWhere((m) =>
+          m.year == monthStart.year && m.month == monthStart.month);
+      if (index >= 0) {
+        final controller =
+            _isWeekView ? _timelineListController : _monthListController;
+        if (controller.isAttached) {
+          controller.jumpTo(index: index, alignment: alignment);
+          _initialMonthSnapDone = true;
+          return;
         }
-      });
+      }
+      if (_snapRetryCount < 30) {
+        _snapRetryCount += 1;
+        Future.delayed(const Duration(milliseconds: 100), () {
+          if (!mounted) return;
+          _scrollToMonth(target, alignment: alignment);
+        });
+      }
     });
   }
 
@@ -1410,6 +1724,13 @@ class _RosterViewState extends ConsumerState<RosterView> {
     models.AppSettings settings,
   ) {
     final months = _buildMonthList(_currentMonthAnchor);
+    if (_isMonthLike && !_initialMonthSnapDone) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          _scrollToTodayMonth(force: true);
+        }
+      });
+    }
     final start = months.first;
     final end = DateTime(months.last.year, months.last.month + 1, 0);
     final staffMembers = roster.getStaffForRange(start, end);
@@ -1433,9 +1754,7 @@ class _RosterViewState extends ConsumerState<RosterView> {
         final observanceMap = bundle.observanceMap;
         final sportsMap = bundle.sportsMap;
         final eventMap = _buildEventMap(roster, start, end);
-        if (snapshot.connectionState == ConnectionState.waiting) {
-          return const Center(child: CircularProgressIndicator());
-        }
+        // Keep rendering while overlays load to avoid snapping to the wrong month.
         return GestureDetector(
           onScaleStart: (details) {
             _scaleStart = _cellScale;
@@ -1448,7 +1767,6 @@ class _RosterViewState extends ConsumerState<RosterView> {
             });
           },
           child: Scrollbar(
-            controller: _monthScrollController,
             child: NotificationListener<ScrollNotification>(
               onNotification: (notification) {
                 if (notification is ScrollUpdateNotification) {
@@ -1459,13 +1777,15 @@ class _RosterViewState extends ConsumerState<RosterView> {
                 }
                 return false;
               },
-              child: ListView.builder(
-                controller: _monthScrollController,
-                padding: const EdgeInsets.all(12),
-                cacheExtent: 50000,
-                itemCount: months.length,
-                itemBuilder: (context, index) {
-                  final monthStart = months[index];
+              child: Stack(
+                children: [
+                  ScrollablePositionedList.builder(
+                    itemScrollController: _monthListController,
+                    itemPositionsListener: _monthListPositions,
+                    padding: const EdgeInsets.all(12),
+                    itemCount: months.length,
+                    itemBuilder: (context, index) {
+                      final monthStart = months[index];
                   final daysInMonth =
                       DateTime(monthStart.year, monthStart.month + 1, 0).day;
                   final days = List.generate(
@@ -1613,8 +1933,23 @@ class _RosterViewState extends ConsumerState<RosterView> {
                                                 ? roster.getPatternShiftForDate(
                                                     personName, day)
                                                 : roster.getShiftForDate(personName, day);
+                                            final baseShift = (vacant || preStart)
+                                                ? roster.getPatternShiftForDate(
+                                                    personName, day)
+                                                : roster.getBaseShiftForDate(
+                                                    personName, day);
+                                            final override = (!vacant && !preStart)
+                                                ? _findOverrideForDate(
+                                                    roster, personName, day)
+                                                : null;
+                                            final overrideShift =
+                                                override != null ? shift : null;
                                             final shiftColor =
-                                                _shiftColors[shift.toUpperCase()] ??
+                                                _shiftColors[(overrideShift ?? shift)
+                                                        .toUpperCase()] ??
+                                                    Colors.grey;
+                                            final baseShiftColor =
+                                                _shiftColors[baseShift.toUpperCase()] ??
                                                     Colors.grey;
                                             final holiday = holidayMap[_dateKey(day)];
                                             final events = eventMap[_dateKey(day)] ?? [];
@@ -1640,83 +1975,119 @@ class _RosterViewState extends ConsumerState<RosterView> {
                                                     _showShiftOptions(context, personName, day);
                                                   }
                                                 },
-                                                child: Container(
-                                                  width: _dayCellWidthMonth,
-                                                  height: _dayCellHeightMonth,
-                                                  alignment: Alignment.center,
-                                                  decoration: BoxDecoration(
-                                                    color: shiftColor.withOpacity(
-                                                        (vacant || unavailable || preStart)
-                                                            ? 0.08
-                                                            : 0.15),
-                                                    border: Border.all(
-                                                      color: shiftColor,
-                                                      width: 1.5,
-                                                    ),
-                                                    borderRadius: BorderRadius.circular(6),
-                                                    boxShadow: isToday
-                                                        ? [
-                                                            BoxShadow(
-                                                              color: Theme.of(context)
-                                                                  .colorScheme
-                                                                  .primary
-                                                                  .withOpacity(0.35),
-                                                              blurRadius: 6,
-                                                              spreadRadius: 1,
-                                                            ),
-                                                          ]
-                                                        : null,
-                                                  ),
-                                                  child: Stack(
-                                                    children: [
-                                                      Center(
-                                                        child: Column(
-                                                          mainAxisAlignment:
-                                                              MainAxisAlignment.center,
-                                                          children: [
-                                                            Text(
-                                                              shift,
-                                                              style: TextStyle(
-                                                                fontWeight: FontWeight.bold,
-                                                                color: (vacant ||
-                                                                        unavailable ||
-                                                                        preStart)
-                                                                    ? Colors.grey
-                                                                    : shiftColor,
-                                                                fontSize: 11,
-                                                              ),
-                                                            ),
-                                                            if (vacant)
-                                                              Text(
-                                                                'Vacant',
-                                                                style: TextStyle(
-                                                                  fontSize: 9,
-                                                                  color: Colors.grey[600],
-                                                                ),
-                                                              )
-                                                            else if (unavailable)
-                                                              Text(
-                                                            _formatLeaveLabel(
-                                                                staffMember
-                                                                    .leaveType),
-                                                                style: TextStyle(
-                                                                  fontSize: 9,
-                                                                  color: Colors.grey[600],
-                                                                ),
-                                                              )
-                                                            else if (preStart)
-                                                              Text(
-                                                                'Not started',
-                                                                style: TextStyle(
-                                                                  fontSize: 9,
-                                                                  color: Colors.grey[600],
-                                                                ),
-                                                              ),
-                                                          ],
-                                                        ),
+                                                child: Tooltip(
+                                                  message: overrideShift != null
+                                                      ? '${_shiftFullName(overrideShift)} (amended)'
+                                                      : _shiftFullName(shift),
+                                                  child: Container(
+                                                    width: _dayCellWidthMonth,
+                                                    height: _dayCellHeightMonth,
+                                                    alignment: Alignment.center,
+                                                    decoration: BoxDecoration(
+                                                      color: shiftColor.withOpacity(
+                                                          (vacant ||
+                                                                  unavailable ||
+                                                                  preStart)
+                                                              ? 0.08
+                                                              : overrideShift != null
+                                                                  ? 0.22
+                                                                  : 0.15),
+                                                      border: Border.all(
+                                                        color: shiftColor,
+                                                        width: overrideShift != null ? 2 : 1.5,
                                                       ),
-                                                      // Event lines appear only in the date header.
-                                                    ],
+                                                      borderRadius:
+                                                          BorderRadius.circular(6),
+                                                      boxShadow: isToday
+                                                          ? [
+                                                              BoxShadow(
+                                                                color: Theme.of(
+                                                                        context)
+                                                                    .colorScheme
+                                                                    .primary
+                                                                    .withOpacity(0.35),
+                                                                blurRadius: 6,
+                                                                spreadRadius: 1,
+                                                              ),
+                                                            ]
+                                                          : null,
+                                                    ),
+                                                    child: Stack(
+                                                      children: [
+                                                        Center(
+                                                          child: Column(
+                                                            mainAxisAlignment:
+                                                                MainAxisAlignment.center,
+                                                            children: [
+                                                              if (overrideShift !=
+                                                                  null) ...[
+                                                                Text(
+                                                                  overrideShift,
+                                                                  style: TextStyle(
+                                                                    fontWeight:
+                                                                        FontWeight.bold,
+                                                                    color: shiftColor,
+                                                                    fontSize: 12,
+                                                                  ),
+                                                                ),
+                                                                Text(
+                                                                  baseShift,
+                                                                  style: TextStyle(
+                                                                    fontSize: 8,
+                                                                    color: baseShiftColor
+                                                                        .withOpacity(0.7),
+                                                                  ),
+                                                                ),
+                                                              ] else ...[
+                                                                Text(
+                                                                  shift,
+                                                                  style: TextStyle(
+                                                                    fontWeight:
+                                                                        FontWeight.bold,
+                                                                    color: (vacant ||
+                                                                            unavailable ||
+                                                                            preStart)
+                                                                        ? Colors.grey
+                                                                        : shiftColor,
+                                                                    fontSize: 11,
+                                                                  ),
+                                                                ),
+                                                              ],
+                                                              if (vacant)
+                                                                Text(
+                                                                  'Vacant',
+                                                                  style: TextStyle(
+                                                                    fontSize: 9,
+                                                                    color:
+                                                                        Colors.grey[600],
+                                                                  ),
+                                                                )
+                                                              else if (unavailable)
+                                                                Text(
+                                                                  _formatLeaveLabel(
+                                                                      staffMember
+                                                                          .leaveType),
+                                                                  style: TextStyle(
+                                                                    fontSize: 9,
+                                                                    color:
+                                                                        Colors.grey[600],
+                                                                  ),
+                                                                )
+                                                              else if (preStart)
+                                                                Text(
+                                                                  'Not started',
+                                                                  style: TextStyle(
+                                                                    fontSize: 9,
+                                                                    color:
+                                                                        Colors.grey[600],
+                                                                  ),
+                                                                ),
+                                                            ],
+                                                          ),
+                                                        ),
+                                                        // Event lines appear only in the date header.
+                                                      ],
+                                                    ),
                                                   ),
                                                 ),
                                               ),
@@ -1736,6 +2107,15 @@ class _RosterViewState extends ConsumerState<RosterView> {
                   );
                 },
               ),
+                  if (snapshot.connectionState == ConnectionState.waiting)
+                    const Positioned(
+                      top: 8,
+                      left: 16,
+                      right: 16,
+                      child: LinearProgressIndicator(),
+                    ),
+                ],
+              ),
             ),
           ),
         );
@@ -1749,6 +2129,13 @@ class _RosterViewState extends ConsumerState<RosterView> {
     models.AppSettings settings,
   ) {
     final months = _buildMonthList(_currentMonthAnchor);
+    if (_isMonthLike && !_initialMonthSnapDone) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          _scrollToTodayMonth(force: true);
+        }
+      });
+    }
     final start = months.first;
     final end = DateTime(months.last.year, months.last.month + 1, 0);
     final staffMembers = roster.getStaffForRange(start, end);
@@ -1772,9 +2159,7 @@ class _RosterViewState extends ConsumerState<RosterView> {
         final observanceMap = bundle.observanceMap;
         final sportsMap = bundle.sportsMap;
         final eventMap = _buildEventMap(roster, start, end);
-        if (snapshot.connectionState == ConnectionState.waiting) {
-          return const Center(child: CircularProgressIndicator());
-        }
+        // Keep rendering while overlays load to avoid snapping to the wrong month.
         return GestureDetector(
           onScaleStart: (details) {
             _scaleStart = _cellScale;
@@ -1787,7 +2172,6 @@ class _RosterViewState extends ConsumerState<RosterView> {
             });
           },
           child: Scrollbar(
-            controller: _monthScrollController,
             child: NotificationListener<ScrollNotification>(
               onNotification: (notification) {
                 if (notification is ScrollUpdateNotification) {
@@ -1798,14 +2182,16 @@ class _RosterViewState extends ConsumerState<RosterView> {
                 }
                 return false;
               },
-              child: ListView.builder(
-                controller: _monthScrollController,
-                scrollDirection: Axis.horizontal,
-                padding: const EdgeInsets.all(12),
-                cacheExtent: 50000,
-                itemCount: months.length,
-                itemBuilder: (context, index) {
-                  final monthStart = months[index];
+              child: Stack(
+                children: [
+                  ScrollablePositionedList.builder(
+                    itemScrollController: _timelineListController,
+                    itemPositionsListener: _timelineListPositions,
+                    scrollDirection: Axis.horizontal,
+                    padding: const EdgeInsets.all(12),
+                    itemCount: months.length,
+                    itemBuilder: (context, index) {
+                      final monthStart = months[index];
                   final daysInMonth =
                       DateTime(monthStart.year, monthStart.month + 1, 0).day;
                   final days = List.generate(
@@ -1992,8 +2378,23 @@ class _RosterViewState extends ConsumerState<RosterView> {
                                                       personName, day)
                                                   : roster.getShiftForDate(
                                                       personName, day);
+                                              final baseShift = (vacant || preStart)
+                                                  ? roster.getPatternShiftForDate(
+                                                      personName, day)
+                                                  : roster.getBaseShiftForDate(
+                                                      personName, day);
+                                              final override = (!vacant && !preStart)
+                                                  ? _findOverrideForDate(
+                                                      roster, personName, day)
+                                                  : null;
+                                              final overrideShift =
+                                                  override != null ? shift : null;
                                               final shiftColor =
-                                                  _shiftColors[shift.toUpperCase()] ??
+                                                  _shiftColors[(overrideShift ?? shift)
+                                                          .toUpperCase()] ??
+                                                      Colors.grey;
+                                              final baseShiftColor =
+                                                  _shiftColors[baseShift.toUpperCase()] ??
                                                       Colors.grey;
                                               return DataCell(
                                                 InkWell(
@@ -2010,86 +2411,115 @@ class _RosterViewState extends ConsumerState<RosterView> {
                                                           context, personName, day);
                                                     }
                                                   },
-                                                  child: Container(
-                                                    width: _dayCellWidthMonth,
-                                                    height: _dayCellHeightMonth,
-                                                    alignment: Alignment.center,
-                                                    decoration: BoxDecoration(
-                                                      color: shiftColor
-                                                          .withOpacity(
-                                                              (vacant ||
-                                                                      unavailable ||
-                                                                      preStart)
-                                                                  ? 0.08
-                                                                  : 0.15),
-                                                      border: Border.all(
-                                                        color: shiftColor,
-                                                        width: 1.5,
-                                                      ),
-                                                      borderRadius:
-                                                          BorderRadius.circular(6),
-                                                      boxShadow: isToday
-                                                          ? [
-                                                              BoxShadow(
-                                                                color: Theme.of(
-                                                                        context)
-                                                                    .colorScheme
-                                                                    .primary
-                                                                    .withOpacity(
-                                                                        0.35),
-                                                                blurRadius: 6,
-                                                                spreadRadius: 1,
-                                                              ),
-                                                            ]
-                                                          : null,
-                                                    ),
-                                                    child: Column(
-                                                      mainAxisAlignment:
-                                                          MainAxisAlignment.center,
-                                                      children: [
-                                                        Text(
-                                                          shift,
-                                                          style: TextStyle(
-                                                            fontWeight:
-                                                                FontWeight.bold,
-                                                            color: (vacant ||
+                                                  child: Tooltip(
+                                                    message: overrideShift != null
+                                                        ? '${_shiftFullName(overrideShift)} (amended)'
+                                                        : _shiftFullName(shift),
+                                                    child: Container(
+                                                      width: _dayCellWidthMonth,
+                                                      height: _dayCellHeightMonth,
+                                                      alignment: Alignment.center,
+                                                      decoration: BoxDecoration(
+                                                        color: shiftColor.withOpacity(
+                                                            (vacant ||
                                                                     unavailable ||
                                                                     preStart)
-                                                                ? Colors.grey
-                                                                : shiftColor,
-                                                            fontSize: 11,
-                                                          ),
+                                                                ? 0.08
+                                                                : overrideShift != null
+                                                                    ? 0.22
+                                                                    : 0.15),
+                                                        border: Border.all(
+                                                          color: shiftColor,
+                                                          width: overrideShift != null
+                                                              ? 2
+                                                              : 1.5,
                                                         ),
-                                                        if (vacant)
-                                                          Text(
-                                                            'Vacant',
-                                                            style: TextStyle(
-                                                              fontSize: 9,
-                                                              color:
-                                                                  Colors.grey[600],
+                                                        borderRadius:
+                                                            BorderRadius.circular(6),
+                                                        boxShadow: isToday
+                                                            ? [
+                                                                BoxShadow(
+                                                                  color: Theme.of(
+                                                                          context)
+                                                                      .colorScheme
+                                                                      .primary
+                                                                      .withOpacity(
+                                                                          0.35),
+                                                                  blurRadius: 6,
+                                                                  spreadRadius: 1,
+                                                                ),
+                                                              ]
+                                                            : null,
+                                                      ),
+                                                      child: Column(
+                                                        mainAxisAlignment:
+                                                            MainAxisAlignment.center,
+                                                        children: [
+                                                          if (overrideShift != null)
+                                                            ...[
+                                                              Text(
+                                                                overrideShift,
+                                                                style: TextStyle(
+                                                                  fontWeight:
+                                                                      FontWeight.bold,
+                                                                  color: shiftColor,
+                                                                  fontSize: 12,
+                                                                ),
+                                                              ),
+                                                              Text(
+                                                                baseShift,
+                                                                style: TextStyle(
+                                                                  fontSize: 8,
+                                                                  color: baseShiftColor
+                                                                      .withOpacity(0.7),
+                                                                ),
+                                                              ),
+                                                            ]
+                                                          else
+                                                            Text(
+                                                              shift,
+                                                              style: TextStyle(
+                                                                fontWeight:
+                                                                    FontWeight.bold,
+                                                                color: (vacant ||
+                                                                        unavailable ||
+                                                                        preStart)
+                                                                    ? Colors.grey
+                                                                    : shiftColor,
+                                                                fontSize: 11,
+                                                              ),
                                                             ),
-                                                          )
-                                                        else if (unavailable)
-                                                          Text(
-                                                            _formatLeaveLabel(
-                                                                staffMember
-                                                                    .leaveType),
-                                                            style: TextStyle(
-                                                              fontSize: 9,
-                                                              color:
-                                                                  Colors.grey[600],
+                                                          if (vacant)
+                                                            Text(
+                                                              'Vacant',
+                                                              style: TextStyle(
+                                                                fontSize: 9,
+                                                                color: Colors
+                                                                    .grey[600],
+                                                              ),
+                                                            )
+                                                          else if (unavailable)
+                                                            Text(
+                                                              _formatLeaveLabel(
+                                                                  staffMember
+                                                                      .leaveType),
+                                                              style: TextStyle(
+                                                                fontSize: 9,
+                                                                color: Colors
+                                                                    .grey[600],
+                                                              ),
+                                                            )
+                                                          else if (preStart)
+                                                            Text(
+                                                              'Not started',
+                                                              style: TextStyle(
+                                                                fontSize: 9,
+                                                                color: Colors
+                                                                    .grey[600],
+                                                              ),
                                                             ),
-                                                          )
-                                                        else if (preStart)
-                                                          Text(
-                                                            'Not started',
-                                                            style: TextStyle(
-                                                              fontSize: 9,
-                                                              color:
-                                                                  Colors.grey[600],
-                                                            ),
-                                                          ),
-                                                      ],
+                                                        ],
+                                                      ),
                                                     ),
                                                   ),
                                                 ),
@@ -2112,6 +2542,15 @@ class _RosterViewState extends ConsumerState<RosterView> {
                     ),
                   );
                 },
+              ),
+                  if (snapshot.connectionState == ConnectionState.waiting)
+                    const Positioned(
+                      top: 8,
+                      left: 16,
+                      right: 16,
+                      child: LinearProgressIndicator(),
+                    ),
+                ],
               ),
             ),
           ),
@@ -2247,7 +2686,7 @@ class _RosterViewState extends ConsumerState<RosterView> {
                       ),
                     if (useCompactNames) const SizedBox(width: 6),
                     Expanded(
-                      child: TextField(
+                      child: SafeTextField(
                         controller: _nameControllers[personName]!,
                         onTap: () => _toggleSelectedStaff(personName),
                         focusNode: _nameFocusNodes.putIfAbsent(
@@ -2337,7 +2776,7 @@ class _RosterViewState extends ConsumerState<RosterView> {
                             value: 'overrides',
                             child: ListTile(
                               leading: Icon(Icons.edit_calendar_rounded),
-                              title: Text('View Overrides'),
+                              title: Text('View Changes'),
                               contentPadding: EdgeInsets.zero,
                             ),
                           ),
@@ -2373,7 +2812,13 @@ class _RosterViewState extends ConsumerState<RosterView> {
   ) {
     final isReadOnly = roster.readOnly;
     final shift = roster.getShiftForDate(personName, date);
-    final shiftColor = _shiftColors[shift.toUpperCase()] ?? Colors.grey;
+    final baseShift = roster.getBaseShiftForDate(personName, date);
+    final override = _findOverrideForDate(roster, personName, date);
+    final overrideShift = override != null ? shift : null;
+    final shiftColor =
+        _shiftColors[(overrideShift ?? shift).toUpperCase()] ?? Colors.grey;
+    final baseShiftColor =
+        _shiftColors[baseShift.toUpperCase()] ?? Colors.grey;
     return InkWell(
       onTap: () {
         _setFocusedDate(date);
@@ -2383,41 +2828,64 @@ class _RosterViewState extends ConsumerState<RosterView> {
           _showShiftOptions(context, personName, date);
         }
       },
-      child: Container(
-        width: _dayCellWidthWeek,
-        height: _rowHeight,
-        alignment: Alignment.center,
-        decoration: BoxDecoration(
-          color: shiftColor.withOpacity(0.15),
-          border: Border(
-            left: BorderSide(
-              color: _isSameDay(date, DateTime.now())
-                  ? Theme.of(context).colorScheme.primary
-                  : Colors.transparent,
-              width: _isSameDay(date, DateTime.now()) ? 2 : 0,
+      child: Tooltip(
+        message: overrideShift != null
+            ? '${_shiftFullName(overrideShift)} (amended)'
+            : _shiftFullName(shift),
+        child: Container(
+          width: _dayCellWidthWeek,
+          height: _rowHeight,
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            color: shiftColor.withOpacity(overrideShift != null ? 0.22 : 0.15),
+            border: Border(
+              left: BorderSide(
+                color: _isSameDay(date, DateTime.now())
+                    ? Theme.of(context).colorScheme.primary
+                    : Colors.transparent,
+                width: _isSameDay(date, DateTime.now()) ? 2 : 0,
+              ),
+              right: BorderSide(color: Theme.of(context).dividerColor),
+              bottom: BorderSide(color: Theme.of(context).dividerColor),
             ),
-            right: BorderSide(color: Theme.of(context).dividerColor),
-            bottom: BorderSide(color: Theme.of(context).dividerColor),
           ),
-        ),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Text(
-              shift,
-              style: TextStyle(
-                fontWeight: FontWeight.bold,
-                color: shiftColor,
-                fontSize: 14,
-              ),
-            ),
-            if (shift == 'AL')
-              Icon(
-                Icons.beach_access_rounded,
-                size: 12,
-                color: shiftColor,
-              ),
-          ],
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              if (overrideShift != null) ...[
+                Text(
+                  overrideShift,
+                  style: TextStyle(
+                    fontWeight: FontWeight.bold,
+                    color: shiftColor,
+                    fontSize: 14,
+                  ),
+                ),
+                Text(
+                  baseShift,
+                  style: TextStyle(
+                    fontSize: 9,
+                    color: baseShiftColor.withOpacity(0.7),
+                  ),
+                ),
+              ] else ...[
+                Text(
+                  shift,
+                  style: TextStyle(
+                    fontWeight: FontWeight.bold,
+                    color: shiftColor,
+                    fontSize: 14,
+                  ),
+                ),
+                if (shift == 'AL')
+                  Icon(
+                    Icons.beach_access_rounded,
+                    size: 12,
+                    color: shiftColor,
+                  ),
+              ],
+            ],
+          ),
         ),
       ),
     );
@@ -2428,6 +2896,7 @@ class _RosterViewState extends ConsumerState<RosterView> {
     final today = _startOfDay(DateTime.now());
     final focus = _focusedDate ?? today;
     final isToday = _isSameDay(focus, today);
+    final nowTime = TimeOfDay.now();
     final subtitle = DateFormat('EEEE, MMM d, yyyy').format(focus);
 
     return AnimatedContainer(
@@ -2483,6 +2952,65 @@ class _RosterViewState extends ConsumerState<RosterView> {
             onPressed: () => _showYearPicker(context),
             icon: const Icon(Icons.event),
           ),
+          const SizedBox(width: 6),
+          _buildViewModeToggle(context),
+          const SizedBox(width: 6),
+          IconButton(
+            tooltip: _focusMode ? 'Exit focus mode' : 'Focus mode',
+            onPressed: () {
+              setState(() => _focusMode = !_focusMode);
+            },
+            icon: Icon(
+              _focusMode
+                  ? Icons.fullscreen_exit_rounded
+                  : Icons.fullscreen_rounded,
+            ),
+          ),
+          PopupMenuButton<double>(
+            tooltip: 'Roster size',
+            onSelected: (value) {
+              setState(() => _cellScale = value);
+            },
+            itemBuilder: (context) => const [
+              PopupMenuItem(value: 1.0, child: Text('Large')),
+              PopupMenuItem(value: 0.85, child: Text('Medium')),
+              PopupMenuItem(value: 0.7, child: Text('Small')),
+              PopupMenuItem(value: 0.6, child: Text('X-Small')),
+              PopupMenuItem(value: 0.5, child: Text('XX-Small')),
+            ],
+            icon: const Icon(Icons.text_fields_rounded),
+          ),
+          IconButton(
+            tooltip: _showFloatingAi ? 'Hide RC mini' : 'Show RC mini',
+            onPressed: () {
+              setState(() => _showFloatingAi = !_showFloatingAi);
+            },
+            icon: Icon(
+              _showFloatingAi
+                  ? Icons.smart_toy_rounded
+                  : Icons.smart_toy_outlined,
+            ),
+          ),
+          Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                nowTime.format(context),
+                style: GoogleFonts.inter(
+                  fontWeight: FontWeight.w700,
+                  fontSize: 12,
+                ),
+              ),
+              Text(
+                settings.timeZone,
+                style: GoogleFonts.inter(
+                  fontSize: 10,
+                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(width: 8),
           FilledButton.tonalIcon(
             onPressed: _smartHome,
             icon: const Icon(Icons.home_rounded, size: 16),
@@ -2674,6 +3202,10 @@ class _RosterViewState extends ConsumerState<RosterView> {
     final settings = ref.read(settingsProvider);
     final dateKey = _dateKey(date);
     final isHidden = settings.hiddenOverlayDates.contains(dateKey);
+    final roster = ref.read(rosterProvider);
+    final override = _findOverrideForDate(roster, personName, date);
+    final hasLeaveOverride =
+        override != null && override.shift.toUpperCase() == 'AL';
     showModalBottomSheet(
       context: context,
       builder: (context) => SafeArea(
@@ -2692,7 +3224,7 @@ class _RosterViewState extends ConsumerState<RosterView> {
             ),
             ListTile(
               leading: const Icon(Icons.edit_rounded),
-              title: const Text('Add Override'),
+              title: const Text('Add Change'),
               subtitle: const Text('Set custom shift for this day'),
               onTap: () {
                     Navigator.pop(context);
@@ -2701,11 +3233,36 @@ class _RosterViewState extends ConsumerState<RosterView> {
             ),
             ListTile(
               leading: const Icon(Icons.date_range_rounded),
-              title: const Text('Bulk Override'),
-              subtitle: const Text('Set overrides for multiple days'),
+              title: const Text('Bulk Change'),
+              subtitle: const Text('Set changes for multiple days'),
               onTap: () {
                     Navigator.pop(context);
                     _showBulkOverrideDialog(personName);
+              },
+            ),
+            if (hasLeaveOverride)
+              ListTile(
+                leading: const Icon(Icons.event_busy_rounded),
+                title: const Text('Cancel Leave'),
+                subtitle: const Text('Remove annual leave for this date'),
+                onTap: () {
+                  Navigator.pop(context);
+                  roster.cancelAnnualLeaveForDates(
+                    people: [personName],
+                    dates: [date],
+                  );
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('Leave removed')),
+                  );
+                },
+              ),
+            ListTile(
+              leading: const Icon(Icons.delete_sweep_rounded),
+              title: const Text('Clear Changes'),
+              subtitle: const Text('Clear changes for a date range'),
+              onTap: () {
+                Navigator.pop(context);
+                _showRemoveOverrideDialog(personName, date);
               },
             ),
             ListTile(
@@ -2906,7 +3463,7 @@ class _RosterViewState extends ConsumerState<RosterView> {
         onAdd: (shift, reason) {
           ref.read(rosterProvider).setOverride(personName, date, shift, reason);
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Override added successfully')),
+            const SnackBar(content: Text('Change added successfully')),
           );
         },
       ),
@@ -3062,9 +3619,103 @@ class _RosterViewState extends ConsumerState<RosterView> {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
               content: Text(
-                    'Bulk override added for ${endDate.difference(startDate).inDays + 1} days',
+                    'Bulk change added for ${endDate.difference(startDate).inDays + 1} days',
               ),
             ),
+          );
+        },
+      ),
+    );
+  }
+
+  Future<void> _showRemoveOverrideDialog(
+    String personName,
+    DateTime initialDate,
+  ) async {
+    final roster = ref.read(rosterProvider);
+    DateTime startDate = initialDate;
+    DateTime endDate = initialDate;
+    await showDialog(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setState) {
+          return AlertDialog(
+            title: Text('Clear Changes for $personName'),
+            content: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  ListTile(
+                    leading: const Icon(Icons.calendar_today),
+                    title: const Text('Start Date'),
+                    subtitle: Text(
+                        '${startDate.day}/${startDate.month}/${startDate.year}'),
+                    onTap: () async {
+                      final date = await showDatePicker(
+                        context: context,
+                        initialDate: startDate,
+                        firstDate:
+                            DateTime.now().subtract(const Duration(days: 3650)),
+                        lastDate: DateTime.now().add(const Duration(days: 3650)),
+                      );
+                      if (date != null) {
+                        setState(() {
+                          startDate = date;
+                          if (endDate.isBefore(startDate)) {
+                            endDate = startDate;
+                          }
+                        });
+                      }
+                    },
+                  ),
+                  ListTile(
+                    leading: const Icon(Icons.calendar_today),
+                    title: const Text('End Date'),
+                    subtitle:
+                        Text('${endDate.day}/${endDate.month}/${endDate.year}'),
+                    onTap: () async {
+                      final date = await showDatePicker(
+                        context: context,
+                        initialDate: endDate,
+                        firstDate: startDate,
+                        lastDate: DateTime.now().add(const Duration(days: 3650)),
+                      );
+                      if (date != null) {
+                        setState(() => endDate = date);
+                      }
+                    },
+                  ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                style: FilledButton.styleFrom(backgroundColor: Colors.red),
+                onPressed: () {
+                  final removed = roster.removeOverridesAdvanced(
+                    people: [personName],
+                    startDate: startDate,
+                    endDate: endDate,
+                  );
+                  Navigator.pop(context);
+                  ScaffoldMessenger.of(this.context).showSnackBar(
+                    SnackBar(
+                      content: Text(
+                        removed == 0
+                            ? 'No changes found to remove'
+                            : 'Removed $removed change(s)',
+                      ),
+                    ),
+                  );
+                },
+                child: const Text('Remove'),
+              ),
+            ],
           );
         },
       ),
@@ -3135,7 +3786,7 @@ class _RosterViewState extends ConsumerState<RosterView> {
               const Divider(),
               ListTile(
                     leading: const Icon(Icons.edit_calendar_rounded),
-                    title: const Text('Override Applied'),
+                    title: const Text('Change Applied'),
                     subtitle: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
@@ -3161,22 +3812,24 @@ class _RosterViewState extends ConsumerState<RosterView> {
                     onPressed: readOnly
                         ? null
                         : () {
-                            roster.overrides
-                                .removeWhere((o) => o.id == override.id);
+                            roster.removeOverridesAdvanced(
+                              people: [personName],
+                              startDate: date,
+                              endDate: date,
+                            );
                             Navigator.pop(context);
                             ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(content: Text('Override removed')),
+                              const SnackBar(content: Text('Change removed')),
                             );
-                            roster.notifyListeners();
                           },
                     icon: const Icon(Icons.delete_rounded, color: Colors.red),
-                    label: const Text('Remove Override',
+                    label: const Text('Remove Change',
                         style: TextStyle(color: Colors.red)),
               ),
             ] else ...[
               const Divider(),
               Text(
-                    'No overrides applied',
+                    'No changes applied',
                     style: GoogleFonts.inter(
                       color: Theme.of(context).colorScheme.onSurfaceVariant,
                     ),
@@ -3257,7 +3910,193 @@ class _RosterViewState extends ConsumerState<RosterView> {
             onPressed: () => Navigator.pop(context),
             child: const Text('Close'),
           ),
+          FilledButton.icon(
+            onPressed: () {
+              Navigator.pop(context);
+              _showRemoveLeaveDialog(personName, DateTime.now());
+            },
+            icon: const Icon(Icons.event_busy_rounded),
+            label: const Text('Cancel Leave'),
+            style: FilledButton.styleFrom(backgroundColor: Colors.red),
+          ),
         ],
+      ),
+    );
+  }
+
+  Future<void> _showDuplicatePatternDialog(BuildContext context) async {
+    final roster = ref.read(rosterProvider);
+    final nameController = TextEditingController();
+    bool includeStaff = true;
+    bool includeOverrides = false;
+
+    await showDialog(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setState) {
+          return AlertDialog(
+            title: const Text('Duplicate Current Pattern'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                SafeTextField(
+                  controller: nameController,
+                  decoration: const InputDecoration(
+                    labelText: 'Duplicate name',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                SwitchListTile(
+                  title: const Text('Include staff names'),
+                  value: includeStaff,
+                  onChanged: (value) => setState(() => includeStaff = value),
+                ),
+                SwitchListTile(
+                  title: const Text('Include changes'),
+                  subtitle: const Text('Keep current leave/shift changes'),
+                  value: includeOverrides,
+                  onChanged: (value) =>
+                      setState(() => includeOverrides = value),
+                ),
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed: () {
+                  final name = nameController.text.trim();
+                  if (name.isEmpty) return;
+                  roster.saveRosterSnapshot(
+                    name: name,
+                    includeStaffNames: includeStaff,
+                    includeOverrides: includeOverrides,
+                  );
+                  Navigator.pop(context);
+                  ScaffoldMessenger.of(this.context).showSnackBar(
+                    const SnackBar(content: Text('Pattern duplicated.')),
+                  );
+                },
+                child: const Text('Save'),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  void _showFloatingAiPanel(BuildContext context, {String? initialCommand}) {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Theme.of(context).colorScheme.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (context) {
+        final height = MediaQuery.of(context).size.height * 0.8;
+        return SizedBox(
+          height: height,
+          child: AiSuggestionsView(initialCommand: initialCommand),
+        );
+      },
+    );
+  }
+
+  Future<void> _showRemoveLeaveDialog(
+    String personName,
+    DateTime initialDate,
+  ) async {
+    final roster = ref.read(rosterProvider);
+    DateTime startDate = initialDate;
+    DateTime endDate = initialDate;
+    await showDialog(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setState) {
+          return AlertDialog(
+            title: Text('Cancel Leave - $personName'),
+            content: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  ListTile(
+                    leading: const Icon(Icons.calendar_today),
+                    title: const Text('Start Date'),
+                    subtitle: Text(
+                        '${startDate.day}/${startDate.month}/${startDate.year}'),
+                    onTap: () async {
+                      final date = await showDatePicker(
+                        context: context,
+                        initialDate: startDate,
+                        firstDate:
+                            DateTime.now().subtract(const Duration(days: 3650)),
+                        lastDate: DateTime.now().add(const Duration(days: 3650)),
+                      );
+                      if (date != null) {
+                        setState(() {
+                          startDate = date;
+                          if (endDate.isBefore(startDate)) {
+                            endDate = startDate;
+                          }
+                        });
+                      }
+                    },
+                  ),
+                  ListTile(
+                    leading: const Icon(Icons.calendar_today),
+                    title: const Text('End Date'),
+                    subtitle:
+                        Text('${endDate.day}/${endDate.month}/${endDate.year}'),
+                    onTap: () async {
+                      final date = await showDatePicker(
+                        context: context,
+                        initialDate: endDate,
+                        firstDate: startDate,
+                        lastDate: DateTime.now().add(const Duration(days: 3650)),
+                      );
+                      if (date != null) {
+                        setState(() => endDate = date);
+                      }
+                    },
+                  ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('Close'),
+              ),
+              FilledButton(
+                style: FilledButton.styleFrom(backgroundColor: Colors.red),
+                onPressed: () {
+                  final removed = roster.removeLeaveOverridesAdvanced(
+                    people: [personName],
+                    startDate: startDate,
+                    endDate: endDate,
+                  );
+                  Navigator.pop(context);
+                  ScaffoldMessenger.of(this.context).showSnackBar(
+                    SnackBar(
+                      content: Text(
+                        removed == 0
+                            ? 'No leave changes found'
+                            : 'Cancelled $removed leave day(s)',
+                      ),
+                    ),
+                  );
+                },
+                child: const Text('Cancel Leave'),
+              ),
+            ],
+          );
+        },
       ),
     );
   }
@@ -3269,11 +4108,11 @@ class _RosterViewState extends ConsumerState<RosterView> {
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
-        title: Text('Overrides - $personName'),
+        title: Text('Changes - $personName'),
         content: SizedBox(
           width: double.maxFinite,
           child: overrides.isEmpty
-              ? const Text('No overrides found')
+              ? const Text('No changes found')
               : ListView.builder(
                       shrinkWrap: true,
                       itemCount: overrides.length,
@@ -3318,9 +4157,9 @@ class _RosterViewState extends ConsumerState<RosterView> {
                               showDialog(
                                 context: context,
                                 builder: (context) => AlertDialog(
-                                  title: const Text('Override Removed'),
+                                  title: const Text('Change Removed'),
                                   content: const Text(
-                                      'The override has been removed successfully.'),
+                                      'The change has been removed successfully.'),
                                   actions: [
                                     TextButton(
                                       onPressed: () => Navigator.pop(context),
@@ -3380,7 +4219,7 @@ class _RosterViewState extends ConsumerState<RosterView> {
               child: Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      TextField(
+                      SafeTextField(
                         controller: nameController,
                         decoration: const InputDecoration(
                           labelText: 'Your name',
@@ -3438,7 +4277,7 @@ class _RosterViewState extends ConsumerState<RosterView> {
                         ],
                       ),
                       const SizedBox(height: 12),
-                      TextField(
+                      SafeTextField(
                         controller: notesController,
                         maxLines: 3,
                         decoration: const InputDecoration(
@@ -3532,9 +4371,6 @@ class _RosterViewState extends ConsumerState<RosterView> {
       _initialMonthSnapDone = true;
     });
     await Future.delayed(const Duration(milliseconds: 100));
-    if (_monthScrollController.hasClients) {
-      _monthScrollController.jumpTo(0);
-    }
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _scrollToMonth(target, alignment: 0.1);
       _scrollToTodayDayInMonth(target);
@@ -3675,8 +4511,18 @@ class _RosterViewState extends ConsumerState<RosterView> {
                       final shift = (vacant || preStart)
                           ? roster.getPatternShiftForDate(personName, day)
                           : roster.getShiftForDate(personName, day);
+                      final baseShift = (vacant || preStart)
+                          ? roster.getPatternShiftForDate(personName, day)
+                          : roster.getBaseShiftForDate(personName, day);
+                      final override = (!vacant && !preStart)
+                          ? _findOverrideForDate(roster, personName, day)
+                          : null;
+                      final overrideShift = override != null ? shift : null;
                       final shiftColor =
-                          _shiftColors[shift.toUpperCase()] ?? Colors.grey;
+                          _shiftColors[(overrideShift ?? shift).toUpperCase()] ??
+                              Colors.grey;
+                      final baseShiftColor =
+                          _shiftColors[baseShift.toUpperCase()] ?? Colors.grey;
                       final holiday = holidayMap[_dateKey(day)];
                       final events = eventMap[_dateKey(day)] ?? [];
                       final observances = observanceMap[_dateKey(day)] ?? [];
@@ -3699,73 +4545,101 @@ class _RosterViewState extends ConsumerState<RosterView> {
                               _showShiftOptions(context, personName, day);
                             }
                           },
-                          child: Container(
-                            width: _dayCellWidthWeek,
-                            height: _dayCellHeightWeek,
-                            alignment: Alignment.center,
-                            decoration: BoxDecoration(
-                              color: shiftColor.withOpacity(
-                                  (vacant || unavailable || preStart)
-                                      ? 0.08
-                                      : 0.15),
-                              border: Border.all(
-                                color: shiftColor,
-                                width: 2,
-                              ),
-                              borderRadius: BorderRadius.circular(8),
-                            ),
-                            child: Stack(
-                              children: [
-                                Center(
-                                  child: Column(
-                                    mainAxisAlignment: MainAxisAlignment.center,
-                                    children: [
-                                      Text(
-                                        shift,
-                                        style: TextStyle(
-                                          fontWeight: FontWeight.bold,
-                                          color: (vacant || unavailable || preStart)
-                                              ? Colors.grey
-                                              : shiftColor,
-                                          fontSize: 14,
-                                        ),
-                                      ),
-                                      if (vacant)
-                                        Text(
-                                          'Vacant',
-                                          style: TextStyle(
-                                            fontSize: 9,
-                                            color: Colors.grey[600],
-                                          ),
-                                        )
-                                      else if (unavailable)
-                                        Text(
-                                          _formatLeaveLabel(
-                                              staffMember.leaveType),
-                                          style: TextStyle(
-                                            fontSize: 9,
-                                            color: Colors.grey[600],
-                                          ),
-                                        )
-                                      else if (preStart)
-                                        Text(
-                                          'Not started',
-                                          style: TextStyle(
-                                            fontSize: 9,
-                                            color: Colors.grey[600],
-                                          ),
-                                        ),
-                                      if (shift == 'AL')
-                                        Icon(
-                                          Icons.beach_access_rounded,
-                                          size: 12,
-                                          color: shiftColor,
-                                        ),
-                                    ],
-                                  ),
+                          child: Tooltip(
+                            message: overrideShift != null
+                                ? '${_shiftFullName(overrideShift)} (amended)'
+                                : _shiftFullName(shift),
+                            child: Container(
+                              width: _dayCellWidthWeek,
+                              height: _dayCellHeightWeek,
+                              alignment: Alignment.center,
+                              decoration: BoxDecoration(
+                                color: shiftColor.withOpacity(
+                                    (vacant || unavailable || preStart)
+                                        ? 0.08
+                                        : overrideShift != null
+                                            ? 0.22
+                                            : 0.15),
+                                border: Border.all(
+                                  color: shiftColor,
+                                  width: overrideShift != null ? 2.5 : 2,
                                 ),
-                                // Event lines appear only in the date header.
-                              ],
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                              child: Stack(
+                                children: [
+                                  Center(
+                                    child: Column(
+                                      mainAxisAlignment: MainAxisAlignment.center,
+                                      children: [
+                                        if (overrideShift != null) ...[
+                                          Text(
+                                            overrideShift,
+                                            style: TextStyle(
+                                              fontWeight: FontWeight.bold,
+                                              color: shiftColor,
+                                              fontSize: 14,
+                                            ),
+                                          ),
+                                          Text(
+                                            baseShift,
+                                            style: TextStyle(
+                                              fontSize: 9,
+                                              color: baseShiftColor
+                                                  .withOpacity(0.7),
+                                            ),
+                                          ),
+                                        ] else ...[
+                                          Text(
+                                            shift,
+                                            style: TextStyle(
+                                              fontWeight: FontWeight.bold,
+                                              color: (vacant ||
+                                                      unavailable ||
+                                                      preStart)
+                                                  ? Colors.grey
+                                                  : shiftColor,
+                                              fontSize: 14,
+                                            ),
+                                          ),
+                                          if (shift == 'AL')
+                                            Icon(
+                                              Icons.beach_access_rounded,
+                                              size: 12,
+                                              color: shiftColor,
+                                            ),
+                                        ],
+                                        if (vacant)
+                                          Text(
+                                            'Vacant',
+                                            style: TextStyle(
+                                              fontSize: 9,
+                                              color: Colors.grey[600],
+                                            ),
+                                          )
+                                        else if (unavailable)
+                                          Text(
+                                            _formatLeaveLabel(
+                                                staffMember.leaveType),
+                                            style: TextStyle(
+                                              fontSize: 9,
+                                              color: Colors.grey[600],
+                                            ),
+                                          )
+                                        else if (preStart)
+                                          Text(
+                                            'Not started',
+                                            style: TextStyle(
+                                              fontSize: 9,
+                                              color: Colors.grey[600],
+                                            ),
+                                          ),
+                                      ],
+                                    ),
+                                  ),
+                                  // Event lines appear only in the date header.
+                                ],
+                              ),
                             ),
                           ),
                         ),

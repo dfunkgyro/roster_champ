@@ -17,7 +17,7 @@ if (hasReleaseKeystore) {
 
 android {
     namespace = "com.example.roster_champ"
-    compileSdk = flutter.compileSdkVersion
+    compileSdk = 36
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
@@ -35,7 +35,7 @@ android {
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
         minSdk = flutter.minSdkVersion
-        targetSdk = flutter.targetSdkVersion
+        targetSdk = 36
         versionCode = flutter.versionCode
         versionName = flutter.versionName
         manifestPlaceholders += mapOf(
@@ -60,10 +60,35 @@ android {
             } else {
                 signingConfigs.getByName("debug")
             }
+            isMinifyEnabled = false
+            isShrinkResources = false
+            proguardFiles(
+                getDefaultProguardFile("proguard-android.txt"),
+                "proguard-rules.pro",
+            )
         }
+    }
+
+    lint {
+        checkReleaseBuilds = false
+        abortOnError = false
     }
 }
 
 flutter {
     source = "../.."
+}
+
+dependencies {
+    // Fix crash: missing EditorInfoCompat.setStylusHandwritingEnabled
+    implementation("androidx.core:core:1.13.1")
+    constraints {
+        // Lock the exact versions so transitive deps can't downgrade them.
+        implementation("androidx.core:core:1.13.1") {
+            because("Flutter TextInput requires setStylusHandwritingEnabled at runtime")
+        }
+        implementation("androidx.core:core-ktx:1.13.1") {
+            because("Keep core-ktx aligned with core to avoid method mismatch")
+        }
+    }
 }

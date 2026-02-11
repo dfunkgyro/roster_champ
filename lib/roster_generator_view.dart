@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'providers.dart';
 import 'roster_generator.dart';
 import 'models.dart' as models;
+import 'package:roster_champ/safe_text_field.dart';
 
 class RosterGeneratorView extends ConsumerStatefulWidget {
   const RosterGeneratorView({super.key});
@@ -343,27 +344,27 @@ class _RosterGeneratorViewState extends ConsumerState<RosterGeneratorView> {
           _buildWeekStartDropdown(labels),
           const SizedBox(height: 16),
           _buildSectionTitle('Core weekday shifts'),
-          _buildTextField('Early teams (Mon-Fri)', _earlyController),
-          _buildTextField('Late Group A (Mon-Tue)', _lateAController),
-          _buildTextField('Late Group B (Wed-Fri)', _lateBController),
-          _buildTextField('Night teams (Mon-Thu)', _nightWeekdayController),
-          _buildTextField('Friday night teams', _fridayNightController),
+          _buildSafeTextField('Early teams (Mon-Fri)', _earlyController),
+          _buildSafeTextField('Late Group A (Mon-Tue)', _lateAController),
+          _buildSafeTextField('Late Group B (Wed-Fri)', _lateBController),
+          _buildSafeTextField('Night teams (Mon-Thu)', _nightWeekdayController),
+          _buildSafeTextField('Friday night teams', _fridayNightController),
           const SizedBox(height: 16),
           _buildSectionTitle('Weekend bridge shifts'),
-          _buildTextField('Weekend day teams (Sat)', _weekendDayController),
-          _buildTextField('Weekend day teams (Sun)', _weekendDaySunController),
-          _buildTextField(
+          _buildSafeTextField('Weekend day teams (Sat)', _weekendDayController),
+          _buildSafeTextField('Weekend day teams (Sun)', _weekendDaySunController),
+          _buildSafeTextField(
             'Weekend night teams (Sat)',
             _weekendNightSatController,
           ),
-          _buildTextField(
+          _buildSafeTextField(
             'Weekend night teams (Sun)',
             _weekendNightSunController,
           ),
           const SizedBox(height: 16),
           _buildSectionTitle('Cover tiers (optional)'),
           _buildCoverTierList(),
-          _buildTextField('General cover teams (C)', _generalCoverController),
+          _buildSafeTextField('General cover teams (C)', _generalCoverController),
           const SizedBox(height: 8),
           _buildGeneralCoverDays(labels),
           const SizedBox(height: 16),
@@ -372,7 +373,7 @@ class _RosterGeneratorViewState extends ConsumerState<RosterGeneratorView> {
           _buildOffsetControls(),
           const SizedBox(height: 16),
           _buildSectionTitle('Template'),
-          TextField(
+          SafeTextField(
             controller: _templateNameController,
             decoration: const InputDecoration(
               labelText: 'Template name',
@@ -412,6 +413,9 @@ class _RosterGeneratorViewState extends ConsumerState<RosterGeneratorView> {
           _buildSectionTitle('Saved Templates'),
           _buildTemplateList(roster),
           const SizedBox(height: 16),
+          _buildSectionTitle('Saved Copies'),
+          _buildSnapshotList(roster),
+          const SizedBox(height: 16),
           SwitchListTile(
             title: const Text('Preserve staff names'),
             subtitle: const Text(
@@ -435,7 +439,7 @@ class _RosterGeneratorViewState extends ConsumerState<RosterGeneratorView> {
                 : (value) => setState(() => _renameTeams = value),
           ),
           SwitchListTile(
-            title: const Text('Clear existing overrides'),
+            title: const Text('Clear existing changes'),
             value: _clearOverrides,
             onChanged: (value) => setState(() => _clearOverrides = value),
           ),
@@ -497,7 +501,7 @@ class _RosterGeneratorViewState extends ConsumerState<RosterGeneratorView> {
               child: const Text('Clear Quick Base Template'),
             ),
             const SizedBox(height: 12),
-            TextField(
+            SafeTextField(
               controller: _presetNameController,
               decoration: const InputDecoration(
                 labelText: 'Preset name',
@@ -765,7 +769,7 @@ class _RosterGeneratorViewState extends ConsumerState<RosterGeneratorView> {
   }
 
   Widget _buildNumberField(String label, TextEditingController controller) {
-    return TextField(
+    return SafeTextField(
       controller: controller,
       keyboardType: TextInputType.number,
       decoration: InputDecoration(
@@ -775,10 +779,10 @@ class _RosterGeneratorViewState extends ConsumerState<RosterGeneratorView> {
     );
   }
 
-  Widget _buildTextField(String label, TextEditingController controller) {
+  Widget _buildSafeTextField(String label, TextEditingController controller) {
     return Padding(
       padding: const EdgeInsets.only(bottom: 12),
-      child: TextField(
+      child: SafeTextField(
         controller: controller,
         decoration: InputDecoration(
           labelText: label,
@@ -846,7 +850,7 @@ class _RosterGeneratorViewState extends ConsumerState<RosterGeneratorView> {
               children: [
                 SizedBox(
                   width: 72,
-                  child: TextField(
+                  child: SafeTextField(
                     controller: tier.codeController,
                     decoration: const InputDecoration(
                       labelText: 'Tier',
@@ -856,7 +860,7 @@ class _RosterGeneratorViewState extends ConsumerState<RosterGeneratorView> {
                 ),
                 const SizedBox(width: 8),
                 Expanded(
-                  child: TextField(
+                  child: SafeTextField(
                     controller: tier.teamsController,
                     decoration: const InputDecoration(
                       labelText: 'Teams',
@@ -1140,6 +1144,78 @@ class _RosterGeneratorViewState extends ConsumerState<RosterGeneratorView> {
     );
   }
 
+  Widget _buildSnapshotList(RosterNotifier roster) {
+    if (roster.rosterSnapshots.isEmpty) {
+      return const Text('No saved copies yet.');
+    }
+    return Column(
+      children: roster.rosterSnapshots
+          .map(
+            (snapshot) => Card(
+              child: ListTile(
+                title: Text(snapshot.name),
+                subtitle: Text(
+                  'Weeks: ${snapshot.pattern.length} | Staff: ${snapshot.staffNames.length} | Changes: ${snapshot.overrides.length}',
+                ),
+                trailing: Wrap(
+                  spacing: 8,
+                  children: [
+                    IconButton(
+                      icon: const Icon(Icons.play_arrow),
+                      tooltip: 'Apply pattern only',
+                      onPressed: () {
+                        roster.applyRosterSnapshot(
+                          snapshot,
+                          includeStaffNames: false,
+                          includeOverrides: false,
+                        );
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('Snapshot applied.')),
+                        );
+                      },
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.people_alt),
+                      tooltip: 'Apply with staff names',
+                      onPressed: () {
+                        roster.applyRosterSnapshot(
+                          snapshot,
+                          includeStaffNames: true,
+                          includeOverrides: false,
+                        );
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(
+                              content: Text('Snapshot applied with staff.')),
+                        );
+                      },
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.event_repeat),
+                      tooltip: 'Apply with changes',
+                      onPressed: snapshot.overrides.isEmpty
+                          ? null
+                          : () {
+                              roster.applyRosterSnapshot(
+                                snapshot,
+                                includeStaffNames: true,
+                                includeOverrides: true,
+                              );
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(
+                                    content: Text(
+                                        'Snapshot applied with changes.')),
+                              );
+                            },
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          )
+          .toList(),
+    );
+  }
+
   Future<void> _editPreviewCell(int rowIndex, int dayIndex) async {
     if (_preview == null) return;
     final controller = TextEditingController(
@@ -1149,7 +1225,7 @@ class _RosterGeneratorViewState extends ConsumerState<RosterGeneratorView> {
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('Edit Shift'),
-        content: TextField(
+        content: SafeTextField(
           controller: controller,
           decoration: const InputDecoration(
             labelText: 'Shift code',
@@ -1194,7 +1270,7 @@ class _RosterGeneratorViewState extends ConsumerState<RosterGeneratorView> {
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('Rename template'),
-        content: TextField(
+        content: SafeTextField(
           controller: controller,
           decoration: const InputDecoration(
             labelText: 'Template name',

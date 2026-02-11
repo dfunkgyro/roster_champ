@@ -8,14 +8,15 @@ import 'services/holiday_service.dart';
 import 'services/country_service.dart';
 import 'services/location_service.dart';
 import 'services/analytics_service.dart';
+import 'services/voice_service.dart';
+import 'services/adaptive_learning_service.dart';
+import 'package:roster_champ/safe_text_field.dart';
 
 class SettingsView extends ConsumerWidget {
   const SettingsView({super.key});
 
-  static const String _privacyUrl =
-      'https://github.com/dfunkgyro/roster_champ/blob/main/PRIVACY.md';
-  static const String _termsUrl =
-      'https://github.com/dfunkgyro/roster_champ/blob/main/TERMS.md';
+  static const String _privacyUrl = 'https://rosterchampion.com/privacy';
+  static const String _termsUrl = 'https://rosterchampion.com/terms';
   static const String _issuesUrl =
       'https://github.com/dfunkgyro/roster_champ/issues';
 
@@ -33,9 +34,13 @@ class SettingsView extends ConsumerWidget {
         const SizedBox(height: 16),
         _buildOptimizationSection(context, ref, roster),
         const SizedBox(height: 16),
+        _buildShiftHoursSection(context, ref, settings),
+        const SizedBox(height: 16),
         _buildSyncSection(context, ref, settings),
         const SizedBox(height: 16),
         _buildAnalyticsSection(context, ref, settings),
+        const SizedBox(height: 16),
+        _buildAdaptiveLearningSection(context, ref, settings),
         const SizedBox(height: 16),
         _buildDisplaySection(context, ref, settings),
         const SizedBox(height: 16),
@@ -226,6 +231,28 @@ class SettingsView extends ConsumerWidget {
               },
               secondary: const Icon(Icons.view_compact),
             ),
+            const SizedBox(height: 12),
+            DropdownButtonFormField<models.AppLayoutStyle>(
+              value: settings.layoutStyle,
+              decoration: const InputDecoration(
+                labelText: 'Layout Style',
+                border: OutlineInputBorder(),
+              ),
+              items: models.AppLayoutStyle.values
+                  .map(
+                    (style) => DropdownMenuItem(
+                      value: style,
+                      child: Text(style.name),
+                    ),
+                  )
+                  .toList(),
+              onChanged: (value) {
+                if (value == null) return;
+                ref.read(settingsProvider.notifier).updateSettings(
+                      settings.copyWith(layoutStyle: value),
+                    );
+              },
+            ),
           ],
         ),
       ),
@@ -256,17 +283,17 @@ class SettingsView extends ConsumerWidget {
                 ),
               ],
             ),
-            const SizedBox(height: 16),
+            const SizedBox(height: 12),
             SwitchListTile(
-              title: const Text('Enable Notifications'),
-              subtitle: const Text('Receive alerts for roster changes'),
+              title: const Text('Enable notifications'),
+              subtitle: const Text('Roster reminders and alerts'),
               value: settings.notifications,
               onChanged: (value) {
                 ref.read(settingsProvider.notifier).updateSettings(
                       settings.copyWith(notifications: value),
                     );
               },
-              secondary: const Icon(Icons.notifications_active),
+              secondary: const Icon(Icons.notifications_active_outlined),
             ),
           ],
         ),
@@ -293,15 +320,15 @@ class SettingsView extends ConsumerWidget {
                 ),
                 const SizedBox(width: 8),
                 Text(
-                  'Synchronization',
+                  'Sync',
                   style: Theme.of(context).textTheme.titleLarge,
                 ),
               ],
             ),
-            const SizedBox(height: 16),
+            const SizedBox(height: 12),
             SwitchListTile(
-              title: const Text('Auto Sync'),
-              subtitle: const Text('Automatically sync with cloud'),
+              title: const Text('Auto sync'),
+              subtitle: const Text('Keep roster in sync automatically'),
               value: settings.autoSync,
               onChanged: (value) {
                 ref.read(settingsProvider.notifier).updateSettings(
@@ -310,26 +337,19 @@ class SettingsView extends ConsumerWidget {
               },
               secondary: const Icon(Icons.cloud_sync),
             ),
-            ListTile(
-              leading: const Icon(Icons.timer),
-              title: const Text('Sync Interval'),
-              subtitle: Text('${settings.syncInterval} minutes'),
-              trailing: DropdownButton<int>(
-                value: settings.syncInterval,
-                items: [5, 15, 30, 60].map((minutes) {
-                  return DropdownMenuItem(
-                    value: minutes,
-                    child: Text('$minutes min'),
-                  );
-                }).toList(),
-                onChanged: (value) {
-                  if (value != null) {
-                    ref.read(settingsProvider.notifier).updateSettings(
-                          settings.copyWith(syncInterval: value),
-                        );
-                  }
-                },
-              ),
+            const SizedBox(height: 8),
+            _buildSliderRow(
+              context,
+              label: 'Sync interval (minutes)',
+              value: settings.syncInterval.toDouble(),
+              min: 5,
+              max: 60,
+              onChanged: (value) {
+                if (!settings.autoSync) return;
+                ref.read(settingsProvider.notifier).updateSettings(
+                      settings.copyWith(syncInterval: value.round()),
+                    );
+              },
             ),
           ],
         ),
@@ -351,7 +371,7 @@ class SettingsView extends ConsumerWidget {
             Row(
               children: [
                 Icon(
-                  Icons.analytics,
+                  Icons.bar_chart,
                   color: Theme.of(context).colorScheme.primary,
                 ),
                 const SizedBox(width: 8),
@@ -361,21 +381,21 @@ class SettingsView extends ConsumerWidget {
                 ),
               ],
             ),
-            const SizedBox(height: 16),
+            const SizedBox(height: 12),
             SwitchListTile(
-              title: const Text('In-app Analytics'),
-              subtitle: const Text('Track usage for dashboards and insights'),
+              title: const Text('Enable analytics'),
+              subtitle: const Text('Collect performance metrics'),
               value: settings.analyticsEnabled,
               onChanged: (value) {
                 ref.read(settingsProvider.notifier).updateSettings(
                       settings.copyWith(analyticsEnabled: value),
                     );
               },
-              secondary: const Icon(Icons.insights),
+              secondary: const Icon(Icons.insights_rounded),
             ),
             SwitchListTile(
-              title: const Text('Cloud Analytics (AWS)'),
-              subtitle: const Text('Upload anonymized events to AWS'),
+              title: const Text('Cloud analytics'),
+              subtitle: const Text('Sync analytics to AWS'),
               value: settings.analyticsCloudEnabled,
               onChanged: settings.analyticsEnabled
                   ? (value) {
@@ -384,30 +404,94 @@ class SettingsView extends ConsumerWidget {
                           );
                     }
                   : null,
-              secondary: const Icon(Icons.cloud_upload),
+              secondary: const Icon(Icons.cloud_outlined),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildAdaptiveLearningSection(
+    BuildContext context,
+    WidgetRef ref,
+    models.AppSettings settings,
+  ) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(
+                  Icons.memory,
+                  color: Theme.of(context).colorScheme.primary,
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  'Adaptive Learning',
+                  style: Theme.of(context).textTheme.titleLarge,
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            SwitchListTile(
+              title: const Text('Enable adaptive learning'),
+              subtitle: const Text('Improve suggestions from your edits'),
+              value: settings.adaptiveLearningEnabled,
+              onChanged: (value) {
+                ref.read(settingsProvider.notifier).updateSettings(
+                      settings.copyWith(adaptiveLearningEnabled: value),
+                    );
+              },
+              secondary: const Icon(Icons.memory),
+            ),
+            SwitchListTile(
+              title: const Text('Global learning (opt-in)'),
+              subtitle: const Text(
+                'Share anonymous corrections to improve all users',
+              ),
+              value: settings.adaptiveLearningGlobalOptIn,
+              onChanged: settings.adaptiveLearningEnabled
+                  ? (value) {
+                      ref.read(settingsProvider.notifier).updateSettings(
+                            settings.copyWith(
+                              adaptiveLearningGlobalOptIn: value,
+                            ),
+                          );
+                    }
+                  : null,
+              secondary: const Icon(Icons.public),
             ),
             ListTile(
-              leading: const Icon(Icons.refresh),
-              title: const Text('Sync Analytics Now'),
-              subtitle: const Text('Push local analytics to AWS'),
-              onTap: () async {
-                await AnalyticsService.instance.flushToAws();
-                if (context.mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('Analytics sync triggered')),
-                  );
-                }
+              leading: const Icon(Icons.info_outline),
+              title: const Text('What is shared?'),
+              subtitle: const Text(
+                'Only shift-code corrections and layout signatures. No names or roster data.',
+              ),
+              onTap: () {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text(
+                      'Global learning shares only anonymized correction metadata.',
+                    ),
+                  ),
+                );
               },
             ),
             ListTile(
-              leading: const Icon(Icons.delete_outline),
-              title: const Text('Clear Local Analytics'),
-              subtitle: const Text('Remove analytics stored on this device'),
+              leading: const Icon(Icons.cleaning_services),
+              title: const Text('Clear local learning'),
+              subtitle: const Text('Remove local adaptive learning cache'),
               onTap: () async {
-                await AnalyticsService.instance.clearLocal();
+                await AdaptiveLearningService.instance.clearLocalLearning();
                 if (context.mounted) {
                   ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('Local analytics cleared')),
+                    const SnackBar(
+                      content: Text('Local adaptive learning cache cleared'),
+                    ),
                   );
                 }
               },
@@ -546,8 +630,8 @@ class SettingsView extends ConsumerWidget {
               secondary: const Icon(Icons.weekend),
             ),
             SwitchListTile(
-              title: const Text('Allow AI Overrides'),
-              subtitle: const Text('Let AI propose override actions'),
+              title: const Text('Allow AI Changes'),
+              subtitle: const Text('Let AI propose change actions'),
               value: constraints.allowAiOverrides,
               onChanged: (value) {
                 ref.read(rosterProvider).updateConstraints(
@@ -570,6 +654,75 @@ class SettingsView extends ConsumerWidget {
               trailing: const Icon(Icons.edit),
               onTap: () => _showDailyTargetsDialog(context, ref, roster),
             ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildShiftHoursSection(
+    BuildContext context,
+    WidgetRef ref,
+    models.AppSettings settings,
+  ) {
+    final hours = Map<String, double>.from(settings.shiftHourMap);
+    const shiftKeys = [
+      'D',
+      'E',
+      'L',
+      'N',
+      'D12',
+      'N12',
+      'C',
+      'C1',
+      'C2',
+      'C3',
+      'C4',
+      'R',
+      'OFF',
+      'AL',
+    ];
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(
+                  Icons.timer_rounded,
+                  color: Theme.of(context).colorScheme.primary,
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  'Shift Hours',
+                  style: Theme.of(context).textTheme.titleLarge,
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            Text(
+              'Used for RC math and roster analytics.',
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+            const SizedBox(height: 12),
+            ...shiftKeys.map((code) {
+              final value = hours[code] ?? 0.0;
+              return _buildSliderRow(
+                context,
+                label: '$code hours',
+                value: value,
+                min: 0,
+                max: 24,
+                onChanged: (v) {
+                  hours[code] = v;
+                  ref.read(settingsProvider.notifier).updateSettings(
+                        settings.copyWith(shiftHourMap: hours),
+                      );
+                },
+              );
+            }),
           ],
         ),
       ),
@@ -619,7 +772,7 @@ class SettingsView extends ConsumerWidget {
             children: shiftTypes.map((shift) {
               return Padding(
                 padding: const EdgeInsets.symmetric(vertical: 6),
-                child: TextField(
+                child: SafeTextField(
                   controller: controllers[shift],
                   decoration: InputDecoration(
                     labelText: '$shift minimum',
@@ -710,7 +863,7 @@ class SettingsView extends ConsumerWidget {
                   ...shiftTypes.map((shift) {
                     return Padding(
                       padding: const EdgeInsets.symmetric(vertical: 6),
-                      child: TextField(
+                      child: SafeTextField(
                         controller: controllers[shift],
                         decoration: InputDecoration(
                           labelText: '$shift minimum',
@@ -885,6 +1038,42 @@ class SettingsView extends ConsumerWidget {
                     );
               },
             ),
+            const SizedBox(height: 8),
+            ListTile(
+              leading: const Icon(Icons.history_rounded),
+              title: const Text('Past months limit'),
+              subtitle: Text('${settings.monthsBackLimit} month(s)'),
+            ),
+            Slider(
+              value: settings.monthsBackLimit.toDouble(),
+              min: 1,
+              max: 96,
+              divisions: 95,
+              label: '${settings.monthsBackLimit} months',
+              onChanged: (value) {
+                ref.read(settingsProvider.notifier).updateSettings(
+                      settings.copyWith(monthsBackLimit: value.round()),
+                    );
+              },
+            ),
+            const SizedBox(height: 8),
+            ListTile(
+              leading: const Icon(Icons.forward_rounded),
+              title: const Text('Future months limit'),
+              subtitle: Text('${settings.monthsForwardLimit} month(s)'),
+            ),
+            Slider(
+              value: settings.monthsForwardLimit.toDouble(),
+              min: 1,
+              max: 96,
+              divisions: 95,
+              label: '${settings.monthsForwardLimit} months',
+              onChanged: (value) {
+                ref.read(settingsProvider.notifier).updateSettings(
+                      settings.copyWith(monthsForwardLimit: value.round()),
+                    );
+              },
+            ),
             ListTile(
               leading: const Icon(Icons.date_range),
               title: const Text('Date Format'),
@@ -1008,7 +1197,7 @@ class SettingsView extends ConsumerWidget {
                 ),
                 DropdownMenuItem(
                   value: 'aws',
-                  child: Text('AWS (online)'),
+                  child: Text('Online (system)'),
                 ),
               ],
               onChanged: settings.voiceEnabled
@@ -1047,6 +1236,121 @@ class SettingsView extends ConsumerWidget {
                     }
                   : null,
             ),
+            const SizedBox(height: 12),
+            if (settings.voiceOutputEngine == 'aws')
+              DropdownButtonFormField<String>(
+                value: settings.voiceOutputVoice,
+                decoration: const InputDecoration(
+                  labelText: 'Voice (AWS Polly)',
+                ),
+                items: const [
+                  DropdownMenuItem(
+                    value: 'aws:Joanna',
+                    child: Text('Joanna (US, Female)'),
+                  ),
+                  DropdownMenuItem(
+                    value: 'aws:Amy',
+                    child: Text('Amy (UK, Female)'),
+                  ),
+                  DropdownMenuItem(
+                    value: 'aws:Emma',
+                    child: Text('Emma (UK, Female)'),
+                  ),
+                  DropdownMenuItem(
+                    value: 'aws:Olivia',
+                    child: Text('Olivia (UK, Female)'),
+                  ),
+                  DropdownMenuItem(
+                    value: 'aws:Salli',
+                    child: Text('Salli (US, Female)'),
+                  ),
+                  DropdownMenuItem(
+                    value: 'aws:Ivy',
+                    child: Text('Ivy (US, Female)'),
+                  ),
+                  DropdownMenuItem(
+                    value: 'aws:Kendra',
+                    child: Text('Kendra (US, Female)'),
+                  ),
+                  DropdownMenuItem(
+                    value: 'aws:Kimberly',
+                    child: Text('Kimberly (US, Female)'),
+                  ),
+                  DropdownMenuItem(
+                    value: 'aws:Matthew',
+                    child: Text('Matthew (US, Male)'),
+                  ),
+                  DropdownMenuItem(
+                    value: 'aws:Brian',
+                    child: Text('Brian (UK, Male)'),
+                  ),
+                  DropdownMenuItem(
+                    value: 'aws:Justin',
+                    child: Text('Justin (US, Male)'),
+                  ),
+                  DropdownMenuItem(
+                    value: 'aws:Joey',
+                    child: Text('Joey (US, Male)'),
+                  ),
+                ],
+                onChanged: settings.voiceEnabled
+                    ? (value) {
+                        if (value != null) {
+                          ref.read(settingsProvider.notifier).updateSettings(
+                                settings.copyWith(voiceOutputVoice: value),
+                              );
+                        }
+                      }
+                    : null,
+              )
+            else
+              FutureBuilder<List<Map<String, String>>>(
+                future: VoiceService.instance.getDeviceVoices(),
+                builder: (context, snapshot) {
+                  final voices = snapshot.data ?? [];
+                  final items = <DropdownMenuItem<String>>[
+                    const DropdownMenuItem(
+                      value: 'device:default',
+                      child: Text('Device default'),
+                    ),
+                  ];
+                  for (final voice in voices) {
+                    final name = voice['name'] ?? '';
+                    final locale = voice['locale'] ?? '';
+                    if (name.isEmpty) continue;
+                    items.add(
+                      DropdownMenuItem(
+                        value: 'device:$name|$locale',
+                        child: Text(
+                          locale.isEmpty ? name : '$name ($locale)',
+                        ),
+                      ),
+                    );
+                  }
+                  return DropdownButtonFormField<String>(
+                    value: settings.voiceOutputVoice.startsWith('device:')
+                        ? settings.voiceOutputVoice
+                        : 'device:default',
+                    decoration: const InputDecoration(
+                      labelText: 'Voice (Device)',
+                    ),
+                    items: items,
+                    onChanged: settings.voiceEnabled
+                        ? (value) {
+                            if (value != null) {
+                              ref
+                                  .read(settingsProvider.notifier)
+                                  .updateSettings(
+                                    settings.copyWith(
+                                      voiceOutputVoice: value,
+                                    ),
+                                  );
+                            }
+                          }
+                        : null,
+                  );
+                },
+              ),
             const SizedBox(height: 8),
             Text(
               'If offline, RC automatically falls back to on-device speech.',
@@ -1196,7 +1500,7 @@ class SettingsView extends ConsumerWidget {
                 },
                 secondary: const Icon(Icons.temple_hindu),
               ),
-              TextFormField(
+              SafeTextField(
                 initialValue: settings.calendarificApiKey,
                 decoration: const InputDecoration(
                   labelText: 'Calendarific API key',
@@ -1255,7 +1559,7 @@ class SettingsView extends ConsumerWidget {
                 },
                 secondary: const Icon(Icons.sports_soccer),
               ),
-              TextFormField(
+              SafeTextField(
                 initialValue: settings.sportsApiKey,
                 decoration: const InputDecoration(
                   labelText: 'Sports API key',
@@ -1272,7 +1576,7 @@ class SettingsView extends ConsumerWidget {
                 },
               ),
               const SizedBox(height: 8),
-              TextFormField(
+              SafeTextField(
                 initialValue: settings.sportsLeagueIds.join(','),
                 decoration: const InputDecoration(
                   labelText: 'Sports league IDs',
@@ -1353,7 +1657,7 @@ class SettingsView extends ConsumerWidget {
             style: Theme.of(context).textTheme.titleSmall,
           ),
           const SizedBox(height: 8),
-          TextField(
+          SafeTextField(
             controller: locationController,
             decoration: InputDecoration(
               labelText: 'Search location',
@@ -1718,7 +2022,7 @@ class SettingsView extends ConsumerWidget {
                     onChanged: (value) => setState(() => addEvents = value),
                   ),
                   SwitchListTile(
-                    title: const Text('Apply leave overrides'),
+                    title: const Text('Apply leave changes'),
                     subtitle: const Text('Set selected staff to AL on holidays'),
                     value: applyLeave,
                     onChanged: (value) => setState(() => applyLeave = value),
@@ -1831,7 +2135,7 @@ class SettingsView extends ConsumerWidget {
                             ScaffoldMessenger.of(context).showSnackBar(
                               SnackBar(
                                 content: Text(
-                                  'Imported ${result['events']} events, ${result['overrides']} leave overrides',
+                                  'Imported ${result['events']} events, ${result['overrides']} leave changes',
                                 ),
                               ),
                             );
@@ -1863,3 +2167,8 @@ class SettingsView extends ConsumerWidget {
     );
   }
 }
+
+
+
+
+

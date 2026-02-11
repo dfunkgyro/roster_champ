@@ -5,6 +5,8 @@ when you enable cloud sync, in your AWS account. We do not sell user data.
 
 Data We Process
 - Account details (email, name) for authentication.
+- If you sign in with Google, we receive your Google profile email and basic
+  profile name from Google OAuth for authentication and account linking.
 - Roster data, events, and preferences you enter.
 - Device and session data for security and sync.
 

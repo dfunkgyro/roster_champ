@@ -5,6 +5,7 @@ import 'package:intl/intl.dart';
 import '../providers.dart';
 import '../models.dart' as models;
 import '../services/staff_name_store.dart';
+import 'package:roster_champ/safe_text_field.dart';
 
 String _formatLeaveLabel(String? leaveType) {
   if (leaveType == null || leaveType.isEmpty) return 'Leave';
@@ -203,7 +204,7 @@ class _StaffManagementScreenState extends ConsumerState<StaffManagementScreen> {
               fieldViewBuilder:
                   (context, controller, focusNode, onFieldSubmitted) {
                 _addStaffController.value = controller.value;
-                return TextField(
+                return SafeTextField(
                   controller: _addStaffController,
                   focusNode: focusNode,
                   decoration: const InputDecoration(
@@ -452,7 +453,7 @@ class _StaffCard extends ConsumerWidget {
                           fieldViewBuilder: (context, controller, focusNode,
                               onFieldSubmitted) {
                             editController.value = controller.value;
-                            return TextField(
+                            return SafeTextField(
                               controller: editController,
                               focusNode: focusNode,
                               decoration: InputDecoration(
@@ -619,7 +620,7 @@ class _StaffCard extends ConsumerWidget {
                         value: 'overrides',
                         child: ListTile(
                           leading: Icon(Icons.edit_calendar),
-                          title: Text('View Overrides'),
+                          title: Text('View Changes'),
                           contentPadding: EdgeInsets.zero,
                         ),
                       ),
@@ -668,7 +669,7 @@ class _StaffCard extends ConsumerWidget {
                 _buildInfoChip(
                   context,
                   Icons.edit_calendar,
-                  '${overrides.length} overrides',
+                  '${overrides.length} changes',
                 ),
                 const SizedBox(width: 8),
                 _buildInfoChip(
@@ -839,7 +840,7 @@ class _StaffCard extends ConsumerWidget {
               ),
               if (leaveType == 'custom') ...[
                 const SizedBox(height: 12),
-                TextField(
+                SafeTextField(
                   decoration: const InputDecoration(
                     labelText: 'Custom leave label',
                     border: OutlineInputBorder(),
@@ -994,11 +995,11 @@ class _StaffCard extends ConsumerWidget {
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
-        title: Text('Overrides - $personName'),
+        title: Text('Changes - $personName'),
         content: SizedBox(
           width: double.maxFinite,
           child: overrides.isEmpty
-              ? const Text('No overrides found')
+              ? const Text('No changes found')
               : ListView.builder(
                   shrinkWrap: true,
                   itemCount: overrides.length,
@@ -1036,9 +1037,9 @@ class _StaffCard extends ConsumerWidget {
                           showDialog(
                             context: context,
                             builder: (context) => AlertDialog(
-                              title: const Text('Override Removed'),
+                              title: const Text('Change Removed'),
                               content: const Text(
-                                  'The override has been removed successfully.'),
+                                  'The change has been removed successfully.'),
                               actions: [
                                 TextButton(
                                   onPressed: () => Navigator.pop(context),
@@ -1129,7 +1130,7 @@ class _StaffCard extends ConsumerWidget {
                   }),
                 ),
                 const SizedBox(height: 12),
-                TextField(
+                SafeTextField(
                   controller: preferredShiftsController,
                   decoration: const InputDecoration(
                     labelText: 'Preferred Shifts',
@@ -1137,7 +1138,7 @@ class _StaffCard extends ConsumerWidget {
                   ),
                 ),
                 const SizedBox(height: 12),
-                TextField(
+                SafeTextField(
                   controller: maxShiftsController,
                   decoration: const InputDecoration(
                     labelText: 'Max Shifts Per Week',
@@ -1146,7 +1147,7 @@ class _StaffCard extends ConsumerWidget {
                   keyboardType: TextInputType.number,
                 ),
                 const SizedBox(height: 12),
-                TextField(
+                SafeTextField(
                   controller: minRestController,
                   decoration: const InputDecoration(
                     labelText: 'Min Rest Days',
@@ -1163,7 +1164,7 @@ class _StaffCard extends ConsumerWidget {
                   },
                 ),
                 const SizedBox(height: 8),
-                TextField(
+                SafeTextField(
                   controller: notesController,
                   decoration: const InputDecoration(
                     labelText: 'Notes',

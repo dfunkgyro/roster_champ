@@ -64,7 +64,7 @@ class AnalyticsService extends ChangeNotifier {
     if (_events.length > _maxStored) {
       _events.removeRange(0, _events.length - _maxStored);
     }
-    _persist();
+    _schedulePersist();
     _scheduleFlush();
     notifyListeners();
   }
@@ -118,8 +118,17 @@ class AnalyticsService extends ChangeNotifier {
   void _scheduleFlush() {
     if (!_cloudEnabled) return;
     _flushTimer?.cancel();
-    _flushTimer = Timer(const Duration(seconds: 15), () async {
+    _flushTimer = Timer(const Duration(seconds: 60), () async {
       await flushToAws();
+    });
+  }
+
+  Timer? _persistTimer;
+
+  void _schedulePersist() {
+    _persistTimer?.cancel();
+    _persistTimer = Timer(const Duration(seconds: 5), () async {
+      await _persist();
     });
   }
 

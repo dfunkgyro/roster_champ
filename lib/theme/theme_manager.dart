@@ -24,10 +24,14 @@ class ThemeManager {
     }
   }
 
-  ThemeData getLightTheme(models.ColorSchemeType colorScheme) {
+  ThemeData getLightTheme(
+    models.ColorSchemeType colorScheme,
+    models.AppLayoutStyle layoutStyle,
+    bool performanceMode,
+  ) {
     final colorSchemeData = _getColorScheme(colorScheme, Brightness.light);
 
-    return ThemeData(
+    final base = ThemeData(
       useMaterial3: true,
       colorScheme: colorSchemeData,
       brightness: Brightness.light,
@@ -135,12 +139,18 @@ class ThemeManager {
         space: 1,
       ),
     );
+    final styled = _applyLayoutStyle(base, layoutStyle, Brightness.light);
+    return _applyPerformanceMode(styled, performanceMode);
   }
 
-  ThemeData getDarkTheme(models.ColorSchemeType colorScheme) {
+  ThemeData getDarkTheme(
+    models.ColorSchemeType colorScheme,
+    models.AppLayoutStyle layoutStyle,
+    bool performanceMode,
+  ) {
     final colorSchemeData = _getColorScheme(colorScheme, Brightness.dark);
 
-    return ThemeData(
+    final base = ThemeData(
       useMaterial3: true,
       colorScheme: colorSchemeData,
       brightness: Brightness.dark,
@@ -260,6 +270,198 @@ class ThemeManager {
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
       ),
     );
+    final styled = _applyLayoutStyle(base, layoutStyle, Brightness.dark);
+    return _applyPerformanceMode(styled, performanceMode);
+  }
+
+  ThemeData _applyLayoutStyle(
+    ThemeData base,
+    models.AppLayoutStyle style,
+    Brightness brightness,
+  ) {
+    switch (style) {
+      case models.AppLayoutStyle.professional:
+        return _styleProfessional(base, brightness);
+      case models.AppLayoutStyle.sophisticated:
+        return _styleSophisticated(base, brightness);
+      case models.AppLayoutStyle.intuitive:
+        return _styleIntuitive(base, brightness);
+      case models.AppLayoutStyle.ambience:
+        return _styleAmbience(base, brightness);
+      case models.AppLayoutStyle.standard:
+      default:
+        return base;
+    }
+  }
+
+  ThemeData _applyPerformanceMode(ThemeData base, bool enabled) {
+    if (!enabled) return base;
+    return base.copyWith(
+      pageTransitionsTheme: const PageTransitionsTheme(
+        builders: {
+          TargetPlatform.android: _NoTransitionsBuilder(),
+          TargetPlatform.iOS: _NoTransitionsBuilder(),
+          TargetPlatform.windows: _NoTransitionsBuilder(),
+          TargetPlatform.linux: _NoTransitionsBuilder(),
+          TargetPlatform.macOS: _NoTransitionsBuilder(),
+        },
+      ),
+      visualDensity: VisualDensity.compact,
+    );
+  }
+
+  ThemeData _styleProfessional(ThemeData base, Brightness brightness) {
+    final isDark = brightness == Brightness.dark;
+    final textTheme = GoogleFonts.sourceSans3TextTheme(base.textTheme);
+    final scheme = _seedScheme(
+      isDark ? const Color(0xFF4C9AFF) : const Color(0xFF1B4F99),
+      brightness,
+    );
+    return base.copyWith(
+      colorScheme: scheme,
+      scaffoldBackgroundColor:
+          isDark ? const Color(0xFF101418) : const Color(0xFFF5F7FA),
+      textTheme: textTheme.copyWith(
+        titleLarge: textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w700),
+        titleMedium:
+            textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w600),
+      ),
+      cardTheme: base.cardTheme.copyWith(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        elevation: isDark ? 6 : 2,
+        color: isDark ? const Color(0xFF1B232C) : Colors.white,
+      ),
+      appBarTheme: base.appBarTheme.copyWith(
+        centerTitle: false,
+        titleTextStyle: GoogleFonts.sourceSans3(
+          fontSize: 18,
+          fontWeight: FontWeight.w700,
+          color: isDark ? Colors.white : Colors.black87,
+        ),
+        backgroundColor: isDark ? const Color(0xFF121821) : Colors.white,
+      ),
+      inputDecorationTheme: base.inputDecorationTheme.copyWith(
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(10),
+        ),
+      ),
+    );
+  }
+
+  ThemeData _styleSophisticated(ThemeData base, Brightness brightness) {
+    final isDark = brightness == Brightness.dark;
+    final scheme = _seedScheme(
+      isDark ? const Color(0xFF1DB7C6) : const Color(0xFF0E7F8A),
+      brightness,
+    );
+    final bodyTheme =
+        GoogleFonts.spaceGroteskTextTheme(base.textTheme).copyWith(
+      bodyLarge: GoogleFonts.spaceGrotesk(fontSize: 16),
+      bodyMedium: GoogleFonts.spaceGrotesk(fontSize: 14),
+    );
+    final heading = GoogleFonts.orbitronTextTheme(base.textTheme);
+    return base.copyWith(
+      colorScheme: scheme,
+      scaffoldBackgroundColor:
+          isDark ? const Color(0xFF0B1218) : const Color(0xFFF2F6F9),
+      textTheme: bodyTheme.copyWith(
+        displayLarge: heading.displayLarge?.copyWith(
+          fontWeight: FontWeight.w700,
+          color: isDark ? const Color(0xFFEFF7FF) : const Color(0xFF0A2239),
+        ),
+        displayMedium: heading.displayMedium?.copyWith(
+          fontWeight: FontWeight.w700,
+          color: isDark ? const Color(0xFFEFF7FF) : const Color(0xFF0A2239),
+        ),
+        titleLarge: heading.titleLarge?.copyWith(
+          fontWeight: FontWeight.w700,
+          color: isDark ? const Color(0xFFEFF7FF) : const Color(0xFF0A2239),
+        ),
+      ),
+      cardTheme: base.cardTheme.copyWith(
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(8),
+        ),
+        elevation: isDark ? 10 : 5,
+        color: isDark ? const Color(0xFF121A22) : Colors.white,
+      ),
+      appBarTheme: base.appBarTheme.copyWith(
+        centerTitle: true,
+        backgroundColor:
+            isDark ? const Color(0xFF0E151B) : const Color(0xFFF5F8FB),
+        foregroundColor:
+            isDark ? const Color(0xFFEFF7FF) : const Color(0xFF0A2239),
+      ),
+      dividerTheme: base.dividerTheme.copyWith(
+        color: isDark ? const Color(0xFF1B2A35) : const Color(0xFFCCDAE5),
+      ),
+    );
+  }
+
+  ThemeData _styleIntuitive(ThemeData base, Brightness brightness) {
+    final isDark = brightness == Brightness.dark;
+    final textTheme = GoogleFonts.manropeTextTheme(base.textTheme);
+    final scheme = _seedScheme(
+      isDark ? const Color(0xFF2CBFAE) : const Color(0xFF0C8C7A),
+      brightness,
+    );
+    return base.copyWith(
+      colorScheme: scheme,
+      scaffoldBackgroundColor:
+          isDark ? const Color(0xFF101419) : const Color(0xFFF2F6F9),
+      textTheme: textTheme.copyWith(
+        titleLarge: textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w700),
+      ),
+      cardTheme: base.cardTheme.copyWith(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+        elevation: isDark ? 4 : 2,
+      ),
+      listTileTheme: base.listTileTheme.copyWith(
+        contentPadding:
+            const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+      ),
+    );
+  }
+
+  ThemeData _styleAmbience(ThemeData base, Brightness brightness) {
+    final isDark = brightness == Brightness.dark;
+    final textTheme = GoogleFonts.spaceGroteskTextTheme(base.textTheme);
+    final scheme = _seedScheme(
+      isDark ? const Color(0xFF1EA7C6) : const Color(0xFF0B7F9E),
+      brightness,
+    );
+    return base.copyWith(
+      colorScheme: scheme,
+      scaffoldBackgroundColor:
+          isDark ? const Color(0xFF0B141A) : const Color(0xFFEAF4F8),
+      textTheme: textTheme.copyWith(
+        displayLarge: textTheme.displayLarge?.copyWith(
+          fontWeight: FontWeight.w700,
+        ),
+        titleLarge: textTheme.titleLarge?.copyWith(
+          fontWeight: FontWeight.w600,
+        ),
+      ),
+      cardTheme: base.cardTheme.copyWith(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        elevation: isDark ? 8 : 4,
+        color: isDark ? const Color(0xFF111E26) : const Color(0xFFF7FCFF),
+      ),
+      appBarTheme: base.appBarTheme.copyWith(
+        backgroundColor:
+            isDark ? const Color(0xFF0F1B22) : const Color(0xFFF0F8FB),
+        foregroundColor:
+            isDark ? const Color(0xFFE6FAFF) : const Color(0xFF0B2A35),
+      ),
+      inputDecorationTheme: base.inputDecorationTheme.copyWith(
+        fillColor:
+            isDark ? const Color(0xFF172733) : const Color(0xFFE1F1F7),
+      ),
+    );
+  }
+
+  ColorScheme _seedScheme(Color seed, Brightness brightness) {
+    return ColorScheme.fromSeed(seedColor: seed, brightness: brightness);
   }
 
   ColorScheme _getColorScheme(
@@ -307,5 +509,20 @@ class ThemeManager {
           brightness: brightness,
         );
     }
+  }
+}
+
+class _NoTransitionsBuilder extends PageTransitionsBuilder {
+  const _NoTransitionsBuilder();
+
+  @override
+  Widget buildTransitions<T>(
+    PageRoute<T> route,
+    BuildContext context,
+    Animation<double> animation,
+    Animation<double> secondaryAnimation,
+    Widget child,
+  ) {
+    return child;
   }
 }

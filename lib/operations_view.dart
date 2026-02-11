@@ -6,7 +6,10 @@ import 'dart:io';
 import 'providers.dart';
 import 'models.dart' as models;
 import 'roster_generator_view.dart';
+import 'import_roster_screen.dart';
+import 'screens/roster_sharing_screen.dart';
 import 'aws_service.dart';
+import 'package:roster_champ/safe_text_field.dart';
 
 class OperationsView extends ConsumerStatefulWidget {
   const OperationsView({super.key});
@@ -83,9 +86,12 @@ class _OperationsViewState extends ConsumerState<OperationsView>
       children: [
         Padding(
           padding: const EdgeInsets.all(12),
-          child: Row(
+          child: Wrap(
+            spacing: 12,
+            runSpacing: 12,
             children: [
-              Expanded(
+              SizedBox(
+                width: 240,
                 child: OutlinedButton.icon(
                   onPressed: () {
                     Navigator.of(context).push(
@@ -96,6 +102,34 @@ class _OperationsViewState extends ConsumerState<OperationsView>
                   },
                   icon: const Icon(Icons.auto_awesome),
                   label: const Text('Auto Roster Generator'),
+                ),
+              ),
+              SizedBox(
+                width: 200,
+                child: OutlinedButton.icon(
+                  onPressed: () {
+                    Navigator.of(context).push(
+                      MaterialPageRoute(
+                        builder: (_) => const ImportRosterScreen(),
+                      ),
+                    );
+                  },
+                  icon: const Icon(Icons.upload_file_rounded),
+                  label: const Text('Import Roster'),
+                ),
+              ),
+              SizedBox(
+                width: 230,
+                child: OutlinedButton.icon(
+                  onPressed: () {
+                    Navigator.of(context).push(
+                      MaterialPageRoute(
+                        builder: (_) => const RosterSharingScreen(),
+                      ),
+                    );
+                  },
+                  icon: const Icon(Icons.qr_code_2),
+                  label: const Text('Roster Sharing'),
                 ),
               ),
             ],
@@ -650,7 +684,7 @@ class _OperationsViewState extends ConsumerState<OperationsView>
                   ],
                 ),
                 const SizedBox(height: 12),
-                TextField(
+                SafeTextField(
                   controller: notesController,
                   decoration: const InputDecoration(
                     labelText: 'Notes',
@@ -700,11 +734,11 @@ class _OperationsViewState extends ConsumerState<OperationsView>
             return Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                TextField(
+                SafeTextField(
                   controller: fromController,
                   decoration: const InputDecoration(labelText: 'From'),
                 ),
-                TextField(
+                SafeTextField(
                   controller: toController,
                   decoration: const InputDecoration(labelText: 'To (optional)'),
                 ),
@@ -722,7 +756,7 @@ class _OperationsViewState extends ConsumerState<OperationsView>
                   },
                   child: Text('Date: ${_formatDate(date)}'),
                 ),
-                TextField(
+                SafeTextField(
                   controller: shiftController,
                   decoration:
                       const InputDecoration(labelText: 'Shift (optional)'),
@@ -873,7 +907,7 @@ class _OperationsViewState extends ConsumerState<OperationsView>
                   value: recordDebt,
                   onChanged: (value) => setState(() => recordDebt = value),
                 ),
-                TextField(
+                SafeTextField(
                   controller: reasonController,
                   decoration: const InputDecoration(
                     labelText: 'Notes',
@@ -1103,11 +1137,11 @@ class _OperationsViewState extends ConsumerState<OperationsView>
         content: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            TextField(
+            SafeTextField(
               controller: titleController,
               decoration: const InputDecoration(labelText: 'Title'),
             ),
-            TextField(
+            SafeTextField(
               controller: descriptionController,
               decoration: const InputDecoration(labelText: 'Details'),
             ),
@@ -1154,7 +1188,7 @@ class _OperationsViewState extends ConsumerState<OperationsView>
             return Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                TextField(
+                SafeTextField(
                   controller: shiftController,
                   decoration: const InputDecoration(labelText: 'Shift'),
                 ),
@@ -1172,13 +1206,13 @@ class _OperationsViewState extends ConsumerState<OperationsView>
                   },
                   child: Text('Date: ${_formatDate(date)}'),
                 ),
-                TextField(
+                SafeTextField(
                   controller: personController,
                   decoration: const InputDecoration(
                     labelText: 'Person (optional)',
                   ),
                 ),
-                TextField(
+                SafeTextField(
                   controller: reasonController,
                   decoration: const InputDecoration(
                     labelText: 'Reason (optional)',

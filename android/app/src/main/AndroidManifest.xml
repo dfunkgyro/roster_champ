@@ -9,9 +9,14 @@
     <!-- Storage permissions for import/export functionality -->
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
 
     <!-- Voice assistant -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
+    <!-- Camera for roster import -->
+    <uses-permission android:name="android.permission.CAMERA" />
     
     <!-- For Android 10+ scoped storage -->
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" 
@@ -33,7 +38,7 @@
             android:theme="@style/LaunchTheme"
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
             android:hardwareAccelerated="true"
-            android:windowSoftInputMode="adjustResize">
+            android:windowSoftInputMode="stateHidden|adjustResize">
             
             <!-- Specifies an Android theme to apply to this Activity as soon as
                  the Android process has started. This theme is visible to the user

@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:typed_data';
+import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:speech_to_text/speech_to_text.dart';
@@ -24,6 +25,7 @@ class VoiceService {
   bool _manualListening = false;
   String _inputEngine = 'onDevice';
   String _outputEngine = 'aws';
+  String _outputVoice = 'aws:Joanna';
   List<String> _wakeWords = const [
     'rc',
     'roster champ',
@@ -31,6 +33,8 @@ class VoiceService {
   ];
 
   Function(String text)? onCommand;
+  DateTime? _lastNetworkCheck;
+  bool _lastNetworkOk = true;
 
   Future<void> initialize() async {
     if (_initialized) return;
@@ -47,6 +51,7 @@ class VoiceService {
     _alwaysListening = settings.voiceAlwaysListening;
     _inputEngine = settings.voiceInputEngine;
     _outputEngine = settings.voiceOutputEngine;
+    _outputVoice = settings.voiceOutputVoice;
     _wakeWords = settings.voiceWakeWords;
 
     if (!_enabled) {
@@ -70,12 +75,28 @@ class VoiceService {
     _manualListening = pushToTalk;
     isListening.value = true;
 
-    await _speech.listen(
-      onResult: _onResult,
-      listenMode: ListenMode.confirmation,
-      partialResults: true,
-      cancelOnError: true,
-    );
+    final useOnDevice = _inputEngine == 'onDevice' || !await _hasNetwork();
+    try {
+      await _speech.listen(
+        onResult: _onResult,
+        listenMode: ListenMode.confirmation,
+        partialResults: true,
+        cancelOnError: true,
+        onDevice: useOnDevice,
+      );
+    } catch (e) {
+      if (useOnDevice && await _hasNetwork()) {
+        await _speech.listen(
+          onResult: _onResult,
+          listenMode: ListenMode.confirmation,
+          partialResults: true,
+          cancelOnError: true,
+          onDevice: false,
+        );
+      } else {
+        debugPrint('Voice listen failed: $e');
+      }
+    }
   }
 
   Future<void> stopListening() async {
@@ -96,7 +117,27 @@ class VoiceService {
       if (success) return;
     }
     await _tts.stop();
+    if (settings.voiceOutputEngine == 'onDevice') {
+      await _applyDeviceVoice(settings.voiceOutputVoice);
+    }
     await _tts.speak(cleaned);
+  }
+
+  Future<bool> _hasNetwork() async {
+    final now = DateTime.now();
+    if (_lastNetworkCheck != null &&
+        now.difference(_lastNetworkCheck!).inSeconds < 10) {
+      return _lastNetworkOk;
+    }
+    _lastNetworkCheck = now;
+    try {
+      final result = await InternetAddress.lookup('example.com')
+          .timeout(const Duration(seconds: 2));
+      _lastNetworkOk = result.isNotEmpty && result.first.rawAddress.isNotEmpty;
+    } catch (_) {
+      _lastNetworkOk = false;
+    }
+    return _lastNetworkOk;
   }
 
   void _onStatus(String status) {
@@ -144,11 +185,12 @@ class VoiceService {
     try {
       final region = AwsService.instance.region;
       if (region == null) return false;
+      final voiceId = _resolveAwsVoiceId(_outputVoice);
       final url = Uri.parse('https://polly.$region.amazonaws.com/v1/speech');
       final payload = jsonEncode({
         'OutputFormat': 'mp3',
         'Text': text,
-        'VoiceId': 'Joanna',
+        'VoiceId': voiceId,
         'Engine': 'neural',
       });
       final headers = await AwsService.instance.signedAwsHeaders(
@@ -178,6 +220,49 @@ class VoiceService {
     } catch (e) {
       debugPrint('AWS TTS failed: $e');
       return false;
+    }
+  }
+
+  String _resolveAwsVoiceId(String value) {
+    if (value.startsWith('aws:')) {
+      return value.substring('aws:'.length);
+    }
+    return value.isNotEmpty ? value : 'Joanna';
+  }
+
+  Future<void> _applyDeviceVoice(String value) async {
+    if (!value.startsWith('device:')) return;
+    final payload = value.substring('device:'.length);
+    if (payload == 'default') return;
+    final parts = payload.split('|');
+    if (parts.isEmpty) return;
+    final name = parts[0];
+    final locale = parts.length > 1 ? parts[1] : null;
+    final voice = <String, String>{'name': name};
+    if (locale != null && locale.isNotEmpty) {
+      voice['locale'] = locale;
+    }
+    await _tts.setVoice(voice);
+  }
+
+  Future<List<Map<String, String>>> getDeviceVoices() async {
+    try {
+      final voices = await _tts.getVoices;
+      final list = <Map<String, String>>[];
+      for (final v in voices) {
+        if (v is Map) {
+          final name = v['name']?.toString();
+          final locale = v['locale']?.toString();
+          if (name == null || name.isEmpty) continue;
+          list.add({
+            'name': name,
+            'locale': locale ?? '',
+          });
+        }
+      }
+      return list;
+    } catch (_) {
+      return [];
     }
   }
 }

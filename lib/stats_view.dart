@@ -145,7 +145,7 @@ class StatsView extends ConsumerWidget {
             ),
             _buildStatRow(
               context,
-              'Total Overrides',
+              'Total Changes',
               '${stats['totalOverrides']}',
               Icons.edit_calendar,
             ),

@@ -1,11 +1,15 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../aws_service.dart';
 import '../utils/error_handler.dart';
 import '../home_screen.dart';
 import '../providers.dart';
 import 'roster_sharing_screen.dart';
+import 'package:roster_champ/safe_text_field.dart';
 
 class LoginScreen extends ConsumerStatefulWidget {
   final VoidCallback? onGuestMode;
@@ -22,15 +26,32 @@ class LoginScreen extends ConsumerStatefulWidget {
 }
 
 class _LoginScreenState extends ConsumerState<LoginScreen> {
+  static const String _privacyUrl = 'https://rosterchampion.com/privacy';
+  static const String _termsUrl = 'https://rosterchampion.com/terms';
   final _emailController = TextEditingController();
   final _passwordController = TextEditingController();
   final _displayNameController = TextEditingController();
+  final _emailFocus = FocusNode();
+  final _displayFocus = FocusNode();
+  final _passwordFocus = FocusNode();
   bool _isLoading = false;
   bool _isSignUp = false;
   bool _obscurePassword = true;
+  late final bool _safeInputMode = Platform.isAndroid;
 
   bool _isValidEmail(String value) {
     return value.contains('@') && value.contains('.');
+  }
+
+  Future<void> _openExternal(String url) async {
+    final uri = Uri.parse(url);
+    if (!await launchUrl(uri, mode: LaunchMode.externalApplication)) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Unable to open $url')),
+        );
+      }
+    }
   }
 
   @override
@@ -38,6 +59,9 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
     _emailController.dispose();
     _passwordController.dispose();
     _displayNameController.dispose();
+    _emailFocus.dispose();
+    _displayFocus.dispose();
+    _passwordFocus.dispose();
     super.dispose();
   }
 
@@ -148,6 +172,56 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
     }
   }
 
+  Future<void> _signInWithGoogle({bool forceAccountPicker = false}) async {
+    setState(() => _isLoading = true);
+    bool cancelled = false;
+    if (mounted) {
+      showDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        builder: (context) {
+          return AlertDialog(
+            title: const Text('Waiting for Google'),
+            content: const Text(
+              'Complete sign-in in the browser. You can cancel if you changed your mind.',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () {
+                  cancelled = true;
+                  AwsService.instance.cancelGoogleSignIn();
+                  Navigator.of(context).pop();
+                },
+                child: const Text('Cancel'),
+              ),
+            ],
+          );
+        },
+      );
+    }
+
+    try {
+      await AwsService.instance
+          .signInWithGoogle(forceAccountPicker: forceAccountPicker);
+      if (mounted && !cancelled) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Signed in with Google.')),
+        );
+      }
+    } catch (e) {
+      if (mounted && !cancelled) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Google sign-in failed: $e')),
+        );
+      }
+    } finally {
+      if (mounted) {
+        Navigator.of(context, rootNavigator: true).maybePop();
+        setState(() => _isLoading = false);
+      }
+    }
+  }
+
   Future<void> _resetPassword() async {
     if (_emailController.text.trim().isEmpty) {
       ErrorHandler.showErrorSnackBar(context, 'Enter your email first');
@@ -192,7 +266,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
               textAlign: TextAlign.center,
             ),
             const SizedBox(height: 12),
-            TextField(
+            SafeTextField(
               controller: codeController,
               decoration: const InputDecoration(
                 labelText: 'Confirmation code',
@@ -271,7 +345,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('Enter Access Code'),
-        content: TextField(
+        content: SafeTextField(
           controller: controller,
           decoration: const InputDecoration(
             labelText: 'Access code',
@@ -312,6 +386,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final authProvider = AwsService.instance.authProvider;
     return Scaffold(
       backgroundColor: Theme.of(context).colorScheme.background,
       body: SafeArea(
@@ -387,16 +462,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                         ),
                       ),
                       const SizedBox(height: 16),
-                      TextField(
-                        controller: _emailController,
-                        decoration: const InputDecoration(
-                          labelText: 'Email',
-                          prefixIcon: Icon(Icons.email_outlined),
-                          border: OutlineInputBorder(),
-                        ),
-                        keyboardType: TextInputType.emailAddress,
-                        enabled: !_isLoading,
-                      ),
+                      _buildEmailField(),
                       const SizedBox(height: 12),
                       AnimatedSwitcher(
                         duration: const Duration(milliseconds: 200),
@@ -404,16 +470,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                             ? Column(
                                 key: const ValueKey('signup-name'),
                                 children: [
-                                  TextField(
-                                    controller: _displayNameController,
-                                    decoration: const InputDecoration(
-                                      labelText: 'Display Name',
-                                      prefixIcon:
-                                          Icon(Icons.person_outline),
-                                      border: OutlineInputBorder(),
-                                    ),
-                                    enabled: !_isLoading,
-                                  ),
+                                  _buildDisplayNameField(),
                                   const SizedBox(height: 12),
                                 ],
                               )
@@ -421,26 +478,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                                 key: ValueKey('signin-name'),
                               ),
                       ),
-                      TextField(
-                        controller: _passwordController,
-                        decoration: InputDecoration(
-                          labelText: 'Password',
-                          prefixIcon: const Icon(Icons.lock_outline),
-                          border: const OutlineInputBorder(),
-                          suffixIcon: IconButton(
-                            icon: Icon(
-                              _obscurePassword
-                                  ? Icons.visibility
-                                  : Icons.visibility_off,
-                            ),
-                            onPressed: () => setState(
-                              () => _obscurePassword = !_obscurePassword,
-                            ),
-                          ),
-                        ),
-                        obscureText: _obscurePassword,
-                        enabled: !_isLoading,
-                      ),
+                      _buildPasswordField(),
                       const SizedBox(height: 16),
                       if (!_isSignUp)
                         Align(
@@ -464,19 +502,49 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                       ),
                       const SizedBox(height: 8),
                       OutlinedButton.icon(
+                        onPressed: _isLoading ? null : _signInWithGoogle,
+                        icon: const Icon(Icons.g_mobiledata),
+                        label: const Text('Sign in with Google'),
+                      ),
+                      const SizedBox(height: 8),
+                      OutlinedButton.icon(
+                        onPressed: _isLoading
+                            ? null
+                            : () => _signInWithGoogle(
+                                  forceAccountPicker: true,
+                                ),
+                        icon: const Icon(Icons.switch_account),
+                        label: const Text('Switch Google account'),
+                      ),
+                      const SizedBox(height: 8),
+                      OutlinedButton.icon(
                         onPressed:
                             _isLoading ? null : _openAccessCodeDialog,
                         icon: const Icon(Icons.key),
                         label: const Text('View roster with access code'),
                       ),
-                      if (widget.onGuestMode != null) ...[
-                        const SizedBox(height: 8),
-                        TextButton(
-                          onPressed:
-                              _isLoading ? null : widget.onGuestMode,
-                          child: const Text('Continue as guest'),
+                      const SizedBox(height: 12),
+                      if (authProvider != null)
+                        Container(
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color: Theme.of(context)
+                                .colorScheme
+                                .surfaceVariant,
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: Row(
+                            children: [
+                              const Icon(Icons.verified_user, size: 18),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Text(
+                                  'Signed in last time with ${authProvider == 'google' ? 'Google' : 'Email'}',
+                                ),
+                              ),
+                            ],
+                          ),
                         ),
-                      ],
                     ],
                   ),
                 ),
@@ -492,10 +560,105 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                 ),
                 textAlign: TextAlign.center,
               ),
+              const SizedBox(height: 6),
+              Wrap(
+                alignment: WrapAlignment.center,
+                spacing: 8,
+                children: [
+                  TextButton(
+                    onPressed: () => _openExternal(_termsUrl),
+                    child: const Text('Terms'),
+                  ),
+                  TextButton(
+                    onPressed: () => _openExternal(_privacyUrl),
+                    child: const Text('Privacy'),
+                  ),
+                ],
+              ),
             ],
           ),
         ),
       ),
+    );
+  }
+
+  Widget _buildEmailField() {
+    return _buildSafeField(
+      controller: _emailController,
+      focusNode: _emailFocus,
+      label: 'Email',
+      icon: Icons.email_outlined,
+      keyboardType:
+          _safeInputMode ? TextInputType.text : TextInputType.emailAddress,
+      textInputAction: TextInputAction.next,
+      onSubmitted: (_) => _displayFocus.requestFocus(),
+    );
+  }
+
+  Widget _buildDisplayNameField() {
+    return _buildSafeField(
+      controller: _displayNameController,
+      focusNode: _displayFocus,
+      label: 'Display Name',
+      icon: Icons.person_outline,
+      keyboardType: TextInputType.text,
+      textInputAction: TextInputAction.next,
+      onSubmitted: (_) => _passwordFocus.requestFocus(),
+    );
+  }
+
+  Widget _buildPasswordField() {
+    return _buildSafeField(
+      controller: _passwordController,
+      focusNode: _passwordFocus,
+      label: 'Password',
+      icon: Icons.lock_outline,
+      keyboardType:
+          _safeInputMode ? TextInputType.text : TextInputType.visiblePassword,
+      textInputAction: TextInputAction.done,
+      obscureText: _obscurePassword,
+      suffix: IconButton(
+        icon: Icon(
+          _obscurePassword ? Icons.visibility : Icons.visibility_off,
+        ),
+        onPressed: () => setState(() => _obscurePassword = !_obscurePassword),
+      ),
+      onSubmitted: (_) => _authenticate(),
+    );
+  }
+
+  Widget _buildSafeField({
+    required TextEditingController controller,
+    required FocusNode focusNode,
+    required String label,
+    required IconData icon,
+    required TextInputType keyboardType,
+    required TextInputAction textInputAction,
+    bool obscureText = false,
+    Widget? suffix,
+    ValueChanged<String>? onSubmitted,
+  }) {
+    final isAndroid = Platform.isAndroid;
+    return SafeTextField(
+      controller: controller,
+      focusNode: focusNode,
+      decoration: InputDecoration(
+        labelText: label,
+        prefixIcon: Icon(icon),
+        border: const OutlineInputBorder(),
+        suffixIcon: suffix,
+      ),
+      keyboardType: keyboardType,
+      textInputAction: textInputAction,
+      onSubmitted: onSubmitted,
+      obscureText: obscureText,
+      textCapitalization: TextCapitalization.none,
+      inputFormatters: [FilteringTextInputFormatter.singleLineFormatter],
+      autofillHints: null,
+      autocorrect: !isAndroid,
+      enableSuggestions: !isAndroid,
+      enableIMEPersonalizedLearning: false,
+      enabled: !_isLoading,
     );
   }
 }

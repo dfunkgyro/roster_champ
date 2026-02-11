@@ -1,10 +1,14 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
+import 'dart:typed_data';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/legacy.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:encrypt/encrypt.dart' as enc;
+import 'package:crypto/crypto.dart';
 import 'models.dart' as models;
 import 'ai_service.dart';
 import 'aws_service.dart';
@@ -20,11 +24,13 @@ import 'services/analytics_service.dart';
 // Settings Provider
 final settingsProvider =
     StateNotifierProvider<SettingsNotifier, models.AppSettings>((ref) {
-  return SettingsNotifier();
+  return SettingsNotifier(ref);
 });
 
 class SettingsNotifier extends StateNotifier<models.AppSettings> {
-  SettingsNotifier() : super(const models.AppSettings());
+  SettingsNotifier(this._ref) : super(const models.AppSettings());
+
+  final Ref _ref;
 
   Future<void> loadSettings() async {
     try {
@@ -803,6 +809,20 @@ class SyncConflict {
   });
 }
 
+class TemplateParseResult {
+  final bool isValid;
+  final String? error;
+  final Map<String, dynamic>? payload;
+  final String? warning;
+
+  const TemplateParseResult({
+    required this.isValid,
+    this.error,
+    this.payload,
+    this.warning,
+  });
+}
+
 class RosterNotifier extends ChangeNotifier {
   List<models.StaffMember> staffMembers = [];
   List<List<String>> masterPattern = [];
@@ -822,6 +842,7 @@ class RosterNotifier extends ChangeNotifier {
   List<models.TimeClockEntry> timeClockEntries = [];
   List<models.RosterUpdate> recentUpdates = [];
   List<models.GeneratedRosterTemplate> generatedRosters = [];
+  List<models.RosterSnapshot> rosterSnapshots = [];
   models.GeneratedRosterTemplate? quickBaseTemplate;
   List<models.GeneratedRosterTemplate> quickVariationPresets = [];
   models.PatternPropagationSettings? propagationSettings;
@@ -831,10 +852,14 @@ class RosterNotifier extends ChangeNotifier {
   String? sharedAccessCode;
   String? sharedRosterName;
   String? sharedRole;
+  DateTime? focusRequestDate;
+  int focusRequestToken = 0;
   int cycleLength = 16;
   int numPeople = 16;
   int weekStartDay = 0;
   int _nextStaffId = 1;
+  final Map<String, String> _shiftCache = {};
+  final Map<String, bool> _unavailableCache = {};
   late AISuggestionEngine _aiEngine;
   Timer? _autoSaveTimer;
   Timer? _syncTimer;
@@ -855,7 +880,28 @@ class RosterNotifier extends ChangeNotifier {
   RosterNotifier() {
     _aiEngine = AISuggestionEngine(this);
     _startAutoSave();
-    _startSyncTimer();
+  }
+
+  @override
+  void notifyListeners() {
+    _shiftCache.clear();
+    _unavailableCache.clear();
+    super.notifyListeners();
+  }
+
+  String _cacheKey(String personName, DateTime date) {
+    return '${personName.toLowerCase()}|${date.year}-${date.month}-${date.day}';
+  }
+
+  void requestFocusDate(DateTime date) {
+    focusRequestDate = DateTime(date.year, date.month, date.day);
+    focusRequestToken = DateTime.now().millisecondsSinceEpoch;
+    notifyListeners();
+  }
+
+  void clearFocusRequest(int token) {
+    if (focusRequestToken != token) return;
+    focusRequestDate = null;
   }
 
   String _normalizeShiftType(String shift) {
@@ -891,9 +937,6 @@ class RosterNotifier extends ChangeNotifier {
 
   void _startSyncTimer() {
     _syncTimer?.cancel();
-    _syncTimer = Timer.periodic(const Duration(minutes: 5), (_) {
-      _processPendingSync();
-    });
   }
 
   Future<void> _autoSave() async {
@@ -911,7 +954,7 @@ class RosterNotifier extends ChangeNotifier {
     if (AwsService.instance.currentRosterId == null) return;
 
     _cloudSyncTimer?.cancel();
-    _cloudSyncTimer = Timer(const Duration(seconds: 6), () async {
+    _cloudSyncTimer = Timer(const Duration(seconds: 60), () async {
       try {
         await autoSyncToAWS();
       } catch (e) {
@@ -1065,6 +1108,7 @@ class RosterNotifier extends ChangeNotifier {
       changeProposals: List.from(changeProposals),
       auditLogs: List.from(auditLogs),
       generatedRosters: List.from(generatedRosters),
+      rosterSnapshots: List.from(rosterSnapshots),
       quickBaseTemplate: quickBaseTemplate,
       quickVariationPresets: List.from(quickVariationPresets),
       weekStartDay: weekStartDay,
@@ -1089,6 +1133,7 @@ class RosterNotifier extends ChangeNotifier {
     changeProposals = List.from(backup.changeProposals);
     auditLogs = List.from(backup.auditLogs);
     generatedRosters = List.from(backup.generatedRosters);
+    rosterSnapshots = List.from(backup.rosterSnapshots);
     quickBaseTemplate = backup.quickBaseTemplate;
     quickVariationPresets = List.from(backup.quickVariationPresets);
     propagationSettings = backup.propagationSettings;
@@ -1616,8 +1661,7 @@ class RosterNotifier extends ChangeNotifier {
   /// Public entry point called once after roster is loaded or created.
   Future setupRealtimeSync() async {
     try {
-      _setupRealtimeSync();
-      debugPrint('Realtime sync setup complete.');
+      debugPrint('Realtime sync disabled for performance.');
     } catch (e) {
       debugPrint('Realtime sync setup error: $e');
     }
@@ -2062,16 +2106,7 @@ class RosterNotifier extends ChangeNotifier {
         fromJson(jsonDecode(data));
 
         // Regenerate AI suggestions after loading
-        if (staffMembers.isNotEmpty) {
-          final lastHistoryEntry = history.lastOrNull;
-          final hoursSinceLastAction = lastHistoryEntry != null
-              ? DateTime.now().difference(lastHistoryEntry.timestamp).inHours
-              : 24;
-
-          if (hoursSinceLastAction > 6) {
-            await refreshAiSuggestions();
-          }
-        }
+        // AI suggestions refresh is now manual to avoid heavy background work.
 
         notifyListeners();
       }
@@ -2097,6 +2132,7 @@ class RosterNotifier extends ChangeNotifier {
       'changeProposals': changeProposals.map((p) => p.toJson()).toList(),
       'auditLogs': auditLogs.map((l) => l.toJson()).toList(),
       'generatedRosters': generatedRosters.map((t) => t.toJson()).toList(),
+      'rosterSnapshots': rosterSnapshots.map((s) => s.toJson()).toList(),
       'quickVariationPresets':
           quickVariationPresets.map((t) => t.toJson()).toList(),
       'quickBaseTemplate': quickBaseTemplate?.toJson(),
@@ -2179,6 +2215,12 @@ class RosterNotifier extends ChangeNotifier {
     generatedRosters = (json['generatedRosters'] as List?)
             ?.map((t) => models.GeneratedRosterTemplate.fromJson(
                   Map<String, dynamic>.from(t as Map),
+                ))
+            .toList() ??
+        [];
+    rosterSnapshots = (json['rosterSnapshots'] as List?)
+            ?.map((s) => models.RosterSnapshot.fromJson(
+                  Map<String, dynamic>.from(s as Map),
                 ))
             .toList() ??
         [];
@@ -2554,6 +2596,11 @@ class RosterNotifier extends ChangeNotifier {
     if (!isStaffActiveOnDateByName(personName, date)) {
       return '';
     }
+    final key = _cacheKey(personName, date);
+    final cached = _shiftCache[key];
+    if (cached != null) {
+      return cached;
+    }
     // Check for overrides first
     final override = overrides.firstWhere(
       (o) =>
@@ -2571,7 +2618,9 @@ class RosterNotifier extends ChangeNotifier {
     );
 
     if (override.id.isNotEmpty) {
-      return _normalizeOverrideShift(override);
+      final resolved = _normalizeOverrideShift(override);
+      _shiftCache[key] = resolved;
+      return resolved;
     }
 
     // Calculate from master pattern
@@ -2592,6 +2641,380 @@ class RosterNotifier extends ChangeNotifier {
       return masterPattern[week][day];
     }
 
+    return 'OFF';
+  }
+
+  void saveRosterSnapshot({
+    required String name,
+    required bool includeStaffNames,
+    required bool includeOverrides,
+  }) {
+    final now = DateTime.now();
+    final snapshot = models.RosterSnapshot(
+      id: now.millisecondsSinceEpoch.toString(),
+      name: name,
+      weekStartDay: weekStartDay,
+      pattern: masterPattern.map((week) => List<String>.from(week)).toList(),
+      staffNames: includeStaffNames
+          ? staffMembers.map((s) => s.name).toList()
+          : const [],
+      overrides: includeOverrides
+          ? overrides.map((o) => models.Override.fromJson(o.toJson())).toList()
+          : const [],
+      createdAt: now,
+    );
+    rosterSnapshots.add(snapshot);
+    _addHistory('Pattern Duplicate', 'Saved snapshot: $name');
+    _scheduleCloudSync();
+    notifyListeners();
+  }
+
+  String generateTemplateCode({
+    bool includeStaffNames = true,
+    bool includeOverrides = false,
+    bool compress = true,
+    DateTime? expiresAt,
+    String? password,
+  }) {
+    final payload = <String, dynamic>{
+      'v': 2,
+      'weekStartDay': weekStartDay,
+      'cycleLength': cycleLength,
+      'numPeople': numPeople,
+      'pattern': masterPattern,
+      'staffNames': includeStaffNames
+          ? staffMembers.map((s) => s.name).toList()
+          : <String>[],
+      'overrides': includeOverrides
+          ? overrides.map((o) => o.toJson()).toList()
+          : <Map<String, dynamic>>[],
+      'createdAt': DateTime.now().toIso8601String(),
+      if (expiresAt != null) 'expiresAt': expiresAt.toIso8601String(),
+    };
+
+    return _encodeTemplatePayload(
+      payload,
+      compress: compress,
+      password: password,
+    );
+  }
+
+  String generateTemplateCodeFromData(
+    Map<String, dynamic> data, {
+    bool includeStaffNames = true,
+    bool includeOverrides = false,
+    bool compress = true,
+    DateTime? expiresAt,
+    String? password,
+  }) {
+    final pattern = (data['masterPattern'] as List<dynamic>?)
+            ?.map((week) => (week as List<dynamic>).cast<String>().toList())
+            .toList() ??
+        [];
+    final staff = (data['staffMembers'] as List<dynamic>? ?? [])
+        .map((s) => (s as Map)['name']?.toString() ?? '')
+        .where((name) => name.trim().isNotEmpty)
+        .toList();
+    final overridesList = (data['overrides'] as List<dynamic>? ?? [])
+        .map((o) => Map<String, dynamic>.from(o as Map))
+        .toList();
+
+    final payload = <String, dynamic>{
+      'v': 2,
+      'weekStartDay': data['weekStartDay'] as int? ?? weekStartDay,
+      'cycleLength': data['cycleLength'] as int? ?? pattern.length,
+      'numPeople': data['numPeople'] as int? ?? staff.length,
+      'pattern': pattern,
+      'staffNames': includeStaffNames ? staff : <String>[],
+      'overrides': includeOverrides ? overridesList : <Map<String, dynamic>>[],
+      'createdAt': DateTime.now().toIso8601String(),
+      if (expiresAt != null) 'expiresAt': expiresAt.toIso8601String(),
+    };
+
+    return _encodeTemplatePayload(
+      payload,
+      compress: compress,
+      password: password,
+    );
+  }
+
+  String _encodeTemplatePayload(
+    Map<String, dynamic> payload, {
+    required bool compress,
+    String? password,
+  }) {
+    final jsonString = jsonEncode(payload);
+    final checksum = sha256.convert(utf8.encode(jsonString)).toString();
+    final meta = <String, dynamic>{
+      'v': payload['v'],
+      'checksum': checksum,
+      'compressed': compress,
+      'encrypted': password != null && password.trim().isNotEmpty,
+    };
+
+    Uint8List bytes = utf8.encode(jsonString) as Uint8List;
+    if (compress) {
+      bytes = Uint8List.fromList(gzip.encode(bytes));
+    }
+
+    if (meta['encrypted'] == true) {
+      final key = enc.Key.fromUtf8(
+        sha256.convert(utf8.encode(password!.trim())).toString().substring(0, 32),
+      );
+      final iv = enc.IV.fromSecureRandom(16);
+      final encrypter = enc.Encrypter(enc.AES(key));
+      final encrypted = encrypter.encryptBytes(bytes, iv: iv);
+      meta['iv'] = base64Url.encode(iv.bytes);
+      bytes = Uint8List.fromList(encrypted.bytes);
+    }
+
+    final envelope = <String, dynamic>{
+      'meta': meta,
+      'data': base64Url.encode(bytes),
+    };
+    final encoded = base64Url.encode(utf8.encode(jsonEncode(envelope)));
+    return 'RC2-$encoded';
+  }
+
+  TemplateParseResult parseTemplateCode(String code, {String? password}) {
+    try {
+      var trimmed = code.trim();
+      if (trimmed.startsWith('RC1-') || trimmed.startsWith('RC2-')) {
+        trimmed = trimmed.substring(4);
+      }
+      final decoded = utf8.decode(base64Url.decode(trimmed));
+      final envelope = jsonDecode(decoded) as Map<String, dynamic>;
+      if (envelope.containsKey('pattern')) {
+        // Legacy RC1 payload.
+        return TemplateParseResult(isValid: true, payload: envelope);
+      }
+      final meta = Map<String, dynamic>.from(envelope['meta'] as Map? ?? {});
+      final data = envelope['data'] as String? ?? '';
+      if (data.isEmpty) {
+        return const TemplateParseResult(
+          isValid: false,
+          error: 'Template code is missing data.',
+        );
+      }
+
+      Uint8List bytes = Uint8List.fromList(base64Url.decode(data));
+      if (meta['encrypted'] == true) {
+        if (password == null || password.trim().isEmpty) {
+          return const TemplateParseResult(
+            isValid: false,
+            error: 'Template code is password protected.',
+          );
+        }
+        final ivString = meta['iv'] as String?;
+        if (ivString == null) {
+          return const TemplateParseResult(
+            isValid: false,
+            error: 'Template code is missing IV.',
+          );
+        }
+        final key = enc.Key.fromUtf8(
+          sha256.convert(utf8.encode(password.trim())).toString().substring(0, 32),
+        );
+        final iv = enc.IV(base64Url.decode(ivString));
+        final encrypter = enc.Encrypter(enc.AES(key));
+        bytes = Uint8List.fromList(encrypter.decryptBytes(
+          enc.Encrypted(bytes),
+          iv: iv,
+        ));
+      }
+
+      if (meta['compressed'] == true) {
+        bytes = Uint8List.fromList(gzip.decode(bytes));
+      }
+
+      final jsonString = utf8.decode(bytes);
+      final payload = jsonDecode(jsonString) as Map<String, dynamic>;
+      final checksum = meta['checksum'] as String?;
+      if (checksum != null) {
+        final actual = sha256.convert(utf8.encode(jsonString)).toString();
+        if (checksum != actual) {
+          return const TemplateParseResult(
+            isValid: false,
+            error: 'Template code checksum mismatch.',
+          );
+        }
+      }
+      final expiresAt = payload['expiresAt'] as String?;
+      if (expiresAt != null) {
+        final expiry = DateTime.tryParse(expiresAt);
+        if (expiry != null && expiry.isBefore(DateTime.now())) {
+          return const TemplateParseResult(
+            isValid: false,
+            error: 'Template code has expired.',
+          );
+        }
+      }
+
+      return TemplateParseResult(isValid: true, payload: payload);
+    } catch (e) {
+      return TemplateParseResult(
+        isValid: false,
+        error: 'Template code is invalid.',
+      );
+    }
+  }
+
+  bool applyTemplateCode(
+    String code, {
+    bool includeStaffNames = true,
+    bool includeOverrides = true,
+    String? password,
+  }) {
+    final parsed = parseTemplateCode(code, password: password);
+    if (!parsed.isValid || parsed.payload == null) {
+      debugPrint('Template code error: ${parsed.error}');
+      return false;
+    }
+    try {
+      final payload = parsed.payload!;
+      final pattern = (payload['pattern'] as List<dynamic>?)
+              ?.map((week) => (week as List<dynamic>).cast<String>().toList())
+              .toList() ??
+          [];
+      if (pattern.isEmpty) return false;
+
+      staffMembers.clear();
+      overrides.clear();
+      events.clear();
+      aiSuggestions.clear();
+      regularSwaps.clear();
+      history.clear();
+      availabilityRequests.clear();
+      swapRequests.clear();
+      swapDebts.clear();
+      shiftLocks.clear();
+      changeProposals.clear();
+      auditLogs.clear();
+      presenceEntries.clear();
+      timeClockEntries.clear();
+
+      masterPattern = pattern;
+      weekStartDay = payload['weekStartDay'] as int? ?? weekStartDay;
+      cycleLength = payload['cycleLength'] as int? ?? pattern.length;
+      numPeople = payload['numPeople'] as int? ?? numPeople;
+
+      final names = includeStaffNames
+          ? (payload['staffNames'] as List<dynamic>? ?? [])
+              .map((e) => e.toString())
+              .toList()
+          : <String>[];
+      if (names.isNotEmpty) {
+        _nextStaffId = 1;
+        staffMembers = List.generate(
+          names.length,
+          (i) => models.StaffMember(
+            id: (_nextStaffId++).toString(),
+            name: names[i],
+          ),
+        );
+        numPeople = names.length;
+        _rememberStaffNames(names);
+      } else if (staffMembers.isEmpty) {
+        _nextStaffId = 1;
+        staffMembers = List.generate(
+          numPeople,
+          (i) => models.StaffMember(
+            id: (_nextStaffId++).toString(),
+            name: 'Person ${i + 1}',
+          ),
+        );
+      }
+
+      if (includeOverrides) {
+        overrides = (payload['overrides'] as List<dynamic>? ?? [])
+            .map((o) => models.Override.fromJson(o))
+            .toList();
+      }
+
+      _addHistory('Template', 'Applied roster template code');
+      notifyListeners();
+      return true;
+    } catch (e) {
+      debugPrint('Template code error: $e');
+      return false;
+    }
+  }
+
+  bool saveTemplatePresetFromCode(
+    String name,
+    String code, {
+    String? password,
+  }) {
+    final parsed = parseTemplateCode(code, password: password);
+    if (!parsed.isValid || parsed.payload == null) return false;
+    final payload = parsed.payload!;
+    final pattern = (payload['pattern'] as List<dynamic>?)
+            ?.map((week) => (week as List<dynamic>).cast<String>().toList())
+            .toList() ??
+        [];
+    if (pattern.isEmpty) return false;
+    final template = models.GeneratedRosterTemplate(
+      id: DateTime.now().millisecondsSinceEpoch.toString(),
+      name: name,
+      teamCount: pattern.length,
+      weekStartDay: payload['weekStartDay'] as int? ?? weekStartDay,
+      pattern: pattern,
+      createdAt: DateTime.now(),
+    );
+    generatedRosters.add(template);
+    _addHistory('Template', 'Saved template preset "$name"');
+    notifyListeners();
+    return true;
+  }
+
+  void applyRosterSnapshot(
+    models.RosterSnapshot snapshot, {
+    required bool includeStaffNames,
+    required bool includeOverrides,
+  }) {
+    unawaited(_storeBackupNow(reason: 'Apply snapshot'));
+    masterPattern =
+        snapshot.pattern.map((week) => List<String>.from(week)).toList();
+    cycleLength = masterPattern.length;
+    if (includeStaffNames && snapshot.staffNames.isNotEmpty) {
+      applyStaffNameList(snapshot.staffNames);
+    }
+    if (includeOverrides) {
+      overrides = snapshot.overrides
+          .map((o) => models.Override.fromJson(o.toJson()))
+          .toList();
+    }
+    _addHistory('Snapshot Applied', 'Applied snapshot: ${snapshot.name}');
+    _scheduleCloudSync();
+    notifyListeners();
+  }
+
+  String getBaseShiftForDate(String personName, DateTime date) {
+    if (!isStaffActiveOnDateByName(personName, date)) {
+      return '';
+    }
+
+    final referenceDate = DateTime(2024, 1, 1);
+    final key = _cacheKey(personName, date);
+
+    if (propagationSettings?.isActive == true) {
+      final resolved = _getShiftWithPropagation(personName, date);
+      _shiftCache[key] = resolved;
+      return resolved;
+    }
+
+    final daysSinceReference = date.difference(referenceDate).inDays;
+    final cycleDay = daysSinceReference % (cycleLength * 7);
+    final week = cycleDay ~/ 7;
+    final day = cycleDay % 7;
+
+    if (week < masterPattern.length && day < masterPattern[week].length) {
+      final resolved = masterPattern[week][day];
+      _shiftCache[key] = resolved;
+      return resolved;
+    }
+
+    _shiftCache[key] = 'OFF';
     return 'OFF';
   }
 
@@ -2896,12 +3319,259 @@ class RosterNotifier extends ChangeNotifier {
     overrides.addAll(newOverrides);
 
     _addHistory(
-      'Bulk Override',
-      'Added ${newOverrides.length} overrides for ${people.length} staff',
+      'Bulk Change',
+      'Added ${newOverrides.length} changes for ${people.length} staff',
     );
 
     _scheduleCloudSync();
     notifyListeners();
+  }
+
+  int removeOverridesAdvanced({
+    required List<String> people,
+    required DateTime startDate,
+    required DateTime endDate,
+  }) {
+    if (people.isEmpty) return 0;
+    final start = DateTime(startDate.year, startDate.month, startDate.day);
+    final end = DateTime(endDate.year, endDate.month, endDate.day);
+    final before = overrides.length;
+    final alRemoved = <String, int>{};
+    overrides.removeWhere((o) {
+      final date = DateTime(o.date.year, o.date.month, o.date.day);
+      final shouldRemove = people.contains(o.personName) &&
+          !date.isBefore(start) &&
+          !date.isAfter(end);
+      if (shouldRemove && o.shift.toUpperCase() == 'AL') {
+        alRemoved[o.personName] = (alRemoved[o.personName] ?? 0) + 1;
+      }
+      return shouldRemove;
+    });
+    final removed = before - overrides.length;
+    if (removed > 0) {
+      for (final entry in alRemoved.entries) {
+        adjustLeaveBalance(entry.key, entry.value.toDouble());
+      }
+      _addHistory(
+        'Changes Cleared',
+        'Removed $removed change(s) for ${people.join(', ')}',
+      );
+      _scheduleCloudSync();
+      notifyListeners();
+    }
+    return removed;
+  }
+
+  int removeOverridesForDates({
+    required List<String> people,
+    required List<DateTime> dates,
+  }) {
+    if (people.isEmpty || dates.isEmpty) return 0;
+    final dateSet = dates
+        .map((d) => DateTime(d.year, d.month, d.day))
+        .toSet();
+    final before = overrides.length;
+    final alRemoved = <String, int>{};
+    overrides.removeWhere((o) {
+      final date = DateTime(o.date.year, o.date.month, o.date.day);
+      final shouldRemove =
+          people.contains(o.personName) && dateSet.contains(date);
+      if (shouldRemove && o.shift.toUpperCase() == 'AL') {
+        alRemoved[o.personName] = (alRemoved[o.personName] ?? 0) + 1;
+      }
+      return shouldRemove;
+    });
+    final removed = before - overrides.length;
+    if (removed > 0) {
+      for (final entry in alRemoved.entries) {
+        adjustLeaveBalance(entry.key, entry.value.toDouble());
+      }
+      _addHistory(
+        'Changes Cleared',
+        'Removed $removed change(s) for ${people.join(', ')}',
+      );
+      _scheduleCloudSync();
+      notifyListeners();
+    }
+    return removed;
+  }
+
+  int removeLeaveOverridesAdvanced({
+    required List<String> people,
+    required DateTime startDate,
+    required DateTime endDate,
+  }) {
+    if (people.isEmpty) return 0;
+    final start = DateTime(startDate.year, startDate.month, startDate.day);
+    final end = DateTime(endDate.year, endDate.month, endDate.day);
+    final before = overrides.length;
+    final alRemoved = <String, int>{};
+    overrides.removeWhere((o) {
+      final date = DateTime(o.date.year, o.date.month, o.date.day);
+      final shouldRemove = people.contains(o.personName) &&
+          o.shift.toUpperCase() == 'AL' &&
+          !date.isBefore(start) &&
+          !date.isAfter(end);
+      if (shouldRemove) {
+        alRemoved[o.personName] = (alRemoved[o.personName] ?? 0) + 1;
+      }
+      return shouldRemove;
+    });
+    final removed = before - overrides.length;
+    if (removed > 0) {
+      for (final entry in alRemoved.entries) {
+        adjustLeaveBalance(entry.key, entry.value.toDouble());
+      }
+      _addHistory(
+        'Leave Cancelled',
+        'Removed $removed leave changes for ${people.join(', ')}',
+      );
+      _scheduleCloudSync();
+      notifyListeners();
+    }
+    return removed;
+  }
+
+  int removeLeaveOverridesForDates({
+    required List<String> people,
+    required List<DateTime> dates,
+  }) {
+    if (people.isEmpty || dates.isEmpty) return 0;
+    final dateSet = dates
+        .map((d) => DateTime(d.year, d.month, d.day))
+        .toSet();
+    final before = overrides.length;
+    final alRemoved = <String, int>{};
+    overrides.removeWhere((o) {
+      final date = DateTime(o.date.year, o.date.month, o.date.day);
+      final shouldRemove = people.contains(o.personName) &&
+          dateSet.contains(date) &&
+          o.shift.toUpperCase() == 'AL';
+      if (shouldRemove) {
+        alRemoved[o.personName] = (alRemoved[o.personName] ?? 0) + 1;
+      }
+      return shouldRemove;
+    });
+    final removed = before - overrides.length;
+    if (removed > 0) {
+      for (final entry in alRemoved.entries) {
+        adjustLeaveBalance(entry.key, entry.value.toDouble());
+      }
+      _addHistory(
+        'Leave Cancelled',
+        'Removed $removed leave changes for ${people.join(', ')}',
+      );
+      _scheduleCloudSync();
+      notifyListeners();
+    }
+    return removed;
+  }
+
+  int removeOverridesForDatesByShifts({
+    required List<String> people,
+    required List<DateTime> dates,
+    Set<String>? shifts,
+  }) {
+    if (people.isEmpty || dates.isEmpty) return 0;
+    final dateSet = dates
+        .map((d) => DateTime(d.year, d.month, d.day))
+        .toSet();
+    final normalizedShifts =
+        shifts?.map((s) => s.toUpperCase()).toSet();
+    final before = overrides.length;
+    final alRemoved = <String, int>{};
+    overrides.removeWhere((o) {
+      final date = DateTime(o.date.year, o.date.month, o.date.day);
+      final shift = o.shift.toUpperCase();
+      final matchesShift = normalizedShifts == null ||
+          normalizedShifts.isEmpty ||
+          normalizedShifts.contains('ANY') ||
+          normalizedShifts.contains(shift);
+      final shouldRemove = people.contains(o.personName) &&
+          dateSet.contains(date) &&
+          matchesShift;
+      if (shouldRemove && shift == 'AL') {
+        alRemoved[o.personName] = (alRemoved[o.personName] ?? 0) + 1;
+      }
+      return shouldRemove;
+    });
+    final removed = before - overrides.length;
+    if (removed > 0) {
+      for (final entry in alRemoved.entries) {
+        adjustLeaveBalance(entry.key, entry.value.toDouble());
+      }
+      _addHistory(
+        'Changes Cleared',
+        'Removed $removed change(s) for ${people.join(', ')}',
+      );
+      _scheduleCloudSync();
+      notifyListeners();
+    }
+    return removed;
+  }
+
+  int cancelAnnualLeaveForDates({
+    required List<String> people,
+    required List<DateTime> dates,
+  }) {
+    if (people.isEmpty || dates.isEmpty) return 0;
+    final normalizedDates = dates
+        .map((d) => DateTime(d.year, d.month, d.day))
+        .toSet()
+        .toList();
+    int removedTotal = 0;
+
+    // Remove AL overrides for selected dates.
+    removedTotal += removeLeaveOverridesForDates(
+      people: people,
+      dates: normalizedDates,
+    );
+
+    // Handle staff leave status ranges (annual leave status).
+    for (final name in people) {
+      final staff = staffMembers.where((s) => s.name == name).firstOrNull;
+      if (staff == null) continue;
+      if (staff.leaveType == null) continue;
+      final leaveType = staff.leaveType!.toLowerCase();
+      if (leaveType != 'annual' && leaveType != 'al') continue;
+      if (staff.leaveStart == null || staff.leaveEnd == null) continue;
+
+      final start = DateTime(
+        staff.leaveStart!.year,
+        staff.leaveStart!.month,
+        staff.leaveStart!.day,
+      );
+      final end = DateTime(
+        staff.leaveEnd!.year,
+        staff.leaveEnd!.month,
+        staff.leaveEnd!.day,
+      );
+      final cancelledInRange = normalizedDates.where((d) {
+        return !d.isBefore(start) && !d.isAfter(end);
+      }).toList();
+      if (cancelledInRange.isEmpty) continue;
+
+      removedTotal += cancelledInRange.length;
+
+      // Clear staff leave status and re-apply remaining dates as overrides.
+      clearStaffLeaveStatus(staff.id);
+      var cursor = start;
+      while (!cursor.isAfter(end)) {
+        final day = DateTime(cursor.year, cursor.month, cursor.day);
+        if (!normalizedDates.any((d) =>
+            d.year == day.year && d.month == day.month && d.day == day.day)) {
+          setOverride(
+            staff.name,
+            day,
+            'AL',
+            staff.leaveType ?? 'Annual leave',
+          );
+        }
+        cursor = cursor.add(const Duration(days: 1));
+      }
+    }
+
+    return removedTotal;
   }
 
   void removeBulkOverrides(String bulkId) {
@@ -2923,9 +3593,9 @@ class RosterNotifier extends ChangeNotifier {
 
       final suggestion = models.AiSuggestion(
         id: DateTime.now().millisecondsSinceEpoch.toString(),
-        title: 'Bulk Override Removed',
+        title: 'Bulk Change Removed',
         description:
-            'Removed ${affectedOverrides.length} overrides for $person',
+            'Removed ${affectedOverrides.length} changes for $person',
         priority: models.SuggestionPriority.low,
         type: models.SuggestionType.other,
         createdDate: DateTime.now(),
@@ -2937,7 +3607,7 @@ class RosterNotifier extends ChangeNotifier {
         overrides.where((o) => o.reason?.contains(bulkId) == true).length;
     overrides.removeWhere((o) => o.reason?.contains(bulkId) == true);
 
-    _addHistory('Bulk Override Removed', 'Removed $removedCount overrides');
+    _addHistory('Bulk Change Removed', 'Removed $removedCount changes');
 
     notifyListeners();
   }
@@ -2967,6 +3637,18 @@ class RosterNotifier extends ChangeNotifier {
     return false;
   }
 
+  void _adjustLeaveBalanceForOverrideChange(
+    String person,
+    String? oldShift,
+    String? newShift,
+  ) {
+    final oldIsLeave = (oldShift ?? '').toUpperCase() == 'AL';
+    final newIsLeave = (newShift ?? '').toUpperCase() == 'AL';
+    if (oldIsLeave == newIsLeave) return;
+    final delta = oldIsLeave && !newIsLeave ? 1.0 : -1.0;
+    adjustLeaveBalance(person, delta);
+  }
+
   void setOverride(
     String person,
     DateTime date,
@@ -2977,11 +3659,12 @@ class RosterNotifier extends ChangeNotifier {
     if (_isShiftLocked(date, currentShift, person) ||
         _isShiftLocked(date, newShift, person)) {
       _addHistory(
-        'Override Blocked',
+        'Change Blocked',
         'Shift locked on ${_formatDate(date)} for $newShift',
       );
       return;
     }
+    final baseShift = getBaseShiftForDate(person, date);
     overrides.removeWhere(
       (o) =>
           o.personName == person &&
@@ -3002,8 +3685,14 @@ class RosterNotifier extends ChangeNotifier {
         ),
       );
     }
+    final newEffectiveShift = newShift.isNotEmpty ? newShift : baseShift;
+    _adjustLeaveBalanceForOverrideChange(
+      person,
+      currentShift,
+      newEffectiveShift,
+    );
     _addHistory(
-      'Override Set',
+      'Change Applied',
       'Set $person on ${_formatDate(date)} to $newShift',
     );
     _scheduleCloudSync();
@@ -3519,9 +4208,9 @@ class RosterNotifier extends ChangeNotifier {
       suggestions.add(
         models.AiSuggestion(
           id: '${now.millisecondsSinceEpoch}_baseline_overrides',
-          title: 'Try a quick override',
-          description: 'Use RC to set a shift override or leave request.',
-          reason: 'Overrides help track real-world changes.',
+          title: 'Try a quick change',
+          description: 'Use RC to apply a shift change or leave request.',
+          reason: 'Changes help track real-world updates.',
           priority: models.SuggestionPriority.low,
           type: models.SuggestionType.other,
           createdDate: now,
@@ -3837,12 +4526,23 @@ class RosterNotifier extends ChangeNotifier {
   }
 
   bool isStaffUnavailableOnDate(models.StaffMember staff, DateTime date) {
+    final key = _cacheKey(staff.name, date);
+    final cached = _unavailableCache[key];
+    if (cached != null) return cached;
     final leaveStart = staff.leaveStart;
     final leaveEnd = staff.leaveEnd;
-    if (leaveStart == null || leaveEnd == null) return false;
-    final start = DateTime(leaveStart.year, leaveStart.month, leaveStart.day);
-    final end = DateTime(leaveEnd.year, leaveEnd.month, leaveEnd.day);
-    return !date.isBefore(start) && !date.isAfter(end);
+    bool unavailable = false;
+    if (leaveStart != null && leaveEnd != null) {
+      final start = DateTime(leaveStart.year, leaveStart.month, leaveStart.day);
+      final end = DateTime(leaveEnd.year, leaveEnd.month, leaveEnd.day);
+      unavailable = !date.isBefore(start) && !date.isAfter(end);
+    }
+    if (!unavailable) {
+      final shift = getShiftForDate(staff.name, date);
+      unavailable = shift.toUpperCase() == 'AL';
+    }
+    _unavailableCache[key] = unavailable;
+    return unavailable;
   }
 
   bool isStaffVacantOnDate(models.StaffMember staff, DateTime date) {
@@ -4228,6 +4928,7 @@ class RosterNotifier extends ChangeNotifier {
     changeProposals.clear();
     auditLogs.clear();
     generatedRosters.clear();
+    rosterSnapshots.clear();
     quickBaseTemplate = null;
     quickVariationPresets.clear();
     propagationSettings = null;
@@ -4291,7 +4992,7 @@ class RosterNotifier extends ChangeNotifier {
 
     _addHistory(
       'Holiday Import',
-      'Added $eventsAdded events and $overridesAdded leave overrides',
+      'Added $eventsAdded events and $overridesAdded leave changes',
     );
     notifyListeners();
 
@@ -4394,6 +5095,7 @@ class RosterBackup {
   final List<models.ChangeProposal> changeProposals;
   final List<models.AuditLogEntry> auditLogs;
   final List<models.GeneratedRosterTemplate> generatedRosters;
+  final List<models.RosterSnapshot> rosterSnapshots;
   final models.GeneratedRosterTemplate? quickBaseTemplate;
   final List<models.GeneratedRosterTemplate> quickVariationPresets;
   final models.PatternPropagationSettings? propagationSettings;
@@ -4417,6 +5119,7 @@ class RosterBackup {
     required this.changeProposals,
     required this.auditLogs,
     required this.generatedRosters,
+    required this.rosterSnapshots,
     required this.quickBaseTemplate,
     required this.quickVariationPresets,
     this.propagationSettings,

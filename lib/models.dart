@@ -246,6 +246,14 @@ enum ColorSchemeType {
   amber,
 }
 
+enum AppLayoutStyle {
+  standard,
+  professional,
+  sophisticated,
+  intuitive,
+  ambience,
+}
+
 // Service Status
 class ServiceStatus {
   final ConnectionStatus status;
@@ -718,6 +726,53 @@ class GeneratedRosterTemplate {
         'pattern': pattern,
         'createdAt': createdAt.toIso8601String(),
       };
+}
+
+class RosterSnapshot {
+  final String id;
+  final String name;
+  final int weekStartDay;
+  final List<List<String>> pattern;
+  final List<String> staffNames;
+  final List<Override> overrides;
+  final DateTime createdAt;
+
+  RosterSnapshot({
+    required this.id,
+    required this.name,
+    required this.weekStartDay,
+    required this.pattern,
+    required this.staffNames,
+    required this.overrides,
+    required this.createdAt,
+  });
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'name': name,
+        'weekStartDay': weekStartDay,
+        'pattern': pattern,
+        'staffNames': staffNames,
+        'overrides': overrides.map((o) => o.toJson()).toList(),
+        'createdAt': createdAt.toIso8601String(),
+      };
+
+  factory RosterSnapshot.fromJson(Map<String, dynamic> json) => RosterSnapshot(
+        id: json['id'] as String,
+        name: json['name'] as String,
+        weekStartDay: json['weekStartDay'] as int? ?? 0,
+        pattern: (json['pattern'] as List<dynamic>? ?? [])
+            .map((week) => (week as List<dynamic>).cast<String>().toList())
+            .toList(),
+        staffNames: (json['staffNames'] as List<dynamic>? ?? [])
+            .map((e) => e.toString())
+            .toList(),
+        overrides: (json['overrides'] as List<dynamic>? ?? [])
+            .map((e) => Override.fromJson(Map<String, dynamic>.from(e as Map)))
+            .toList(),
+        createdAt: DateTime.tryParse(json['createdAt'] as String? ?? '') ??
+            DateTime.now(),
+      );
 }
 
 // Staff Member
@@ -1411,6 +1466,7 @@ class AppSettings {
   final bool compactView;
   final AppThemeMode themeMode;
   final ColorSchemeType colorScheme;
+  final AppLayoutStyle layoutStyle;
   final String holidayCountryCode;
   final List<String> holidayTypes;
   final List<String> additionalHolidayCountries;
@@ -1429,14 +1485,21 @@ class AppSettings {
   final bool showWeatherOverlay;
   final bool showMapPreview;
   final double monthSnapOffsetPx;
+  final int monthsBackLimit;
+  final int monthsForwardLimit;
   final String languageCode;
   final bool voiceEnabled;
   final bool voiceAlwaysListening;
   final String voiceInputEngine;
   final String voiceOutputEngine;
   final List<String> voiceWakeWords;
+  final String voiceOutputVoice;
+  final Map<String, double> shiftHourMap;
   final bool analyticsEnabled;
   final bool analyticsCloudEnabled;
+  final bool adaptiveLearningEnabled;
+  final bool adaptiveLearningGlobalOptIn;
+  final bool performanceMode;
 
   const AppSettings({
     this.darkMode = false,
@@ -1448,6 +1511,7 @@ class AppSettings {
     this.compactView = false,
     this.themeMode = AppThemeMode.system,
     this.colorScheme = ColorSchemeType.blue,
+    this.layoutStyle = AppLayoutStyle.standard,
     this.holidayCountryCode = 'US',
     this.holidayTypes = const ['Public', 'Bank'],
     this.additionalHolidayCountries = const [],
@@ -1466,6 +1530,8 @@ class AppSettings {
     this.showWeatherOverlay = true,
     this.showMapPreview = true,
     this.monthSnapOffsetPx = 1200.0,
+    this.monthsBackLimit = 96,
+    this.monthsForwardLimit = 96,
     this.languageCode = 'en',
     this.voiceEnabled = true,
     this.voiceAlwaysListening = false,
@@ -1476,8 +1542,28 @@ class AppSettings {
       'roster champ',
       'roster champion',
     ],
+    this.voiceOutputVoice = 'aws:Joanna',
+    this.shiftHourMap = const {
+      'D': 8,
+      'E': 8,
+      'L': 8,
+      'N': 8,
+      'D12': 12,
+      'N12': 12,
+      'C': 8,
+      'C1': 8,
+      'C2': 8,
+      'C3': 8,
+      'C4': 8,
+      'R': 0,
+      'OFF': 0,
+      'AL': 0,
+    },
     this.analyticsEnabled = true,
     this.analyticsCloudEnabled = true,
+    this.adaptiveLearningEnabled = true,
+    this.adaptiveLearningGlobalOptIn = false,
+    this.performanceMode = true,
   });
 
   AppSettings copyWith({
@@ -1490,6 +1576,7 @@ class AppSettings {
     bool? compactView,
     AppThemeMode? themeMode,
     ColorSchemeType? colorScheme,
+    AppLayoutStyle? layoutStyle,
     String? holidayCountryCode,
     List<String>? holidayTypes,
     List<String>? additionalHolidayCountries,
@@ -1508,14 +1595,21 @@ class AppSettings {
     bool? showWeatherOverlay,
     bool? showMapPreview,
     double? monthSnapOffsetPx,
+    int? monthsBackLimit,
+    int? monthsForwardLimit,
     String? languageCode,
     bool? voiceEnabled,
     bool? voiceAlwaysListening,
     String? voiceInputEngine,
     String? voiceOutputEngine,
     List<String>? voiceWakeWords,
+    String? voiceOutputVoice,
+    Map<String, double>? shiftHourMap,
     bool? analyticsEnabled,
     bool? analyticsCloudEnabled,
+    bool? adaptiveLearningEnabled,
+    bool? adaptiveLearningGlobalOptIn,
+    bool? performanceMode,
   }) {
     return AppSettings(
       darkMode: darkMode ?? this.darkMode,
@@ -1527,6 +1621,7 @@ class AppSettings {
       compactView: compactView ?? this.compactView,
       themeMode: themeMode ?? this.themeMode,
       colorScheme: colorScheme ?? this.colorScheme,
+      layoutStyle: layoutStyle ?? this.layoutStyle,
       holidayCountryCode: holidayCountryCode ?? this.holidayCountryCode,
       holidayTypes: holidayTypes ?? this.holidayTypes,
       additionalHolidayCountries:
@@ -1547,15 +1642,24 @@ class AppSettings {
       showWeatherOverlay: showWeatherOverlay ?? this.showWeatherOverlay,
       showMapPreview: showMapPreview ?? this.showMapPreview,
       monthSnapOffsetPx: monthSnapOffsetPx ?? this.monthSnapOffsetPx,
+      monthsBackLimit: monthsBackLimit ?? this.monthsBackLimit,
+      monthsForwardLimit: monthsForwardLimit ?? this.monthsForwardLimit,
       languageCode: languageCode ?? this.languageCode,
       voiceEnabled: voiceEnabled ?? this.voiceEnabled,
       voiceAlwaysListening: voiceAlwaysListening ?? this.voiceAlwaysListening,
       voiceInputEngine: voiceInputEngine ?? this.voiceInputEngine,
       voiceOutputEngine: voiceOutputEngine ?? this.voiceOutputEngine,
       voiceWakeWords: voiceWakeWords ?? this.voiceWakeWords,
+      voiceOutputVoice: voiceOutputVoice ?? this.voiceOutputVoice,
+      shiftHourMap: shiftHourMap ?? this.shiftHourMap,
       analyticsEnabled: analyticsEnabled ?? this.analyticsEnabled,
       analyticsCloudEnabled:
           analyticsCloudEnabled ?? this.analyticsCloudEnabled,
+      adaptiveLearningEnabled:
+          adaptiveLearningEnabled ?? this.adaptiveLearningEnabled,
+      adaptiveLearningGlobalOptIn:
+          adaptiveLearningGlobalOptIn ?? this.adaptiveLearningGlobalOptIn,
+      performanceMode: performanceMode ?? this.performanceMode,
     );
   }
 
@@ -1567,8 +1671,9 @@ class AppSettings {
         'showWeekNumbers': showWeekNumbers,
         'dateFormat': dateFormat,
         'compactView': compactView,
-        'themeMode': themeMode.index,
-        'colorScheme': colorScheme.index,
+      'themeMode': themeMode.index,
+      'colorScheme': colorScheme.index,
+      'layoutStyle': layoutStyle.index,
       'holidayCountryCode': holidayCountryCode,
       'holidayTypes': holidayTypes,
       'additionalHolidayCountries': additionalHolidayCountries,
@@ -1587,14 +1692,21 @@ class AppSettings {
         'showWeatherOverlay': showWeatherOverlay,
         'showMapPreview': showMapPreview,
         'monthSnapOffsetPx': monthSnapOffsetPx,
+        'monthsBackLimit': monthsBackLimit,
+        'monthsForwardLimit': monthsForwardLimit,
         'languageCode': languageCode,
         'voiceEnabled': voiceEnabled,
         'voiceAlwaysListening': voiceAlwaysListening,
       'voiceInputEngine': voiceInputEngine,
       'voiceOutputEngine': voiceOutputEngine,
       'voiceWakeWords': voiceWakeWords,
+      'voiceOutputVoice': voiceOutputVoice,
+      'shiftHourMap': shiftHourMap,
       'analyticsEnabled': analyticsEnabled,
       'analyticsCloudEnabled': analyticsCloudEnabled,
+      'adaptiveLearningEnabled': adaptiveLearningEnabled,
+      'adaptiveLearningGlobalOptIn': adaptiveLearningGlobalOptIn,
+      'performanceMode': performanceMode,
       };
 
   factory AppSettings.fromJson(Map<String, dynamic> json) => AppSettings(
@@ -1607,6 +1719,8 @@ class AppSettings {
         compactView: json['compactView'] as bool? ?? false,
         themeMode: AppThemeMode.values[json['themeMode'] as int? ?? 0],
         colorScheme: ColorSchemeType.values[json['colorScheme'] as int? ?? 0],
+        layoutStyle:
+            AppLayoutStyle.values[json['layoutStyle'] as int? ?? 0],
       holidayCountryCode:
           json['holidayCountryCode'] as String? ?? 'US',
       holidayTypes: (json['holidayTypes'] as List<dynamic>?)
@@ -1646,6 +1760,8 @@ class AppSettings {
         showMapPreview: json['showMapPreview'] as bool? ?? true,
         monthSnapOffsetPx:
             (json['monthSnapOffsetPx'] as num?)?.toDouble() ?? 1200.0,
+        monthsBackLimit: json['monthsBackLimit'] as int? ?? 96,
+        monthsForwardLimit: json['monthsForwardLimit'] as int? ?? 96,
         languageCode: json['languageCode'] as String? ?? 'en',
         voiceEnabled: json['voiceEnabled'] as bool? ?? true,
         voiceAlwaysListening:
@@ -1658,8 +1774,36 @@ class AppSettings {
                 ?.map((e) => e.toString())
                 .toList() ??
             const ['rc', 'roster champ', 'roster champion'],
+        voiceOutputVoice:
+            json['voiceOutputVoice'] as String? ?? 'aws:Joanna',
+        shiftHourMap: (json['shiftHourMap'] as Map?)
+                ?.map((key, value) => MapEntry(
+                      key.toString(),
+                      (value is num) ? value.toDouble() : 0.0,
+                    )) ??
+            const {
+              'D': 8,
+              'E': 8,
+              'L': 8,
+              'N': 8,
+              'D12': 12,
+              'N12': 12,
+              'C': 8,
+              'C1': 8,
+              'C2': 8,
+              'C3': 8,
+              'C4': 8,
+              'R': 0,
+              'OFF': 0,
+              'AL': 0,
+            },
         analyticsEnabled: json['analyticsEnabled'] as bool? ?? true,
         analyticsCloudEnabled: json['analyticsCloudEnabled'] as bool? ?? true,
+        adaptiveLearningEnabled:
+            json['adaptiveLearningEnabled'] as bool? ?? true,
+        adaptiveLearningGlobalOptIn:
+            json['adaptiveLearningGlobalOptIn'] as bool? ?? false,
+        performanceMode: json['performanceMode'] as bool? ?? true,
       );
 }
 

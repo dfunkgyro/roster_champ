@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'models.dart' as models;
+import 'package:roster_champ/safe_text_field.dart';
 
 class InitializeRosterDialog extends StatefulWidget {
   final Function(int cycleLength, int numPeople) onInitialize;
@@ -32,7 +33,7 @@ class _InitializeRosterDialogState extends State<InitializeRosterDialog> {
       content: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          TextField(
+          SafeTextField(
             controller: _cycleLengthController,
             decoration: const InputDecoration(
               labelText: 'Cycle Length (weeks)',
@@ -43,7 +44,7 @@ class _InitializeRosterDialogState extends State<InitializeRosterDialog> {
             inputFormatters: [FilteringTextInputFormatter.digitsOnly],
           ),
           const SizedBox(height: 16),
-          TextField(
+          SafeTextField(
             controller: _numPeopleController,
             decoration: const InputDecoration(
               labelText: 'Number of Staff',
@@ -137,7 +138,7 @@ class _AddEventDialogState extends State<AddEventDialog> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            TextField(
+            SafeTextField(
               controller: _titleController,
               decoration: const InputDecoration(
                 labelText: 'Event Title',
@@ -146,7 +147,7 @@ class _AddEventDialogState extends State<AddEventDialog> {
               autofocus: true,
             ),
             const SizedBox(height: 16),
-            TextField(
+            SafeTextField(
               controller: _descriptionController,
               decoration: const InputDecoration(
                 labelText: 'Description (Optional)',
@@ -204,7 +205,7 @@ class _AddEventDialogState extends State<AddEventDialog> {
               Row(
                 children: [
                   Expanded(
-                    child: TextField(
+                    child: SafeTextField(
                       keyboardType: TextInputType.number,
                       decoration: const InputDecoration(
                         labelText: 'Repeat every',
@@ -242,7 +243,7 @@ class _AddEventDialogState extends State<AddEventDialog> {
               Row(
                 children: [
                   Expanded(
-                    child: TextField(
+                    child: SafeTextField(
                       keyboardType: TextInputType.number,
                       decoration: const InputDecoration(
                         labelText: 'Past occurrences',
@@ -258,7 +259,7 @@ class _AddEventDialogState extends State<AddEventDialog> {
                   ),
                   const SizedBox(width: 12),
                   Expanded(
-                    child: TextField(
+                    child: SafeTextField(
                       keyboardType: TextInputType.number,
                       decoration: const InputDecoration(
                         labelText: 'Future occurrences',
@@ -389,7 +390,7 @@ class _AddOverrideDialogState extends State<AddOverrideDialog> {
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
-      title: Text('Add Override for ${widget.person}'),
+      title: Text('Add Change for ${widget.person}'),
       content: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -398,7 +399,7 @@ class _AddOverrideDialogState extends State<AddOverrideDialog> {
             style: Theme.of(context).textTheme.titleMedium,
           ),
           const SizedBox(height: 16),
-          TextField(
+          SafeTextField(
             controller: _shiftController,
             decoration: const InputDecoration(
               labelText: 'New Shift',
@@ -408,7 +409,7 @@ class _AddOverrideDialogState extends State<AddOverrideDialog> {
             textCapitalization: TextCapitalization.characters,
           ),
           const SizedBox(height: 16),
-          TextField(
+          SafeTextField(
             controller: _reasonController,
             decoration: const InputDecoration(
               labelText: 'Reason (Optional)',
@@ -471,7 +472,7 @@ class _BulkOverrideDialogState extends State<BulkOverrideDialog> {
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
-      title: Text('Bulk Override for ${widget.person}'),
+      title: Text('Bulk Change for ${widget.person}'),
       content: SingleChildScrollView(
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -512,7 +513,7 @@ class _BulkOverrideDialogState extends State<BulkOverrideDialog> {
               },
             ),
             const SizedBox(height: 8),
-            TextField(
+            SafeTextField(
               controller: _shiftController,
               decoration: const InputDecoration(
                 labelText: 'Shift',
@@ -521,7 +522,7 @@ class _BulkOverrideDialogState extends State<BulkOverrideDialog> {
               textCapitalization: TextCapitalization.characters,
             ),
             const SizedBox(height: 16),
-            TextField(
+            SafeTextField(
               controller: _reasonController,
               decoration: const InputDecoration(
                 labelText: 'Reason',

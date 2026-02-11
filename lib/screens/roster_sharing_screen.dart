@@ -1,11 +1,16 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../providers.dart';
 import '../aws_service.dart';
 import 'login_screen.dart';
 import '../home_screen.dart';
+import '../ai_suggestions_view.dart';
+import 'package:roster_champ/safe_text_field.dart';
+import 'package:qr_flutter/qr_flutter.dart';
+import 'package:mobile_scanner/mobile_scanner.dart';
 
 class RosterSharingScreen extends ConsumerStatefulWidget {
   final int initialTabIndex;
@@ -28,6 +33,10 @@ class _RosterSharingScreenState extends ConsumerState<RosterSharingScreen> {
   final TextEditingController _accessCodeController = TextEditingController();
   final TextEditingController _maxUsesController = TextEditingController();
   final TextEditingController _customCodeController = TextEditingController();
+  final TextEditingController _templateCodeController =
+      TextEditingController();
+  final TextEditingController _templatePasswordController =
+      TextEditingController();
 
   bool _isLoading = false;
   List<Map<String, dynamic>> _userRosters = [];
@@ -37,6 +46,12 @@ class _RosterSharingScreenState extends ConsumerState<RosterSharingScreen> {
   int? _shareExpiresInHours;
   String? _generatedCode;
   List<String> _codeSuggestions = [];
+  String? _pendingTemplateCode;
+  String? _pendingTemplatePassword;
+  bool _templateIncludeStaff = true;
+  bool _templateIncludeOverrides = false;
+  bool _templateCompressed = true;
+  DateTime? _templateExpiresAt;
 
   @override
   void initState() {
@@ -53,6 +68,8 @@ class _RosterSharingScreenState extends ConsumerState<RosterSharingScreen> {
     _accessCodeController.dispose();
     _maxUsesController.dispose();
     _customCodeController.dispose();
+    _templateCodeController.dispose();
+    _templatePasswordController.dispose();
     super.dispose();
   }
 
@@ -74,7 +91,15 @@ class _RosterSharingScreenState extends ConsumerState<RosterSharingScreen> {
   }
 
   Future<void> _createRoster() async {
-    if (_rosterNameController.text.isEmpty) return;
+    if (_rosterNameController.text.isEmpty) {
+      if (_pendingTemplateCode != null &&
+          _pendingTemplateCode!.trim().isNotEmpty) {
+        _rosterNameController.text =
+            'Template Roster ${DateTime.now().toString().split(' ').first}';
+      } else {
+        return;
+      }
+    }
 
     setState(() => _isLoading = true);
     try {
@@ -86,6 +111,20 @@ class _RosterSharingScreenState extends ConsumerState<RosterSharingScreen> {
       );
       await AwsService.instance.setLastRosterId(rosterId);
       await ref.read(rosterProvider).loadFromAWS();
+      if (_pendingTemplateCode != null &&
+          _pendingTemplateCode!.trim().isNotEmpty) {
+        final applied = ref.read(rosterProvider).applyTemplateCode(
+              _pendingTemplateCode!,
+              includeStaffNames: _templateIncludeStaff,
+              includeOverrides: _templateIncludeOverrides,
+              password: _pendingTemplatePassword,
+            );
+        if (applied) {
+          await ref.read(rosterProvider).saveToAWS();
+        }
+        _pendingTemplateCode = null;
+        _pendingTemplatePassword = null;
+      }
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -104,6 +143,417 @@ class _RosterSharingScreenState extends ConsumerState<RosterSharingScreen> {
       }
     }
     setState(() => _isLoading = false);
+  }
+
+  Future<void> _showTemplateExportDialog() async {
+    final roster = ref.read(rosterProvider);
+    bool includeStaff = _templateIncludeStaff;
+    bool includeOverrides = _templateIncludeOverrides;
+    bool compress = _templateCompressed;
+    DateTime? expiresAt = _templateExpiresAt;
+    String password = _templatePasswordController.text.trim();
+    String code = roster.generateTemplateCode(
+      includeStaffNames: includeStaff,
+      includeOverrides: includeOverrides,
+      compress: compress,
+      expiresAt: expiresAt,
+      password: password.isEmpty ? null : password,
+    );
+    await showDialog<void>(
+      context: context,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setStateDialog) {
+            return AlertDialog(
+              title: const Text('Template Code'),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Text('Share this code to clone the roster pattern.'),
+                  const SizedBox(height: 12),
+                  CheckboxListTile(
+                    value: includeStaff,
+                    onChanged: (value) {
+                      includeStaff = value ?? true;
+                      code = roster.generateTemplateCode(
+                        includeStaffNames: includeStaff,
+                        includeOverrides: includeOverrides,
+                        compress: compress,
+                        expiresAt: expiresAt,
+                        password: password.isEmpty ? null : password,
+                      );
+                      setStateDialog(() {});
+                    },
+                    title: const Text('Include staff names'),
+                    dense: true,
+                    controlAffinity: ListTileControlAffinity.leading,
+                  ),
+                  CheckboxListTile(
+                    value: includeOverrides,
+                    onChanged: (value) {
+                      includeOverrides = value ?? false;
+                      code = roster.generateTemplateCode(
+                        includeStaffNames: includeStaff,
+                        includeOverrides: includeOverrides,
+                        compress: compress,
+                        expiresAt: expiresAt,
+                        password: password.isEmpty ? null : password,
+                      );
+                      setStateDialog(() {});
+                    },
+                    title: const Text('Include overrides'),
+                    dense: true,
+                    controlAffinity: ListTileControlAffinity.leading,
+                  ),
+                  CheckboxListTile(
+                    value: compress,
+                    onChanged: (value) {
+                      compress = value ?? true;
+                      code = roster.generateTemplateCode(
+                        includeStaffNames: includeStaff,
+                        includeOverrides: includeOverrides,
+                        compress: compress,
+                        expiresAt: expiresAt,
+                        password: password.isEmpty ? null : password,
+                      );
+                      setStateDialog(() {});
+                    },
+                    title: const Text('Compress code'),
+                    dense: true,
+                    controlAffinity: ListTileControlAffinity.leading,
+                  ),
+                  const SizedBox(height: 8),
+                  SafeTextField(
+                    controller: _templatePasswordController,
+                    decoration: const InputDecoration(
+                      labelText: 'Password (optional)',
+                      border: OutlineInputBorder(),
+                    ),
+                    obscureText: true,
+                    onChanged: (value) {
+                      password = value.trim();
+                      code = roster.generateTemplateCode(
+                        includeStaffNames: includeStaff,
+                        includeOverrides: includeOverrides,
+                        compress: compress,
+                        expiresAt: expiresAt,
+                        password: password.isEmpty ? null : password,
+                      );
+                      setStateDialog(() {});
+                    },
+                  ),
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          onPressed: () async {
+                            final picked = await showDatePicker(
+                              context: context,
+                              firstDate: DateTime.now(),
+                              lastDate: DateTime.now().add(
+                                const Duration(days: 3650),
+                              ),
+                              initialDate: DateTime.now()
+                                  .add(const Duration(days: 30)),
+                            );
+                            expiresAt = picked;
+                            code = roster.generateTemplateCode(
+                              includeStaffNames: includeStaff,
+                              includeOverrides: includeOverrides,
+                              compress: compress,
+                              expiresAt: expiresAt,
+                              password: password.isEmpty ? null : password,
+                            );
+                            setStateDialog(() {});
+                          },
+                          icon: const Icon(Icons.event),
+                          label: Text(
+                            expiresAt == null
+                                ? 'Set expiry'
+                                : 'Expires ${expiresAt!.toLocal().toString().split(' ')[0]}',
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      if (expiresAt != null)
+                        IconButton(
+                          tooltip: 'Clear expiry',
+                          onPressed: () {
+                            expiresAt = null;
+                            code = roster.generateTemplateCode(
+                              includeStaffNames: includeStaff,
+                              includeOverrides: includeOverrides,
+                              compress: compress,
+                              expiresAt: expiresAt,
+                              password: password.isEmpty ? null : password,
+                            );
+                            setStateDialog(() {});
+                          },
+                          icon: const Icon(Icons.clear),
+                        ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  QrImageView(
+                    data: code,
+                    size: 160,
+                  ),
+                  const SizedBox(height: 8),
+                  SelectableText(code),
+                ],
+              ),
+              actions: [
+                TextButton.icon(
+                  onPressed: () async {
+                    await Clipboard.setData(ClipboardData(text: code));
+                    if (context.mounted) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(content: Text('Template code copied')),
+                      );
+                    }
+                  },
+                  icon: const Icon(Icons.copy),
+                  label: const Text('Copy'),
+                ),
+                TextButton.icon(
+                  onPressed: () async {
+                    final controller = TextEditingController();
+                    final saved = await showDialog<bool>(
+                      context: context,
+                      builder: (context) {
+                        return AlertDialog(
+                          title: const Text('Save as preset'),
+                          content: SafeTextField(
+                            controller: controller,
+                            decoration: const InputDecoration(
+                              labelText: 'Preset name',
+                              border: OutlineInputBorder(),
+                            ),
+                          ),
+                          actions: [
+                            TextButton(
+                              onPressed: () => Navigator.pop(context, false),
+                              child: const Text('Cancel'),
+                            ),
+                            FilledButton(
+                              onPressed: () =>
+                                  Navigator.pop(context, true),
+                              child: const Text('Save'),
+                            ),
+                          ],
+                        );
+                      },
+                    );
+                    if (saved == true) {
+                      final ok = ref.read(rosterProvider).saveTemplatePresetFromCode(
+                            controller.text.trim().isEmpty
+                                ? 'Template'
+                                : controller.text.trim(),
+                            code,
+                            password: password.isEmpty ? null : password,
+                          );
+                      if (context.mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(
+                            content: Text(
+                              ok ? 'Preset saved' : 'Preset save failed',
+                            ),
+                          ),
+                        );
+                      }
+                    }
+                  },
+                  icon: const Icon(Icons.bookmark_add),
+                  label: const Text('Save preset'),
+                ),
+                TextButton(
+                  onPressed: () {
+                    setState(() {
+                      _templateIncludeStaff = includeStaff;
+                      _templateIncludeOverrides = includeOverrides;
+                      _templateCompressed = compress;
+                      _templateExpiresAt = expiresAt;
+                    });
+                    Navigator.of(context).pop();
+                  },
+                  child: const Text('Close'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Future<void> _showTemplateImportDialog() async {
+    _templateCodeController.text = _pendingTemplateCode ?? '';
+    bool includeStaff = _templateIncludeStaff;
+    bool includeOverrides = _templateIncludeOverrides;
+    String password = _templatePasswordController.text.trim();
+    await showDialog<void>(
+      context: context,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setStateDialog) {
+            final parse = ref
+                .read(rosterProvider)
+                .parseTemplateCode(
+                  _templateCodeController.text.trim(),
+                  password: password.isEmpty ? null : password,
+                );
+            final payload = parse.payload;
+            final summary = payload == null
+                ? null
+                : 'Cycle ${payload['cycleLength'] ?? 'N/A'} | '
+                    'Week start ${payload['weekStartDay'] ?? 'N/A'} | '
+                    'Staff ${(payload['staffNames'] as List?)?.length ?? 0}';
+            return AlertDialog(
+              title: const Text('Use Template Code'),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  SafeTextField(
+                    controller: _templateCodeController,
+                    decoration: const InputDecoration(
+                      labelText: 'Template Code',
+                      border: OutlineInputBorder(),
+                    ),
+                    maxLines: 3,
+                    onChanged: (_) => setStateDialog(() {}),
+                  ),
+                  const SizedBox(height: 12),
+                  OutlinedButton.icon(
+                    onPressed: () async {
+                      final scanned = await _scanTemplateQr();
+                      if (scanned != null && scanned.isNotEmpty) {
+                        _templateCodeController.text = scanned;
+                        setStateDialog(() {});
+                      }
+                    },
+                    icon: const Icon(Icons.qr_code_scanner),
+                    label: const Text('Scan QR'),
+                  ),
+                  const SizedBox(height: 8),
+                  SafeTextField(
+                    controller: _templatePasswordController,
+                    decoration: const InputDecoration(
+                      labelText: 'Password (if required)',
+                      border: OutlineInputBorder(),
+                    ),
+                    obscureText: true,
+                    onChanged: (value) {
+                      password = value.trim();
+                      setStateDialog(() {});
+                    },
+                  ),
+                  CheckboxListTile(
+                    value: includeStaff,
+                    onChanged: (value) {
+                      setStateDialog(() => includeStaff = value ?? true);
+                    },
+                    title: const Text('Include staff names'),
+                    dense: true,
+                    controlAffinity: ListTileControlAffinity.leading,
+                  ),
+                  CheckboxListTile(
+                    value: includeOverrides,
+                    onChanged: (value) {
+                      setStateDialog(() => includeOverrides = value ?? false);
+                    },
+                    title: const Text('Include overrides'),
+                    dense: true,
+                    controlAffinity: ListTileControlAffinity.leading,
+                  ),
+                  const SizedBox(height: 8),
+                  if (parse.isValid)
+                    Row(
+                      children: [
+                        const Icon(Icons.check_circle, color: Colors.green),
+                        const SizedBox(width: 8),
+                        Expanded(child: Text(summary ?? 'Template ready')),
+                      ],
+                    )
+                  else if (parse.error != null)
+                    Row(
+                      children: [
+                        const Icon(Icons.error_outline, color: Colors.red),
+                        const SizedBox(width: 8),
+                        Expanded(child: Text(parse.error!)),
+                      ],
+                    ),
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(),
+                  child: const Text('Cancel'),
+                ),
+                FilledButton(
+                  onPressed: () {
+                    setState(() {
+                      _pendingTemplateCode =
+                          _templateCodeController.text.trim();
+                      _templateIncludeStaff = includeStaff;
+                      _templateIncludeOverrides = includeOverrides;
+                      _pendingTemplatePassword =
+                          _templatePasswordController.text.trim().isEmpty
+                              ? null
+                              : _templatePasswordController.text.trim();
+                    });
+                    Navigator.of(context).pop();
+                  },
+                  child: const Text('Apply'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Future<String?> _scanTemplateQr() async {
+    String? result;
+    await showDialog<void>(
+      context: context,
+      builder: (context) {
+        return Dialog(
+          child: SizedBox(
+            width: 320,
+            height: 420,
+            child: Column(
+              children: [
+                const Padding(
+                  padding: EdgeInsets.all(12),
+                  child: Text('Scan Template QR'),
+                ),
+                Expanded(
+                  child: MobileScanner(
+                    onDetect: (capture) {
+                      final barcode = capture.barcodes.isNotEmpty
+                          ? capture.barcodes.first
+                          : null;
+                      final value = barcode?.rawValue;
+                      if (value != null && value.startsWith('RC')) {
+                        result = value;
+                        Navigator.of(context).pop();
+                      }
+                    },
+                  ),
+                ),
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(),
+                  child: const Text('Close'),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+    return result;
   }
 
   Future<void> _joinRoster() async {
@@ -139,17 +589,30 @@ class _RosterSharingScreenState extends ConsumerState<RosterSharingScreen> {
     final maxUsesRaw = _maxUsesController.text.trim();
     final maxUses =
         maxUsesRaw.isEmpty ? null : int.tryParse(maxUsesRaw);
+    final customCode = _customCodeController.text.trim();
 
     setState(() => _isLoading = true);
     try {
+      if (customCode.isNotEmpty) {
+        try {
+          final validation =
+              await AwsService.instance.validateShareCode(customCode);
+          if (validation['ok'] == true) {
+            throw Exception('Share code already in use.');
+          }
+        } catch (e) {
+          final msg = e.toString().toLowerCase();
+          if (!msg.contains('not found') && !msg.contains('404')) {
+            rethrow;
+          }
+        }
+      }
       final response = await AwsService.instance.createShareCode(
         rosterId: rosterId,
         role: _shareRole,
         expiresInHours: _shareExpiresInHours,
         maxUses: maxUses,
-        customCode: _customCodeController.text.trim().isEmpty
-            ? null
-            : _customCodeController.text.trim(),
+        customCode: customCode.isEmpty ? null : customCode,
       );
       setState(() {
         _generatedCode = response['code'] as String?;
@@ -187,6 +650,7 @@ class _RosterSharingScreenState extends ConsumerState<RosterSharingScreen> {
     if (code.isEmpty) return;
     setState(() => _isLoading = true);
     try {
+      await AwsService.instance.validateShareCode(code);
       await ref.read(rosterProvider).loadSharedRosterByCode(code);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -460,6 +924,17 @@ class _RosterSharingScreenState extends ConsumerState<RosterSharingScreen> {
           children: [
             if (isOwner)
               IconButton(
+                icon: const Icon(Icons.edit_outlined),
+                tooltip: 'Rename roster',
+                onPressed: _isLoading
+                    ? null
+                    : () => _renameRoster(
+                          roster['id'] as String,
+                          roster['name'] as String,
+                        ),
+              ),
+            if (isOwner)
+              IconButton(
                 icon: const Icon(Icons.delete_outline, color: Colors.red),
                 tooltip: 'Delete roster',
                 onPressed: _isLoading
@@ -521,7 +996,7 @@ class _RosterSharingScreenState extends ConsumerState<RosterSharingScreen> {
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('Roster password required'),
-        content: TextField(
+        content: SafeTextField(
           controller: controller,
           decoration: const InputDecoration(
             labelText: 'Password',
@@ -616,7 +1091,7 @@ class _RosterSharingScreenState extends ConsumerState<RosterSharingScreen> {
                     ),
                   ),
                 ),
-              TextField(
+              SafeTextField(
                 controller: _rosterNameController,
                 decoration: const InputDecoration(
                   labelText: 'Roster Name',
@@ -624,8 +1099,16 @@ class _RosterSharingScreenState extends ConsumerState<RosterSharingScreen> {
                   border: OutlineInputBorder(),
                 ),
               ),
+              const SizedBox(height: 6),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  'Tip: If you are using a template code, we can auto-fill a name.',
+                  style: TextStyle(color: Colors.grey, fontSize: 12),
+                ),
+              ),
               const SizedBox(height: 16),
-              TextField(
+              SafeTextField(
                 controller: _passwordController,
                 decoration: const InputDecoration(
                   labelText: 'Password (Optional)',
@@ -634,6 +1117,42 @@ class _RosterSharingScreenState extends ConsumerState<RosterSharingScreen> {
                 ),
                 obscureText: true,
               ),
+              const SizedBox(height: 24),
+              Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: _isLoading ? null : _showTemplateImportDialog,
+                      icon: const Icon(Icons.qr_code_2),
+                      label: const Text('Use template code'),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: _isLoading ? null : _showTemplateExportDialog,
+                      icon: const Icon(Icons.file_download),
+                      label: const Text('Generate code'),
+                    ),
+                  ),
+                ],
+              ),
+              if (_pendingTemplateCode != null &&
+                  _pendingTemplateCode!.trim().isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(top: 12),
+                  child: Row(
+                    children: const [
+                      Icon(Icons.check_circle, color: Colors.green, size: 18),
+                      SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          'Template code will be applied after roster creation.',
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
               const SizedBox(height: 24),
               FilledButton(
                 onPressed: _isLoading ? null : _createRoster,
@@ -647,11 +1166,82 @@ class _RosterSharingScreenState extends ConsumerState<RosterSharingScreen> {
                 style: TextStyle(color: Colors.grey, fontSize: 12),
                 textAlign: TextAlign.center,
               ),
+              const SizedBox(height: 16),
+              Card(
+                elevation: 0,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(16),
+                  side: BorderSide(
+                    color: Theme.of(context).dividerColor,
+                  ),
+                ),
+                child: SizedBox(
+                  height: 300,
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(16),
+                    child: AiSuggestionsView(
+                      initialCommand:
+                          'Create roster 16 staff 8 weeks start monday',
+                    ),
+                  ),
+                ),
+              ),
             ],
           ),
         );
       },
     );
+  }
+
+  Future<void> _renameRoster(String rosterId, String currentName) async {
+    final controller = TextEditingController(text: currentName);
+    final confirmed = await showDialog<bool>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('Rename roster'),
+            content: SafeTextField(
+              controller: controller,
+              decoration: const InputDecoration(
+                labelText: 'Roster name',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: const Text('Save'),
+              ),
+            ],
+          ),
+        ) ??
+        false;
+    if (!confirmed) return;
+    final nextName = controller.text.trim();
+    if (nextName.isEmpty || nextName == currentName) return;
+    setState(() => _isLoading = true);
+    try {
+      await AwsService.instance.renameRoster(rosterId, nextName);
+      await _loadUserRosters();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Roster renamed')),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error renaming roster: $e')),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isLoading = false);
+      }
+    }
   }
 
   Widget _buildJoinRosterTab() {
@@ -676,7 +1266,7 @@ class _RosterSharingScreenState extends ConsumerState<RosterSharingScreen> {
                     ),
                   ),
                 ),
-              TextField(
+              SafeTextField(
                 controller: _rosterIdController,
                 decoration: const InputDecoration(
                   labelText: 'Roster ID',
@@ -685,7 +1275,7 @@ class _RosterSharingScreenState extends ConsumerState<RosterSharingScreen> {
                 ),
               ),
               const SizedBox(height: 16),
-              TextField(
+              SafeTextField(
                 controller: _joinPasswordController,
                 decoration: const InputDecoration(
                   labelText: 'Password (if required)',
@@ -794,7 +1384,7 @@ class _RosterSharingScreenState extends ConsumerState<RosterSharingScreen> {
           ),
         ),
         const SizedBox(height: 12),
-        TextField(
+        SafeTextField(
           controller: _maxUsesController,
           keyboardType: TextInputType.number,
           decoration: const InputDecoration(
@@ -803,7 +1393,7 @@ class _RosterSharingScreenState extends ConsumerState<RosterSharingScreen> {
           ),
         ),
         const SizedBox(height: 12),
-        TextField(
+        SafeTextField(
           controller: _customCodeController,
           textCapitalization: TextCapitalization.characters,
           decoration: const InputDecoration(
@@ -862,7 +1452,7 @@ class _RosterSharingScreenState extends ConsumerState<RosterSharingScreen> {
           ),
         ),
         const SizedBox(height: 12),
-        TextField(
+        SafeTextField(
           controller: _accessCodeController,
           decoration: const InputDecoration(
             labelText: 'Access code',

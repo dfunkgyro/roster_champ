@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
 import 'providers.dart';
@@ -9,11 +10,15 @@ import 'services/weather_service.dart';
 import 'services/holiday_service.dart';
 import 'services/observance_service.dart';
 import 'services/voice_service.dart';
+import 'services/activity_log_service.dart';
 import 'aws_service.dart';
 import 'dialogs.dart';
+import 'package:roster_champ/safe_text_field.dart';
 
 class AiSuggestionsView extends ConsumerStatefulWidget {
-  const AiSuggestionsView({super.key});
+  final String? initialCommand;
+
+  const AiSuggestionsView({super.key, this.initialCommand});
 
   @override
   ConsumerState<AiSuggestionsView> createState() => _AiSuggestionsViewState();
@@ -42,13 +47,127 @@ class _LeaveAssignment {
   const _LeaveAssignment({required this.staff, required this.range});
 }
 
+class _ResolvedDates {
+  final List<DateTime> dates;
+  final double confidence;
+
+  const _ResolvedDates(this.dates, this.confidence);
+}
+
+class _ParsedDate {
+  final DateTime date;
+  final double confidence;
+
+  const _ParsedDate(this.date, this.confidence);
+}
+
+_ParsedDate? _parseDateLoose(
+  String raw, {
+  bool monthFirst = false,
+}) {
+  final cleaned = raw
+      .toLowerCase()
+      .replaceAll(RegExp(r'[^a-z0-9\\s]'), ' ')
+      .replaceAll(RegExp(r'\\s+'), ' ')
+      .trim();
+  final patterns = <String>[
+    'd MMMM yyyy',
+    'd MMM yyyy',
+    'd MMMM',
+    'd MMM',
+    'MMMM d yyyy',
+    'MMM d yyyy',
+    'MMMM d',
+    'MMM d',
+  ];
+  for (final pattern in patterns) {
+    try {
+      final fmt = DateFormat(pattern);
+      final parsed = fmt.parseStrict(cleaned);
+      var date = DateTime(parsed.year, parsed.month, parsed.day);
+      if (!pattern.contains('yyyy')) {
+        final now = DateTime.now();
+        date = DateTime(now.year, parsed.month, parsed.day);
+      }
+      return _ParsedDate(date, 0.8);
+    } catch (_) {}
+  }
+  final numeric = RegExp(r'(\\d{1,2})\\s+(\\d{1,2})\\s+(\\d{2,4})')
+      .firstMatch(cleaned);
+  if (numeric != null) {
+    final a = int.parse(numeric.group(1)!);
+    final b = int.parse(numeric.group(2)!);
+    final rawYear = int.parse(numeric.group(3)!);
+    final year = rawYear < 100 ? 2000 + rawYear : rawYear;
+    final month = monthFirst ? a : b;
+    final day = monthFirst ? b : a;
+    return _ParsedDate(DateTime(year, month, day), 0.7);
+  }
+  return null;
+}
+
+
+class _AiContextState {
+  String? lastStaff;
+  DateTime? lastDate;
+  String? lastShift;
+  String? lastAction;
+  String? lastPendingRaw;
+  List<String>? lastStaffList;
+  String? pendingStaff;
+  String? pendingShift;
+  List<DateTime>? pendingDates;
+  DateTime? pendingCreatedAt;
+
+  void remember({
+    String? staff,
+    DateTime? date,
+    String? shift,
+    String? action,
+    String? pendingRaw,
+    List<String>? staffList,
+    String? pendingStaff,
+    String? pendingShift,
+    List<DateTime>? pendingDates,
+    DateTime? pendingCreatedAt,
+  }) {
+    if (staff != null && staff.isNotEmpty) lastStaff = staff;
+    if (date != null) lastDate = date;
+    if (shift != null && shift.isNotEmpty) lastShift = shift;
+    if (action != null && action.isNotEmpty) lastAction = action;
+    if (pendingRaw != null && pendingRaw.isNotEmpty) {
+      lastPendingRaw = pendingRaw;
+    }
+    if (staffList != null && staffList.isNotEmpty) {
+      lastStaffList = staffList;
+    }
+    if (pendingStaff != null && pendingStaff.isNotEmpty) {
+      this.pendingStaff = pendingStaff;
+    }
+    if (pendingShift != null && pendingShift.isNotEmpty) {
+      this.pendingShift = pendingShift;
+    }
+    if (pendingDates != null && pendingDates.isNotEmpty) {
+      this.pendingDates = pendingDates;
+    }
+    if (pendingCreatedAt != null) {
+      this.pendingCreatedAt = pendingCreatedAt;
+    }
+  }
+}
+
 class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
   final TextEditingController _commandController = TextEditingController();
   final VoiceService _voiceService = VoiceService.instance;
   bool _didAutoRefresh = false;
+  final _AiContextState _contextState = _AiContextState();
+  bool _canSend = false;
+  bool _lastCommandFromVoice = false;
+  String? _lastVoiceTranscript;
 
   @override
   void dispose() {
+    _commandController.removeListener(_updateSendState);
     _commandController.dispose();
     super.dispose();
   }
@@ -56,6 +175,7 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
   @override
   void initState() {
     super.initState();
+    _commandController.addListener(_updateSendState);
     _voiceService.onCommand = (text) {
       if (!mounted) return;
       final command = text.trim();
@@ -63,9 +183,19 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
         _respondWithRC(context, 'I am listening. What should I do?');
         return;
       }
+      _lastCommandFromVoice = true;
+      _lastVoiceTranscript = command;
       _commandController.text = command;
       _handleAiCommand(context);
     };
+    if (widget.initialCommand != null &&
+        widget.initialCommand!.trim().isNotEmpty) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        _commandController.text = widget.initialCommand!.trim();
+        _handleAiCommand(context);
+      });
+    }
   }
 
   @override
@@ -123,8 +253,25 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
     final settings = ref.watch(settingsProvider);
     final rosterLabel =
         roster.sharedRosterName ?? AwsService.instance.currentRosterId ?? 'Current';
-    return Card(
+    final style = settings.layoutStyle;
+    final panelColor = _aiPanelColor(context, style);
+    final panelBorder = _aiPanelBorder(context, style);
+    return Container(
       margin: const EdgeInsets.only(bottom: 12),
+      decoration: BoxDecoration(
+        color: panelColor ?? Theme.of(context).cardColor,
+        borderRadius: BorderRadius.circular(16),
+        border: panelBorder,
+        boxShadow: panelColor == null
+            ? null
+            : [
+                BoxShadow(
+                  color: Colors.black.withOpacity(0.08),
+                  blurRadius: 12,
+                  offset: const Offset(0, 6),
+                ),
+              ],
+      ),
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
@@ -139,12 +286,52 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
               'Roster: $rosterLabel | Staff: ${roster.staffMembers.length} | Week start: ${roster.weekStartDay}',
               style: Theme.of(context).textTheme.bodySmall,
             ),
+            if (_contextState.lastAction != null &&
+                _contextState.lastAction!.isNotEmpty &&
+                _contextState.lastAction!.startsWith('await_')) ...[
+              const SizedBox(height: 8),
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                decoration: BoxDecoration(
+                  color: Theme.of(context)
+                      .colorScheme
+                      .primaryContainer
+                      .withOpacity(0.2),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(
+                    color: Theme.of(context).colorScheme.primary.withOpacity(0.4),
+                  ),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.pending_actions, size: 18),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        _pendingSummary(),
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    ),
+                    IconButton(
+                      tooltip: 'Clear pending',
+                      icon: const Icon(Icons.close, size: 18),
+                      onPressed: () {
+                        setState(() {
+                          _contextState.remember(action: '');
+                        });
+                      },
+                    ),
+                  ],
+                ),
+              ),
+            ],
             const SizedBox(height: 8),
-            TextField(
+            SafeTextField(
               controller: _commandController,
               decoration: InputDecoration(
                 hintText: 'e.g. Add payday every 2 weeks for 8 future + 4 past',
-                border: OutlineInputBorder(),
+                border: const OutlineInputBorder(),
                 suffixIcon: ValueListenableBuilder<bool>(
                   valueListenable: _voiceService.isListening,
                   builder: (context, listening, _) {
@@ -202,7 +389,7 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
             Align(
               alignment: Alignment.centerRight,
               child: FilledButton(
-                onPressed: () => _handleAiCommand(context),
+                onPressed: _canSend ? () => _handleAiCommand(context) : null,
                 child: const Icon(Icons.arrow_upward_rounded),
               ),
             ),
@@ -210,6 +397,36 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
         ),
       ),
     );
+  }
+
+  Color? _aiPanelColor(BuildContext context, models.AppLayoutStyle style) {
+    switch (style) {
+      case models.AppLayoutStyle.sophisticated:
+        return const Color(0xFF0D1A22);
+      case models.AppLayoutStyle.ambience:
+        return const Color(0xFF0E1F27);
+      case models.AppLayoutStyle.professional:
+        return Theme.of(context).colorScheme.surface;
+      case models.AppLayoutStyle.intuitive:
+        return Theme.of(context).colorScheme.surface;
+      case models.AppLayoutStyle.standard:
+      default:
+        return null;
+    }
+  }
+
+  Border? _aiPanelBorder(BuildContext context, models.AppLayoutStyle style) {
+    switch (style) {
+      case models.AppLayoutStyle.sophisticated:
+        return Border.all(color: const Color(0xFF1EC7D6), width: 1);
+      case models.AppLayoutStyle.ambience:
+        return Border.all(color: const Color(0xFF2EA6B6), width: 1);
+      default:
+        return Border.all(
+          color: Theme.of(context).dividerColor,
+          width: 1,
+        );
+    }
   }
 
   Widget _buildEmptyState(BuildContext context) {
@@ -246,13 +463,347 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
 
   void _handleAiCommand(BuildContext context) {
     final raw = _commandController.text.trim();
-    if (raw.isEmpty) return;
+    if (raw.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Type a command to send.')),
+      );
+      return;
+    }
+    ActivityLogService.instance.addInfo(
+      'RC command received',
+      details: raw,
+    );
+    final fromVoice = _lastCommandFromVoice;
+    final voiceTranscript = _lastVoiceTranscript;
+    _lastCommandFromVoice = false;
+    _lastVoiceTranscript = null;
+    try {
+      _clearExpiredPendingContext();
+      final clauses = _splitIntoClauses(raw);
+      int answerIndex = 0;
+      for (final clause in clauses) {
+        if (clause.trim().isEmpty) continue;
+        answerIndex++;
+        bool handled = false;
+        try {
+          handled = _handleAiCommandClause(
+            context,
+            clause,
+            isBatch: clauses.length > 1,
+          );
+        } catch (e) {
+          ActivityLogService.instance.addError(
+            'RC command failed',
+            const ['Try rephrasing the request', 'Check roster data'],
+            details: e.toString(),
+          );
+          _respondWithRC(
+            context,
+            'I had trouble processing that. Please try again or rephrase.',
+          );
+          handled = true;
+        }
+        if (!handled) {
+          if (fromVoice && (voiceTranscript?.isNotEmpty ?? false)) {
+            _respondWithRC(
+              context,
+              'I heard: "$voiceTranscript". Tell me the staff, date, and action (set shift, swap, leave, or event).',
+            );
+          } else {
+            _respondWithRC(
+              context,
+              "I did not catch that. Tell me the staff, date, and action (set shift, swap, leave, or event).",
+            );
+          }
+        }
+      }
+    } catch (e) {
+      ActivityLogService.instance.addError(
+        'RC command failed',
+        const ['Try rephrasing the request', 'Check roster data'],
+        details: e.toString(),
+      );
+      _respondWithRC(
+        context,
+        'I had trouble processing that. Please try again.',
+      );
+    }
+  }
+
+  void _updateSendState() {
+    final hasText = _commandController.text.trim().isNotEmpty;
+    if (hasText != _canSend) {
+      setState(() => _canSend = hasText);
+    }
+  }
+
+  bool _handleAiCommandClause(
+    BuildContext context,
+    String raw, {
+    required bool isBatch,
+  }) {
+    _clearExpiredPendingContext();
     final text = _normalizeCommand(raw);
     final tokens = text.split(' ');
     final roster = ref.read(rosterProvider);
+
+    if (_isTemplateGenerateIntent(text)) {
+      _handleTemplateGenerateCommand(context, raw);
+      return true;
+    }
+
+    if (_isTemplateApplyIntent(text)) {
+      final codeMatch = RegExp(r'(RC[12]-[A-Za-z0-9_-]+)')
+          .firstMatch(raw);
+      if (codeMatch == null) {
+        _respondWithRC(
+          context,
+          'Paste the template code (starts with RC2-).',
+        );
+        return true;
+      }
+      final applied = roster.applyTemplateCode(codeMatch.group(1)!);
+      if (applied) {
+        _respondWithRC(
+          context,
+          'Template code applied. The roster is now updated.',
+        );
+      } else {
+        _respondWithRC(
+          context,
+          'I could not apply that template code. Check the code and try again.',
+        );
+      }
+      return true;
+    }
     final staffMatch = _matchStaffName(text, roster);
+    final staffMatches = _matchAllStaffNames(text, roster);
     final shiftMatch = _extractShiftCode(text);
+    final dateRange = _extractDateRangeFromText(text, roster.weekStartDay);
+    final resolvedStaff = staffMatch ??
+        (_contextState.lastStaff != null &&
+                _shouldUseContextStaff(text, tokens)
+            ? _contextState.lastStaff
+            : null);
+    final resolvedShift = shiftMatch ??
+        (_contextState.lastShift != null &&
+                _shouldUseContextShift(text, tokens)
+            ? _contextState.lastShift
+            : null);
+    final resolvedDate = dateRange?.start ??
+        (_contextState.lastDate != null && _shouldUseContextDate(text, tokens)
+            ? _contextState.lastDate
+            : null);
+
+    if (staffMatch != null || shiftMatch != null || dateRange != null) {
+      _contextState.remember(
+        staff: staffMatch,
+        shift: shiftMatch,
+        date: dateRange?.start,
+      );
+    }
     final shiftQueryIntent = _isShiftQueryIntent(text, tokens);
+    final isQuestion = _isQuestionLike(text, tokens);
+    final actionVerbPresent = _containsAnyFuzzy(tokens, [
+      'set',
+      'assign',
+      'change',
+      'override',
+      'swap',
+      'add',
+      'remove',
+      'delete',
+      'cancel',
+      'create',
+      'generate',
+      'build',
+      'make',
+    ]);
+    final implicitAction =
+        staffMatch != null && shiftMatch != null && dateRange != null;
+    final actionIntent = actionVerbPresent || implicitAction;
+    final cancelLeaveIntent = _isCancelLeaveIntent(text, tokens);
+    final setLeaveIntent = _isSetLeaveIntent(text, tokens);
+    if (_handleRosterMathQuery(context, raw, text, roster)) {
+      return true;
+    }
+    if (_handleMathQuery(context, raw)) {
+      return true;
+    }
+    if (_handleNameQuery(context, text)) {
+      return true;
+    }
+    if (_handleNextRestDayQuery(context, text, roster)) {
+      return true;
+    }
+    if (_contextState.lastAction == 'await_date_for_query') {
+      final monthFirst = _isMonthFirst(ref.read(settingsProvider));
+      final dates = _collectDates(
+        text: text,
+        raw: raw,
+        weekStartDay: roster.weekStartDay,
+        monthFirst: monthFirst,
+      );
+      final pendingStaff = _contextState.pendingStaff;
+      if (dates.isNotEmpty && pendingStaff != null) {
+        _handleShiftQuery(
+          context,
+          raw,
+          fallbackStaff: pendingStaff,
+          fallbackDate: dates.first,
+        );
+        _contextState.remember(action: '');
+        return true;
+      }
+      _respondWithRC(context, 'Which date should I check?');
+      return true;
+    }
+    if (_contextState.lastAction == 'await_date_for_swap') {
+      final monthFirst = _isMonthFirst(ref.read(settingsProvider));
+      final dates = _collectDates(
+        text: text,
+        raw: raw,
+        weekStartDay: roster.weekStartDay,
+        monthFirst: monthFirst,
+      );
+      if (dates.isNotEmpty) {
+        final base = _contextState.lastPendingRaw ?? '';
+        final merged = base.isEmpty ? raw : '$base $raw';
+        _handleSwapCommand(context, merged);
+        _contextState.remember(action: '');
+        return true;
+      }
+      _respondWithRC(context, 'Which date should the swap happen?');
+      return true;
+    }
+    if (_contextState.lastAction == 'await_staff_for_query') {
+      final staff = _matchStaffName(text, roster);
+      final pendingDates = _contextState.pendingDates;
+      if (staff != null && pendingDates != null && pendingDates.isNotEmpty) {
+        _handleShiftQuery(
+          context,
+          raw,
+          fallbackStaff: staff,
+          fallbackDate: pendingDates.first,
+        );
+        _contextState.remember(action: '');
+        return true;
+      }
+      _respondWithRC(context, 'Which staff member should I check?');
+      return true;
+    }
+    if (_contextState.lastAction == 'await_staff_for_change') {
+      final staff = _matchStaffName(text, roster);
+      final staffList = _matchAllStaffNames(text, roster);
+      final pendingShift = _contextState.pendingShift;
+      final pendingDates = _contextState.pendingDates;
+      if (pendingShift != null && pendingDates != null) {
+        if (staffList.isNotEmpty) {
+          _confirmAndApplyBulkChange(
+            context,
+            staffList,
+            pendingShift,
+            pendingDates,
+          );
+          _contextState.remember(action: '');
+          return true;
+        }
+        if (staff != null) {
+          _confirmAndApplyChange(context, staff, pendingShift, pendingDates);
+          _contextState.remember(action: '');
+          return true;
+        }
+      }
+    }
+    if (_contextState.lastAction == 'await_shift_for_change') {
+      final shift = _extractShiftCode(text);
+      final staff = _contextState.pendingStaff ?? resolvedStaff;
+      final staffList = _contextState.lastStaffList;
+      final pendingDates = _contextState.pendingDates;
+      if (shift != null && pendingDates != null) {
+        if (staffList != null && staffList.isNotEmpty) {
+          _confirmAndApplyBulkChange(
+            context,
+            staffList,
+            shift,
+            pendingDates,
+          );
+          _contextState.remember(action: '');
+          return true;
+        }
+        if (staff != null) {
+          _confirmAndApplyChange(context, staff, shift, pendingDates);
+          _contextState.remember(action: '');
+          return true;
+        }
+      }
+    }
+    if (_contextState.lastAction == 'clarify_leave_action') {
+      if (_isCancelLeaveIntent(text, tokens)) {
+        _contextState.remember(action: 'cancel_leave');
+        _handleRemoveLeaveCommand(
+          context,
+          '${_contextState.lastPendingRaw ?? ''} $raw'.trim(),
+          fallbackStaff: resolvedStaff ?? _contextState.lastStaff,
+        );
+        return true;
+      }
+      if (_isSetLeaveIntent(text, tokens)) {
+        _contextState.remember(action: 'set_leave');
+        _handleStaffLeaveCommand(
+          context,
+          '${_contextState.lastPendingRaw ?? ''} $raw'.trim(),
+          _inferLeaveTypeForSet(
+            '${_contextState.lastPendingRaw ?? ''} $raw'.trim(),
+          ),
+        );
+        return true;
+      }
+    }
+    if (_contextState.lastAction == 'clarify_change_remove') {
+      if (_isCancelLeaveIntent(text, tokens)) {
+        _handleRemoveLeaveCommand(
+          context,
+          raw,
+          fallbackStaff: resolvedStaff ?? _contextState.lastStaff,
+        );
+        _contextState.remember(action: '');
+        return true;
+      }
+      if (text.contains('change') ||
+          text.contains('amend') ||
+          text.contains('update') ||
+          text.contains('remove')) {
+        _handleRemoveOverrideCommand(
+          context,
+          raw,
+          fallbackStaff: resolvedStaff ?? _contextState.lastStaff,
+        );
+        _contextState.remember(action: '');
+        return true;
+      }
+    }
+    if (_contextState.lastAction == 'cancel_leave') {
+      final followupDates = _extractDatesForOverride(raw, roster.weekStartDay);
+      final followupRange =
+          _extractDateRangeFromText(text, roster.weekStartDay);
+      if (followupDates.isNotEmpty || followupRange != null) {
+        _handleRemoveLeaveCommand(
+          context,
+          raw,
+          fallbackStaff: resolvedStaff ?? _contextState.lastStaff,
+        );
+        return true;
+      }
+      if (resolvedStaff != null) {
+        _handleRemoveLeaveCommand(
+          context,
+          raw,
+          fallbackStaff: resolvedStaff,
+        );
+        return true;
+      }
+    }
 
     if (_containsAny(tokens, ['hello', 'hi', 'hey']) ||
         text.contains('how are you')) {
@@ -261,25 +812,86 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
         'Hello! I can help with rosters, events, time, and weather. '
             'Ask me anything and I will tie it back to your schedule.',
       );
-      return;
+      return true;
     }
 
     if (text.contains('how do i') ||
         text.contains('how to') ||
         _containsAny(tokens, ['help'])) {
       _showAiHelp(context);
-      return;
+      return true;
     }
 
     if (_handleShiftMeaningQuery(context, text)) {
-      return;
+      return true;
     }
 
-    if (text.contains('create roster') ||
-        text.contains('generate roster') ||
-        text.contains('build roster')) {
+    if (cancelLeaveIntent && setLeaveIntent) {
+      _respondWithRC(
+        context,
+        'Do you want to cancel existing leave or set new leave?',
+      );
+      _contextState.remember(
+        action: 'clarify_leave_action',
+        pendingRaw: raw,
+      );
+      return true;
+    }
+
+    if (_isRosterStatsIntent(text, tokens)) {
+      _handleRosterStatsQuery(
+        context,
+        raw,
+        fallbackStaff: resolvedStaff,
+      );
+      return true;
+    }
+
+    if (_isLeaveBalanceQuery(text, tokens)) {
+      _handleLeaveBalanceQuery(
+        context,
+        raw,
+        fallbackStaff: resolvedStaff,
+      );
+      return true;
+    }
+
+    if (_isSickStatsQuery(text, tokens)) {
+      _handleSickStatsQuery(
+        context,
+        raw,
+        fallbackStaff: resolvedStaff,
+      );
+      return true;
+    }
+
+    if (_isSecondmentQuery(text, tokens)) {
+      _handleSecondmentQuery(
+        context,
+        raw,
+        fallbackStaff: resolvedStaff,
+      );
+      return true;
+    }
+
+    if (_isRosterCreateIntent(text, tokens)) {
       _handleRosterCommand(context, raw);
-      return;
+      return true;
+    }
+
+    if (_isDuplicatePatternIntent(text, tokens)) {
+      _handleDuplicatePatternCommand(context, raw);
+      return true;
+    }
+
+    if (_isAccessCodeIntent(text, tokens)) {
+      _handleCreateAccessCodeCommand(context, raw);
+      return true;
+    }
+
+    if (_isPanToDateIntent(text, tokens)) {
+      _handlePanToDateCommand(context, raw);
+      return true;
     }
 
     if (text.startsWith('when is') ||
@@ -289,19 +901,19 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
         (text.contains('when') &&
             _containsAny(tokens, ['event', 'holiday', 'festival', 'payday']))) {
       _handleWhenIsCommand(context, raw);
-      return;
+      return true;
     }
 
     if (text.contains('cancel swap') ||
         text.contains('remove swap') ||
         text.contains('cancel shiftswap')) {
       _handleCancelSwapCommand(context, raw);
-      return;
+      return true;
     }
 
     if (_isSwapIntent(text, tokens, roster)) {
       _handleSwapCommand(context, raw);
-      return;
+      return true;
     }
 
     if (text.contains('owed') ||
@@ -309,108 +921,226 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
         text.contains('debt') ||
         text.contains('swap debt')) {
       _handleSwapDebtQuery(context, raw);
-      return;
+      return true;
     }
 
-    if (text.contains('compassionate') ||
-        text.contains('bereavement') ||
-        text.contains('study') ||
-        text.contains('parental') ||
-        text.contains('maternity') ||
-        text.contains('paternity') ||
-        text.contains('jury') ||
-        text.contains('unpaid') ||
-        text.contains('special leave') ||
-        text.contains('custom leave')) {
+    if (!cancelLeaveIntent &&
+        (text.contains('compassionate') ||
+            text.contains('bereavement') ||
+            text.contains('study') ||
+            text.contains('parental') ||
+            text.contains('maternity') ||
+            text.contains('paternity') ||
+            text.contains('jury') ||
+            text.contains('unpaid') ||
+            text.contains('special leave') ||
+            text.contains('custom leave'))) {
       _handleStaffLeaveCommand(context, raw, 'custom');
-      return;
+      return true;
     }
 
-    if (text.contains('annual leave') ||
-        _containsAny(tokens, ['annual']) ||
-        text.contains(' al ')) {
-      _handleStaffLeaveCommand(context, raw, 'annual');
-      return;
+    if (!cancelLeaveIntent && setLeaveIntent) {
+      _handleStaffLeaveCommand(context, raw, _inferLeaveTypeForSet(raw));
+      return true;
     }
 
-    if (text.contains('secondment')) {
+    if (!cancelLeaveIntent && text.contains('secondment')) {
       _handleStaffLeaveCommand(context, raw, 'secondment');
-      return;
+      return true;
     }
 
-    if (text.contains('sick') ||
-        text.contains('illness') ||
-        text.contains(' ill ')) {
+    if (!cancelLeaveIntent &&
+        (text.contains('sick') ||
+            text.contains('illness') ||
+            text.contains(' ill '))) {
       _handleStaffLeaveCommand(context, raw, 'sick');
-      return;
+      return true;
     }
 
     if (_containsAny(tokens, ['event', 'events', 'holiday', 'festival', 'payday']) &&
         !_containsAny(tokens, ['set', 'create', 'add', 'delete', 'remove'])) {
-      _handleEventCommand(context, raw);
-      return;
+      _handleWhenIsCommand(context, raw);
+      return true;
     }
 
     if (shiftQueryIntent) {
-      _handleShiftQuery(context, raw);
-      return;
+      _handleShiftQuery(
+        context,
+        raw,
+        fallbackStaff: resolvedStaff,
+        fallbackDate: resolvedDate,
+      );
+      _contextState.remember(staff: resolvedStaff, date: resolvedDate);
+      return true;
     }
 
-    if (staffMatch != null && shiftMatch == null) {
-      _respondWithRC(context, 'Which shift should I set for $staffMatch?');
-      _showSetShiftWizard(context, initialStaff: staffMatch);
-      return;
+    if (isQuestion && resolvedStaff != null && !actionIntent) {
+      _handleShiftQuery(
+        context,
+        raw,
+        fallbackStaff: resolvedStaff,
+        fallbackDate: resolvedDate,
+      );
+      _contextState.remember(staff: resolvedStaff, date: resolvedDate);
+      return true;
     }
 
-    if (staffMatch == null && shiftMatch != null) {
+    if (cancelLeaveIntent) {
+      _contextState.remember(action: 'cancel_leave');
+      _handleRemoveLeaveCommand(
+        context,
+        raw,
+        fallbackStaff: resolvedStaff,
+      );
+      return true;
+    }
+
+    if (resolvedStaff != null && resolvedShift == null && actionIntent) {
+      _respondWithRC(context, 'Which shift should I set for $resolvedStaff?');
+      _showSetShiftWizard(context, initialStaff: resolvedStaff);
+      final pendingDates = <DateTime>[];
+      if (dateRange != null) {
+        pendingDates.add(DateTime(
+          dateRange.start.year,
+          dateRange.start.month,
+          dateRange.start.day,
+        ));
+      } else if (resolvedDate != null) {
+        pendingDates.add(DateTime(
+          resolvedDate.year,
+          resolvedDate.month,
+          resolvedDate.day,
+        ));
+      }
+      _contextState.remember(
+        action: 'await_shift_for_change',
+        pendingStaff: resolvedStaff,
+        pendingDates: pendingDates.isEmpty ? null : pendingDates,
+        pendingCreatedAt: DateTime.now(),
+      );
+      _contextState.remember(staff: resolvedStaff, date: resolvedDate);
+      return true;
+    }
+
+    if (resolvedStaff == null && resolvedShift != null && actionIntent) {
       _respondWithRC(context, 'Which staff member should I update?');
-      _showSetShiftWizard(context, initialShift: shiftMatch);
-      return;
+      _showSetShiftWizard(context, initialShift: resolvedShift);
+      final pendingDates = <DateTime>[];
+      if (dateRange != null) {
+        pendingDates.add(DateTime(
+          dateRange.start.year,
+          dateRange.start.month,
+          dateRange.start.day,
+        ));
+      } else if (resolvedDate != null) {
+        pendingDates.add(DateTime(
+          resolvedDate.year,
+          resolvedDate.month,
+          resolvedDate.day,
+        ));
+      }
+      _contextState.remember(
+        action: 'await_staff_for_change',
+        pendingShift: resolvedShift,
+        pendingDates: pendingDates.isEmpty ? null : pendingDates,
+        pendingCreatedAt: DateTime.now(),
+      );
+      return true;
     }
 
-    if (staffMatch != null && shiftMatch != null) {
+    if (actionIntent &&
+        resolvedShift != null &&
+        staffMatches.length >= 2) {
+      _handleBulkOverrideCommand(
+        context,
+        raw,
+        staffMatches,
+        resolvedShift,
+      );
+      _contextState.remember(
+        staff: staffMatches.first,
+        date: resolvedDate,
+        shift: resolvedShift,
+      );
+      return true;
+    }
+
+    if (resolvedStaff != null && resolvedShift != null && actionIntent) {
       _handleNaturalLanguageOverride(
         context,
         raw,
-        staffMatch,
-        shiftMatch,
+        resolvedStaff,
+        resolvedShift,
       );
-      return;
+      _contextState.remember(
+        staff: resolvedStaff,
+        date: resolvedDate,
+        shift: resolvedShift,
+      );
+      return true;
     }
 
     if (_containsAny(tokens, ['time', 'date', 'today'])) {
       _handleTimeCommand(context);
-      return;
+      return true;
     }
 
     if (_containsAny(tokens, ['weather', 'forecast', 'temperature'])) {
       _handleWeatherCommand(context);
-      return;
+      return true;
     }
 
     if (text.contains('delete event') || text.contains('remove event')) {
       _handleDeleteEventCommand(context, raw);
-      return;
+      return true;
+    }
+
+    if (text.contains('remove override') ||
+        text.contains('remove overrides') ||
+        text.contains('remove change') ||
+        text.contains('remove changes') ||
+        text.contains('clear override') ||
+        text.contains('clear overrides') ||
+        text.contains('clear change') ||
+        text.contains('clear changes') ||
+        text.contains('cancel override') ||
+        text.contains('cancel change') ||
+        text.contains('undo override') ||
+        text.contains('undo change') ||
+        text.contains('reset override') ||
+        text.contains('reset change') ||
+        text.contains('amendment') ||
+        text.contains('amended')) {
+      _handleRemoveOverrideCommand(
+        context,
+        raw,
+        fallbackStaff: resolvedStaff,
+      );
+      return true;
     }
 
     if (text.contains('event') || text.contains('payday') || text.contains('holiday')) {
       _handleEventCommand(context, raw);
-      return;
+      return true;
     }
 
-    if (text.contains('set ') || text.contains('override')) {
+    if (text.contains('set ') ||
+        text.contains('override') ||
+        text.contains('change ') ||
+        text.contains('amend') ||
+        text.contains('update ')) {
       _handleSetShiftCommand(context, raw);
-      return;
+      return true;
     }
 
     if (_handleClarification(context, raw, text, tokens, roster)) {
-      return;
+      return true;
     }
 
-    _respondWithRC(
-      context,
-      "I did not catch that. Tell me the staff, date, and action (set shift, swap, leave, or event).",
-    );
+    if (_tryBuildClarifyingQuestion(context, raw, roster)) {
+      return true;
+    }
+    return false;
   }
 
   bool _isShiftQueryIntent(String text, List<String> tokens) {
@@ -428,7 +1158,624 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
     if (text.contains('shift') && !_containsAny(tokens, ['set', 'assign', 'change', 'override'])) {
       return true;
     }
+    if (_containsAnyFuzzy(tokens, ['who', 'what', 'when', 'which']) &&
+        _containsAnyFuzzy(tokens, ['shift', 'work', 'working', 'on'])) {
+      return true;
+    }
     return false;
+  }
+
+  bool _hasDateHint(String text) {
+    if (RegExp(r'\\b\\d{1,2}(st|nd|rd|th)?\\b').hasMatch(text)) return true;
+    if (RegExp(r'\\b\\d{4}-\\d{2}-\\d{2}\\b').hasMatch(text)) return true;
+    if (RegExp(r'\\b\\d{1,2}[/-]\\d{1,2}[/-]\\d{4}\\b').hasMatch(text)) {
+      return true;
+    }
+    const monthHints = [
+      'jan',
+      'january',
+      'feb',
+      'february',
+      'mar',
+      'march',
+      'apr',
+      'april',
+      'may',
+      'jun',
+      'june',
+      'jul',
+      'july',
+      'aug',
+      'august',
+      'sep',
+      'sept',
+      'september',
+      'oct',
+      'october',
+      'nov',
+      'november',
+      'dec',
+      'december',
+    ];
+    for (final month in monthHints) {
+      if (text.contains(month)) return true;
+    }
+    if (text.contains('today') ||
+        text.contains('tomorrow') ||
+        text.contains('yesterday')) {
+      return true;
+    }
+    if (text.contains('next week') ||
+        text.contains('this week') ||
+        text.contains('last week') ||
+        text.contains('previous week')) {
+      return true;
+    }
+    return false;
+  }
+
+  _ResolvedDates? _resolveDatesForQuery(
+    String normalized,
+    String raw,
+    int weekStartDay,
+    DateTime? fallbackDate,
+    RosterNotifier roster,
+  ) {
+    final dateSet = <DateTime>{};
+    double confidence = 1.0;
+    final range = _extractDateRangeFromText(normalized, weekStartDay);
+    if (range != null) {
+      var cursor = DateTime(range.start.year, range.start.month, range.start.day);
+      final end = DateTime(range.end.year, range.end.month, range.end.day);
+      while (!cursor.isAfter(end)) {
+        dateSet.add(cursor);
+        cursor = cursor.add(const Duration(days: 1));
+      }
+    }
+    final monthFirst = _isMonthFirst(ref.read(settingsProvider));
+    final explicit = _parseDateFromText(normalized, monthFirst: monthFirst);
+    if (explicit != null) {
+      dateSet.add(DateTime(
+        explicit.date.year,
+        explicit.date.month,
+        explicit.date.day,
+      ));
+      confidence = explicit.confidence;
+    }
+    if (dateSet.isEmpty) {
+      dateSet.addAll(
+        _extractDatesForOverride(raw, weekStartDay),
+      );
+    }
+    if (dateSet.isEmpty) {
+      dateSet.addAll(_extractAllDatesFromText(
+        normalized,
+        monthFirst: monthFirst,
+      ));
+    }
+    if (dateSet.isEmpty) {
+      final loose = _parseDateLoose(raw, monthFirst: monthFirst);
+      if (loose != null) {
+        dateSet.add(loose.date);
+        confidence = loose.confidence;
+      }
+    }
+    if (dateSet.isEmpty && fallbackDate != null) {
+      dateSet.add(DateTime(
+        fallbackDate.year,
+        fallbackDate.month,
+        fallbackDate.day,
+      ));
+      confidence = 0.4;
+    }
+    if (dateSet.isEmpty) {
+      final relative = _resolveRelativeDate(normalized, fallbackDate, roster);
+      if (relative != null) {
+        dateSet.add(relative);
+        confidence = 0.5;
+      }
+    }
+    return dateSet.isEmpty
+        ? null
+        : _ResolvedDates(dateSet.toList()..sort(), confidence);
+  }
+
+  List<DateTime> _collectDates({
+    required String text,
+    required String raw,
+    required int weekStartDay,
+    required bool monthFirst,
+  }) {
+    final dates = <DateTime>{};
+    final range = _extractDateRangeFromText(text, weekStartDay);
+    if (range != null) {
+      var cursor = DateTime(range.start.year, range.start.month, range.start.day);
+      final end = DateTime(range.end.year, range.end.month, range.end.day);
+      while (!cursor.isAfter(end)) {
+        dates.add(cursor);
+        cursor = cursor.add(const Duration(days: 1));
+      }
+    }
+    final parsed = _parseDateFromText(text, monthFirst: monthFirst);
+    if (parsed != null) {
+      dates.add(parsed.date);
+    }
+    dates.addAll(_extractAllDatesFromText(text, monthFirst: monthFirst));
+    dates.addAll(_extractDatesForOverride(raw, weekStartDay));
+    final simple = _simpleDateFromText(raw) ??
+        _simpleDateFromText(text) ??
+        _parseDateLoose(raw, monthFirst: monthFirst)?.date;
+    if (simple != null) {
+      dates.add(simple);
+    }
+    return dates.toList();
+  }
+
+  DateTime? _resolveRelativeDate(
+    String normalized,
+    DateTime? baseDate,
+    RosterNotifier roster,
+  ) {
+    if (normalized.contains('same day next month') ||
+        normalized.contains('next month same day')) {
+      final base = baseDate ?? DateTime.now();
+      final next = DateTime(base.year, base.month + 1, base.day);
+      return DateTime(next.year, next.month, next.day);
+    }
+    if (normalized.contains('same day last month') ||
+        normalized.contains('last month same day') ||
+        normalized.contains('previous month same day')) {
+      final base = baseDate ?? DateTime.now();
+      final prev = DateTime(base.year, base.month - 1, base.day);
+      return DateTime(prev.year, prev.month, prev.day);
+    }
+    if (normalized.contains('end of month') ||
+        normalized.contains('last day of month')) {
+      final base = baseDate ?? DateTime.now();
+      final end = DateTime(base.year, base.month + 1, 0);
+      return DateTime(end.year, end.month, end.day);
+    }
+    if (normalized.contains('start of month') ||
+        normalized.contains('first day of month')) {
+      final base = baseDate ?? DateTime.now();
+      final start = DateTime(base.year, base.month, 1);
+      return DateTime(start.year, start.month, start.day);
+    }
+    final businessMatch =
+        RegExp(r'in\\s+(\\d+)\\s+business\\s+days').firstMatch(normalized);
+    if (businessMatch != null) {
+      final count = int.tryParse(businessMatch.group(1)!) ?? 0;
+      var date = DateTime.now();
+      var added = 0;
+      while (added < count) {
+        date = date.add(const Duration(days: 1));
+        if (date.weekday >= DateTime.monday &&
+            date.weekday <= DateTime.friday) {
+          added++;
+        }
+      }
+      return DateTime(date.year, date.month, date.day);
+    }
+    final weekOfMatch =
+        RegExp(r'(first|second|third|fourth|last)\\s+week\\s+of\\s+(\\w+)')
+            .firstMatch(normalized);
+    if (weekOfMatch != null) {
+      final monthToken = weekOfMatch.group(2) ?? '';
+      final month = _simpleDateFromText('1 $monthToken')?.month;
+      if (month != null) {
+        final year = DateTime.now().year;
+        final weekIndex = {
+          'first': 0,
+          'second': 1,
+          'third': 2,
+          'fourth': 3,
+        }[weekOfMatch.group(1)];
+        if (weekIndex != null) {
+          final start = DateTime(year, month, 1).add(Duration(days: weekIndex * 7));
+          return DateTime(start.year, start.month, start.day);
+        }
+        if (weekOfMatch.group(1) == 'last') {
+          final lastDay = DateTime(year, month + 1, 0);
+          final start = lastDay.subtract(const Duration(days: 6));
+          return DateTime(start.year, start.month, start.day);
+        }
+      }
+    }
+    final lastWeekdayMatch = RegExp(
+      r'last\\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\\s+of\\s+(\\w+)',
+    ).firstMatch(normalized);
+    if (lastWeekdayMatch != null) {
+      final month = _simpleDateFromText('1 ${lastWeekdayMatch.group(2)}')?.month;
+      if (month != null) {
+        final year = DateTime.now().year;
+        final lastDay = DateTime(year, month + 1, 0);
+        final target = _weekdayFromName(lastWeekdayMatch.group(1)!);
+        var date = lastDay;
+        while (date.weekday != target) {
+          date = date.subtract(const Duration(days: 1));
+        }
+        return DateTime(date.year, date.month, date.day);
+      }
+    }
+    final weekDayPattern = RegExp(r'week\\s*(\\d+)\\s*day\\s*(\\d+)');
+    final match = weekDayPattern.firstMatch(normalized);
+    if (match != null) {
+      final weekIndex = int.tryParse(match.group(1) ?? '') ?? 0;
+      final dayIndex = int.tryParse(match.group(2) ?? '') ?? 0;
+      if (weekIndex > 0 && dayIndex > 0) {
+        final reference = DateTime(2024, 1, 1);
+        final cycleDays = roster.cycleLength * 7;
+        final daysSince = DateTime.now().difference(reference).inDays;
+        final cycleStart =
+            reference.add(Duration(days: (daysSince ~/ cycleDays) * cycleDays));
+        final offset = (weekIndex - 1) * 7 + (dayIndex - 1);
+        final date = cycleStart.add(Duration(days: offset));
+        return DateTime(date.year, date.month, date.day);
+      }
+    }
+    return null;
+  }
+
+  int _weekdayFromName(String name) {
+    switch (name) {
+      case 'monday':
+        return DateTime.monday;
+      case 'tuesday':
+        return DateTime.tuesday;
+      case 'wednesday':
+        return DateTime.wednesday;
+      case 'thursday':
+        return DateTime.thursday;
+      case 'friday':
+        return DateTime.friday;
+      case 'saturday':
+        return DateTime.saturday;
+      case 'sunday':
+        return DateTime.sunday;
+      default:
+        return DateTime.monday;
+    }
+  }
+
+  DateTime? _simpleDateFromText(String text) {
+    final cleaned = text
+        .toLowerCase()
+        .replaceAll(RegExp(r'[^a-z0-9\\s]'), ' ')
+        .replaceAll(RegExp(r'\\s+'), ' ')
+        .trim();
+    if (cleaned.isEmpty) return null;
+    final monthNames = {
+      'jan': 1,
+      'january': 1,
+      'feb': 2,
+      'february': 2,
+      'mar': 3,
+      'march': 3,
+      'apr': 4,
+      'april': 4,
+      'may': 5,
+      'jun': 6,
+      'june': 6,
+      'jul': 7,
+      'july': 7,
+      'aug': 8,
+      'august': 8,
+      'sep': 9,
+      'sept': 9,
+      'september': 9,
+      'oct': 10,
+      'october': 10,
+      'nov': 11,
+      'november': 11,
+      'dec': 12,
+      'december': 12,
+    };
+    final dayMonth = RegExp(
+      r'(\\d{1,2})(?:st|nd|rd|th)?\\s*(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)',
+    ).firstMatch(cleaned);
+    if (dayMonth != null) {
+      final day = int.parse(dayMonth.group(1)!);
+      final monthKey = dayMonth.group(2)!;
+      final month = monthNames[monthKey]!;
+      final now = DateTime.now();
+      return DateTime(now.year, month, day);
+    }
+    final monthDay = RegExp(
+      r'(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\\s*(\\d{1,2})(?:st|nd|rd|th)?',
+    ).firstMatch(cleaned);
+    if (monthDay != null) {
+      final day = int.parse(monthDay.group(2)!);
+      final monthKey = monthDay.group(1)!;
+      final month = monthNames[monthKey]!;
+      final now = DateTime.now();
+      return DateTime(now.year, month, day);
+    }
+    // Fallback: scan tokens for a month word + a day number.
+    final tokens = cleaned.split(' ');
+    String? monthToken;
+    int? dayValue;
+    for (final token in tokens) {
+      final normalizedToken = token.replaceAll(
+        RegExp(r'(st|nd|rd|th)$'),
+        '',
+      );
+      final monthMatch = _matchMonthToken(normalizedToken, monthNames.keys);
+      if (monthMatch != null) {
+        monthToken ??= monthMatch;
+      } else {
+        final number = int.tryParse(normalizedToken);
+        if (number != null && number >= 1 && number <= 31) {
+          dayValue ??= number;
+        }
+      }
+    }
+    if (monthToken != null && dayValue != null) {
+      final now = DateTime.now();
+      return DateTime(now.year, monthNames[monthToken]!, dayValue);
+    }
+    return null;
+  }
+
+  String? _matchMonthToken(String token, Iterable<String> months) {
+    if (months.contains(token)) return token;
+    String? best;
+    int bestDist = 2;
+    for (final month in months) {
+      final dist = _editDistance(token, month);
+      if (dist < bestDist) {
+        bestDist = dist;
+        best = month;
+        if (bestDist == 1) break;
+      }
+    }
+    return best;
+  }
+
+  int _editDistance(String a, String b) {
+    if (a == b) return 0;
+    final dp = List.generate(a.length + 1, (_) => List<int>.filled(b.length + 1, 0));
+    for (var i = 0; i <= a.length; i++) {
+      dp[i][0] = i;
+    }
+    for (var j = 0; j <= b.length; j++) {
+      dp[0][j] = j;
+    }
+    for (var i = 1; i <= a.length; i++) {
+      for (var j = 1; j <= b.length; j++) {
+        final cost = a[i - 1] == b[j - 1] ? 0 : 1;
+        dp[i][j] = [
+          dp[i - 1][j] + 1,
+          dp[i][j - 1] + 1,
+          dp[i - 1][j - 1] + cost,
+        ].reduce((v, e) => v < e ? v : e);
+      }
+    }
+    return dp[a.length][b.length];
+  }
+
+  bool _isMonthFirst(models.AppSettings settings) {
+    final format = settings.dateFormat.toLowerCase();
+    return format.startsWith('mm');
+  }
+
+
+  List<String>? _resolveStaffForQuery(
+    BuildContext context,
+    RosterNotifier roster,
+    String normalized,
+    String? fallbackStaff,
+    List<DateTime> dates,
+  ) {
+    final matches = _matchAllStaffNames(normalized, roster);
+    if (matches.isEmpty && fallbackStaff != null) {
+      matches.add(fallbackStaff);
+    }
+    if (matches.isEmpty) {
+      _contextState.remember(
+        action: 'await_staff_for_query',
+        pendingDates: dates,
+        pendingCreatedAt: DateTime.now(),
+      );
+      _respondWithRC(context, 'Which staff member should I check?');
+      return null;
+    }
+    return matches;
+  }
+
+  bool _isRosterStatsIntent(String text, List<String> tokens) {
+    if (_containsAnyFuzzy(tokens, [
+      'stats',
+      'statistics',
+      'analytics',
+      'summary',
+      'overview',
+      'health',
+      'kpi',
+    ])) {
+      return true;
+    }
+    if (_containsAnyFuzzy(tokens, [
+      'utilization',
+      'overtime',
+      'compliance',
+      'coverage',
+      'burndown',
+      'risk',
+    ])) {
+      return true;
+    }
+    return false;
+  }
+
+  bool _isLeaveBalanceQuery(String text, List<String> tokens) {
+    if (text.contains('leave balance') || text.contains('al balance')) {
+      return true;
+    }
+    if (_containsAnyFuzzy(tokens, ['leave', 'annual', 'al']) &&
+        _containsAnyFuzzy(tokens, ['remaining', 'left', 'balance'])) {
+      return true;
+    }
+    if (text.contains('annual leave left') || text.contains('al remaining')) {
+      return true;
+    }
+    return false;
+  }
+
+  bool _isSickStatsQuery(String text, List<String> tokens) {
+    if (!_containsAnyFuzzy(tokens, ['sick', 'illness', 'ill'])) return false;
+    if (_containsAnyFuzzy(tokens, ['days', 'count', 'taken', 'how', 'many'])) {
+      return true;
+    }
+    if (text.contains('sick leave')) return true;
+    return false;
+  }
+
+  bool _isSecondmentQuery(String text, List<String> tokens) {
+    if (text.contains('secondment')) return true;
+    if (text.contains('return') && _containsAnyFuzzy(tokens, ['back', 'work'])) {
+      return true;
+    }
+    if (_containsAnyFuzzy(tokens, ['back', 'return']) &&
+        _containsAnyFuzzy(tokens, ['date', 'day'])) {
+      return true;
+    }
+    return false;
+  }
+
+  bool _isRosterCreateIntent(String text, List<String> tokens) {
+    if (!text.contains('roster') &&
+        !_containsAnyFuzzy(tokens, ['roster', 'rosters', 'schedule'])) {
+      return false;
+    }
+    if (_containsAnyFuzzy(tokens, [
+      'create',
+      'generate',
+      'build',
+      'make',
+      'start',
+      'new',
+      'initialize',
+      'need',
+    ])) {
+      return true;
+    }
+    if (text.contains('new roster') ||
+        text.contains('need a roster') ||
+        text.contains('need roster')) {
+      return true;
+    }
+    return false;
+  }
+
+  bool _isTemplateGenerateIntent(String text) {
+    if (text.contains('template code') &&
+        (text.contains('generate') ||
+            text.contains('create') ||
+            text.contains('share') ||
+            text.contains('export'))) {
+      return true;
+    }
+    return text.contains('export template');
+  }
+
+  bool _isTemplateApplyIntent(String text) {
+    if (text.contains('use template') ||
+        text.contains('apply template') ||
+        text.contains('import template') ||
+        text.contains('template code')) {
+      return true;
+    }
+    return false;
+  }
+
+  String? _extractRosterName(String raw) {
+    final quoted = RegExp("[\"']([^\"']{3,})[\"']").firstMatch(raw);
+    if (quoted != null) {
+      return quoted.group(1);
+    }
+    final match = RegExp(r'(?:for|of|named|called)\s+(.+)$',
+            caseSensitive: false)
+        .firstMatch(raw);
+    if (match != null) {
+      return match.group(1)?.trim();
+    }
+    return null;
+  }
+
+  void _handleTemplateGenerateCommand(BuildContext context, String raw) {
+    final roster = ref.read(rosterProvider);
+    final rosterName = _extractRosterName(raw);
+    if (rosterName == null || rosterName.trim().isEmpty) {
+      final code = roster.generateTemplateCode(
+        includeStaffNames: true,
+        includeOverrides: false,
+        compress: true,
+      );
+      Clipboard.setData(ClipboardData(text: code));
+      _respondWithRC(
+        context,
+        'Template code generated for the current roster and copied:\\n$code',
+      );
+      return;
+    }
+
+    Future(() async {
+      try {
+        final list = await AwsService.instance.getUserRosters();
+        final matches = <Map<String, dynamic>>[];
+        for (final entry in list) {
+          final rosterMap = entry['rosters'] as Map<String, dynamic>;
+          final name = (rosterMap['name'] as String?) ?? '';
+          if (name.toLowerCase().contains(rosterName.toLowerCase())) {
+            matches.add(rosterMap);
+          }
+        }
+
+        if (matches.isEmpty) {
+          _respondWithRC(
+            context,
+            'I could not find a roster named "$rosterName". Open it first or check the name.',
+          );
+          return;
+        }
+        if (matches.length > 1) {
+          final names = matches.take(5).map((r) => r['name']).join(', ');
+          _respondWithRC(
+            context,
+            'I found multiple rosters: $names. Tell me the exact roster name.',
+          );
+          return;
+        }
+
+        final rosterId = matches.first['id'] as String?;
+        if (rosterId == null) {
+          _respondWithRC(context, 'Roster ID missing for "$rosterName".');
+          return;
+        }
+        final remote = await AwsService.instance.loadRosterData(rosterId);
+        final data = remote?['data'] as Map<String, dynamic>?;
+        if (data == null) {
+          _respondWithRC(context, 'Unable to load roster "$rosterName".');
+          return;
+        }
+        final code = roster.generateTemplateCodeFromData(
+          data,
+          includeStaffNames: true,
+          includeOverrides: false,
+          compress: true,
+        );
+        Clipboard.setData(ClipboardData(text: code));
+        _respondWithRC(
+          context,
+          'Template code generated for "$rosterName" and copied:\\n$code',
+        );
+      } catch (e) {
+        _respondWithRC(
+          context,
+          'I could not fetch that roster. Please open it first and try again.',
+        );
+      }
+    });
   }
 
   void _handleRosterCommand(BuildContext context, String raw) {
@@ -534,37 +1881,88 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
     }
   }
 
-  void _handleShiftQuery(BuildContext context, String raw) {
+  void _handleShiftQuery(
+    BuildContext context,
+    String raw, {
+    String? fallbackStaff,
+    DateTime? fallbackDate,
+  }) {
     final roster = ref.read(rosterProvider);
-    final text = raw.toLowerCase();
-    DateTime? explicitDate = _parseDateFromText(raw);
-    final dateSet = <DateTime>{};
-    if (explicitDate != null) {
-      dateSet.add(DateTime(
-        explicitDate.year,
-        explicitDate.month,
-        explicitDate.day,
-      ));
-    } else {
-      dateSet.addAll(
-        _extractDatesForOverride(raw, roster.weekStartDay),
-      );
+    final normalized = _normalizeCommand(raw);
+    final text = normalized;
+    final hadExplicitDateHint =
+        _hasDateHint(normalized) ||
+        _extractDateRangeFromText(normalized, roster.weekStartDay) != null;
+    final hadStaffHint = _matchAllStaffNames(normalized, roster).isNotEmpty;
+    final resolvedDates = _resolveDatesForQuery(
+      normalized,
+      raw,
+      roster.weekStartDay,
+      fallbackDate,
+      roster,
+    );
+    if (resolvedDates == null || resolvedDates.dates.isEmpty) {
+      final fallbackParsed =
+          _simpleDateFromText(raw) ?? _simpleDateFromText(normalized);
+      if (fallbackParsed != null) {
+        final dates = [fallbackParsed];
+        final staffList = _resolveStaffForQuery(
+          context,
+          roster,
+          normalized,
+          fallbackStaff,
+          dates,
+        );
+        if (staffList == null) return;
+        _respondWithRC(
+          context,
+          '${staffList.first} is on ${_shiftLabel(roster.getShiftForDate(staffList.first, fallbackParsed))} '
+          'for ${DateFormat('MMM d, yyyy').format(fallbackParsed)}.',
+        );
+        return;
+      }
+      if (_hasDateHint(normalized)) {
+        final pending = fallbackStaff ?? _contextState.lastStaff;
+        if (pending != null) {
+          _contextState.remember(
+            action: 'await_date_for_query',
+            pendingStaff: pending,
+            pendingCreatedAt: DateTime.now(),
+          );
+        }
+        _respondWithRC(context, 'Which date should I check?');
+      } else {
+      _respondWithRC(context, 'Which date should I check?');
+      }
+      return;
     }
-    if (dateSet.isEmpty) {
-      dateSet.add(DateTime.now());
+    final dates = resolvedDates.dates;
+    final confidence = resolvedDates.confidence;
+    final usedFallbackDate = !hadExplicitDateHint && fallbackDate != null;
+    final staffList = _resolveStaffForQuery(
+      context,
+      roster,
+      normalized,
+      fallbackStaff,
+      dates,
+    );
+    if (staffList == null) {
+      return;
     }
-    final dates = dateSet.toList()..sort();
-    final staff = roster.staffMembers.map((s) => s.name).toList();
+    final usedFallbackStaff = !hadStaffHint && fallbackStaff != null;
+    final staff = staffList;
 
     final shiftHint = _extractShiftCode(text);
     final wantsLeave = text.contains('leave') ||
         text.contains('sick') ||
         text.contains('secondment');
+    final wantsCoverage =
+        text.contains('coverage') || text.contains('gap') || text.contains('missing');
     final wantsCount = text.contains('how many') ||
         text.contains('count') ||
         text.contains('number of');
     final isWhoQuery = text.contains('who') || text.startsWith('who');
-    if (wantsCount && !isWhoQuery) {
+    if ((wantsCount || wantsCoverage) && !isWhoQuery) {
       if (dates.length > 7) {
         _respondWithRC(
           context,
@@ -575,6 +1973,7 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
       final responses = <String>[];
       for (final date in dates) {
         int count = 0;
+        int missing = 0;
         for (final name in staff) {
           final staffMember = roster.staffMembers
               .where((s) => s.name == name)
@@ -593,11 +1992,17 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
             continue;
           }
           final shift = roster.getShiftForDate(name, date);
+          final normalizedShift = _normalizeShiftForCoverage(shift);
+          final normalizedHint = _normalizeShiftForCoverage(shiftHint);
           if (shiftHint != null) {
-            if (shift == shiftHint) count++;
+            if (normalizedShift == normalizedHint) count++;
           } else {
             if (shift != 'OFF' && shift != 'AL') count++;
           }
+        }
+        if (wantsCoverage) {
+          final required = _estimateCoverageNeed(roster, date, shiftHint);
+          missing = (required - count).clamp(0, required);
         }
         final label = wantsLeave
             ? (text.contains('secondment')
@@ -608,9 +2013,17 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
             : shiftHint != null
                 ? _shiftLabel(shiftHint)
                 : 'working';
-        responses.add(
-          '$count staff are $label on ${DateFormat('MMM d').format(date)}.',
-        );
+        if (wantsCoverage) {
+          responses.add(
+            missing == 0
+                ? 'Coverage looks ok for $label on ${DateFormat('MMM d').format(date)}.'
+                : 'Coverage gap: $missing for $label on ${DateFormat('MMM d').format(date)}.',
+          );
+        } else {
+          responses.add(
+            '$count staff are $label on ${DateFormat('MMM d').format(date)}.',
+          );
+        }
       }
       _respondWithRC(context, responses.join(' '));
       return;
@@ -644,8 +2057,10 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
             continue;
           }
           final shift = roster.getShiftForDate(name, date);
+          final normalizedShift = _normalizeShiftForCoverage(shift);
+          final normalizedHint = _normalizeShiftForCoverage(shiftHint);
           if (shiftHint != null) {
-            if (shift == shiftHint) {
+            if (normalizedShift == normalizedHint) {
               results.add(name);
             }
           } else {
@@ -673,17 +2088,12 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
       return;
     }
 
-    String? matched;
-    for (final name in staff) {
-      if (text.contains(name.toLowerCase())) {
-        matched = name;
-        break;
-      }
-    }
-    if (matched == null) {
-      _respondWithRC(context, 'Tell me which staff member to check.');
+    final matchedNames = _matchAllStaffNames(text, roster);
+    if (matchedNames.isEmpty) {
       return;
     }
+    final matched = matchedNames.first;
+    _contextState.remember(staff: matched);
     final staffMember =
         roster.staffMembers.where((s) => s.name == matched).firstOrNull;
     final responses = <String>[];
@@ -697,11 +2107,213 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
         continue;
       }
       final shift = roster.getShiftForDate(matched, date);
+      final base = roster.getBaseShiftForDate(matched, date);
+      final overrideApplied =
+          shift.isNotEmpty && base.isNotEmpty && shift != base;
+      final overrideLabel = overrideApplied ? ' (override)' : '';
+      final contextNote = usedFallbackDate || usedFallbackStaff
+          ? ' (from previous context)'
+          : confidence < 0.6
+              ? ' (date inferred)'
+              : '';
       responses.add(
-        '$matched is on ${_shiftLabel(shift)} for ${DateFormat('MMM d, yyyy').format(date)}.',
+        '$matched is on ${_shiftLabel(shift)}$overrideLabel for ${DateFormat('MMM d, yyyy').format(date)}$contextNote.',
       );
     }
     _respondWithRC(context, responses.join(' '));
+  }
+
+  void _handleRosterStatsQuery(
+    BuildContext context,
+    String raw, {
+    String? fallbackStaff,
+  }) {
+    final roster = ref.read(rosterProvider);
+    final text = raw.toLowerCase();
+    final staffMatch = _matchStaffName(text, roster) ?? fallbackStaff;
+    if (staffMatch != null) {
+      final response = _buildStaffStatsResponse(staffMatch, roster);
+      _respondWithRC(context, response);
+      return;
+    }
+
+    final stats = roster.getStatistics();
+    final health = stats['healthScore'] as Map<String, dynamic>? ?? {};
+    final utilization = (stats['utilizationRate'] as num?)?.toDouble() ?? 0;
+    final avgShifts = (stats['avgShiftsPerStaff'] as num?)?.toDouble() ?? 0;
+    final overtime = roster.buildOvertimeRisk();
+    final compliance = roster.buildComplianceSummary();
+
+    final highRisk = (overtime['highRiskStaff'] as List<dynamic>? ?? [])
+        .map((e) => e.toString())
+        .toList();
+    final coverageViolations = compliance['coverageViolations'] ?? 0;
+    final shiftCoverageViolations = compliance['shiftCoverageViolations'] ?? 0;
+
+    final response =
+        'Roster summary: ${stats['activeStaff']} active staff, '
+        '${stats['totalOverrides']} changes, ${stats['totalEvents']} events. '
+        'Health score ${(health['overall'] ?? 0).toStringAsFixed(2)} '
+        '(coverage ${(health['coverage'] ?? 0).toStringAsFixed(2)}, '
+        'workload ${(health['workload'] ?? 0).toStringAsFixed(2)}). '
+        'Utilization ${(utilization * 100).toStringAsFixed(0)}%, '
+        'avg shifts ${(avgShifts).toStringAsFixed(1)} per staff. '
+        'Coverage violations $coverageViolations, '
+        'shift coverage violations $shiftCoverageViolations. '
+        '${highRisk.isEmpty ? 'No high overtime risk.' : 'Overtime risk: ${highRisk.join(', ')}.'}';
+
+    _respondWithRC(context, response);
+  }
+
+  void _handleLeaveBalanceQuery(
+    BuildContext context,
+    String raw, {
+    String? fallbackStaff,
+  }) {
+    final roster = ref.read(rosterProvider);
+    final text = raw.toLowerCase();
+    final staffName = _matchStaffName(text, roster) ?? fallbackStaff;
+    if (staffName == null) {
+      _respondWithRC(context, 'Which staff member should I check leave for?');
+      return;
+    }
+    final staff =
+        roster.staffMembers.where((s) => s.name == staffName).firstOrNull;
+    if (staff == null) {
+      _respondWithRC(context, 'Staff member not found.');
+      return;
+    }
+    final now = DateTime.now();
+    final alOverrides = roster.overrides
+        .where((o) => o.personName == staffName)
+        .where((o) => o.shift.toUpperCase() == 'AL')
+        .toList();
+    final past = alOverrides.where((o) => o.date.isBefore(now)).length;
+    final future = alOverrides.where((o) => !o.date.isBefore(now)).length;
+    _respondWithRC(
+      context,
+      '$staffName has ${staff.leaveBalance.toStringAsFixed(1)} days remaining. '
+          'AL used: $past, upcoming AL: $future.',
+    );
+  }
+
+  void _handleSickStatsQuery(
+    BuildContext context,
+    String raw, {
+    String? fallbackStaff,
+  }) {
+    final roster = ref.read(rosterProvider);
+    final text = raw.toLowerCase();
+    final staffName = _matchStaffName(text, roster) ?? fallbackStaff;
+    if (staffName == null) {
+      _respondWithRC(context, 'Which staff member should I check sick days for?');
+      return;
+    }
+    final now = DateTime.now();
+    final sickOverrides = roster.overrides
+        .where((o) => o.personName == staffName)
+        .where((o) {
+          final shift = o.shift.toUpperCase();
+          return shift == 'SICK' || shift == 'ILL';
+        })
+        .toList();
+    final past = sickOverrides.where((o) => o.date.isBefore(now)).length;
+    final upcoming = sickOverrides.where((o) => !o.date.isBefore(now)).length;
+    _respondWithRC(
+      context,
+      '$staffName has $past sick day(s) recorded and $upcoming scheduled.',
+    );
+  }
+
+  void _handleSecondmentQuery(
+    BuildContext context,
+    String raw, {
+    String? fallbackStaff,
+  }) {
+    final roster = ref.read(rosterProvider);
+    final text = raw.toLowerCase();
+    final staffName = _matchStaffName(text, roster) ?? fallbackStaff;
+    if (staffName == null) {
+      _respondWithRC(context, 'Which staff member is on secondment?');
+      return;
+    }
+    final staff =
+        roster.staffMembers.where((s) => s.name == staffName).firstOrNull;
+    if (staff == null) {
+      _respondWithRC(context, 'Staff member not found.');
+      return;
+    }
+    if (staff.leaveType == null) {
+      _respondWithRC(
+        context,
+        '$staffName is not marked as on leave or secondment.',
+      );
+      return;
+    }
+    final start = staff.leaveStart;
+    final end = staff.leaveEnd;
+    final startLabel =
+        start == null ? 'unknown' : DateFormat('MMM d, yyyy').format(start);
+    final endLabel =
+        end == null ? 'unknown' : DateFormat('MMM d, yyyy').format(end);
+    _respondWithRC(
+      context,
+      '$staffName is on ${_formatLeaveLabel(staff.leaveType)} '
+          'from $startLabel to $endLabel.',
+    );
+  }
+
+  String _buildStaffStatsResponse(String staffName, RosterNotifier roster) {
+    final staff =
+        roster.staffMembers.where((s) => s.name == staffName).firstOrNull;
+    if (staff == null) {
+      return 'Staff member not found.';
+    }
+    final now = DateTime.now();
+    int next7 = 0;
+    int next30 = 0;
+    for (int i = 0; i < 30; i++) {
+      final date = now.add(Duration(days: i));
+      final shift = roster.getShiftForDate(staffName, date);
+      if (shift != 'OFF' && shift != 'AL') {
+        next30++;
+        if (i < 7) next7++;
+      }
+    }
+    final alOverrides = roster.overrides
+        .where((o) => o.personName == staffName)
+        .where((o) => o.shift.toUpperCase() == 'AL')
+        .toList();
+    final alPast = alOverrides.where((o) => o.date.isBefore(now)).length;
+    final alFuture = alOverrides.where((o) => !o.date.isBefore(now)).length;
+    final sickOverrides = roster.overrides
+        .where((o) => o.personName == staffName)
+        .where((o) {
+          final shift = o.shift.toUpperCase();
+          return shift == 'SICK' || shift == 'ILL';
+        })
+        .toList();
+    final sickPast = sickOverrides.where((o) => o.date.isBefore(now)).length;
+    final status = staff.leaveType == null
+        ? 'active'
+        : staff.leaveType == 'secondment'
+            ? 'on secondment'
+            : staff.leaveType == 'sick'
+                ? 'sick'
+                : staff.leaveType!;
+    final leaveStartLabel = staff.leaveStart == null
+        ? ''
+        : ' from ${DateFormat('MMM d, yyyy').format(staff.leaveStart!)}';
+    final leaveEndLabel = staff.leaveEnd == null
+        ? ''
+        : ' until ${DateFormat('MMM d, yyyy').format(staff.leaveEnd!)}';
+
+    return '$staffName summary: '
+        'status $status$leaveStartLabel$leaveEndLabel. '
+        'Leave remaining ${staff.leaveBalance.toStringAsFixed(1)} days '
+        '(AL used $alPast, upcoming $alFuture). '
+        'Sick days recorded $sickPast. '
+        'Shifts scheduled: $next7 in next 7 days, $next30 in next 30 days.';
   }
 
   void _handleStaffLeaveCommand(
@@ -737,6 +2349,67 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
 
     final ranges = _extractMultipleDateRanges(text, roster.weekStartDay);
 
+    if (effectiveLeaveType == 'annual') {
+      if (ranges.isEmpty) {
+        _respondWithRC(
+          context,
+          staffNames.length == 1
+              ? 'Which dates should I set annual leave for ${staffNames.first}?'
+              : 'Which dates should I set annual leave for each staff member?',
+        );
+        _showLeaveWizard(
+          context,
+          initialStaff: staffNames.first,
+          leaveType: leaveType,
+        );
+        return;
+      }
+
+      final assignments = _pairStaffToRanges(staffNames, ranges);
+      if (assignments == null) {
+        _respondWithRC(
+          context,
+          'I need a clear date range for each staff member.',
+        );
+        _showLeaveWizard(
+          context,
+          initialStaff: staffNames.first,
+          leaveType: leaveType,
+        );
+        return;
+      }
+
+      final summary = assignments
+          .map(
+            (entry) =>
+                '${entry.staff} (${DateFormat('MMM d').format(entry.range.start)} to ${DateFormat('MMM d').format(entry.range.end)})',
+          )
+          .join(', ');
+
+      _confirmAction(
+        context,
+        title: 'Set Annual Leave',
+        message: 'Apply annual leave for: $summary?',
+        onConfirm: () {
+          int dayCount = 0;
+          for (final entry in assignments) {
+            var date = entry.range.start;
+            while (!date.isAfter(entry.range.end)) {
+              roster.setOverride(entry.staff, date, 'AL', 'Annual leave');
+              dayCount++;
+              date = date.add(const Duration(days: 1));
+            }
+          }
+          _respondWithRC(
+            context,
+            'Applied Annual Leave for ${assignments.length} staff '
+                '($dayCount day(s)).',
+          );
+        },
+      );
+      return;
+    }
+
     if (isExtend && staffNames.length == 1) {
       final staffMember = roster.staffMembers.firstWhere(
         (s) => s.name == staffNames.first,
@@ -746,7 +2419,18 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
         _respondWithRC(context, 'Staff member not found.');
         return;
       }
-      if (staffMember.leaveEnd == null) {
+      final code = _leaveTypeToShiftCode(effectiveLeaveType);
+      DateTime? currentEnd;
+      final overrides = roster.overrides
+          .where((o) =>
+              o.personName == staffMember.name &&
+              o.shift.toUpperCase() == code.toUpperCase())
+          .toList();
+      if (overrides.isNotEmpty) {
+        overrides.sort((a, b) => a.date.compareTo(b.date));
+        currentEnd = overrides.last.date;
+      }
+      if (currentEnd == null) {
         _respondWithRC(
           context,
           'No active leave found for ${staffMember.name}. Tell me the start and end dates.',
@@ -758,13 +2442,13 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
         );
         return;
       }
-      DateTime newEnd = staffMember.leaveEnd!;
+      DateTime newEnd = currentEnd;
       if (ranges.isNotEmpty) {
         final range = ranges.first;
         if (range.explicitEnd) {
           newEnd = range.end;
         } else if (range.durationDays != null) {
-          newEnd = staffMember.leaveEnd!.add(
+          newEnd = currentEnd.add(
             Duration(days: range.durationDays!),
           );
         } else {
@@ -779,17 +2463,14 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
         );
         return;
       }
-      final start = staffMember.leaveStart ??
-          DateTime(DateTime.now().year, DateTime.now().month, DateTime.now().day);
-      roster.setStaffLeaveStatus(
-        staffId: staffMember.id,
-        leaveType: staffMember.leaveType ?? effectiveLeaveType,
-        startDate: start,
-        endDate: newEnd,
-      );
+      var date = currentEnd.add(const Duration(days: 1));
+      while (!date.isAfter(newEnd)) {
+        roster.setOverride(staffMember.name, date, code, effectiveLeaveType);
+        date = date.add(const Duration(days: 1));
+      }
       _respondWithRC(
         context,
-        'Extended ${staffMember.name} ${_formatLeaveLabel(staffMember.leaveType ?? effectiveLeaveType)} to '
+        'Extended ${staffMember.name} ${_formatLeaveLabel(effectiveLeaveType)} to '
             '${DateFormat('MMM d, yyyy').format(newEnd)}.',
       );
       return;
@@ -841,12 +2522,12 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
             orElse: () => models.StaffMember(id: '', name: entry.staff),
           );
           if (staffMember.id.isEmpty) continue;
-          roster.setStaffLeaveStatus(
-            staffId: staffMember.id,
-            leaveType: effectiveLeaveType,
-            startDate: entry.range.start,
-            endDate: entry.range.end,
-          );
+          final code = _leaveTypeToShiftCode(effectiveLeaveType);
+          var date = entry.range.start;
+          while (!date.isAfter(entry.range.end)) {
+            roster.setOverride(entry.staff, date, code, effectiveLeaveType);
+            date = date.add(const Duration(days: 1));
+          }
         }
         _respondWithRC(
           context,
@@ -881,109 +2562,118 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
 
     final confirmed = await showDialog<bool>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Set leave/secondment'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            DropdownButtonFormField<String>(
-              value: staffName,
-              items: staff
-                  .map(
-                    (name) => DropdownMenuItem(
-                      value: name,
-                      child: Text(name),
-                    ),
-                  )
-                  .toList(),
-              onChanged: (value) {
-                if (value != null) {
-                  staffName = value;
-                }
-              },
-              decoration: const InputDecoration(labelText: 'Staff member'),
-            ),
-            const SizedBox(height: 12),
-            DropdownButtonFormField<String>(
-              value: type,
-              items: const [
-                DropdownMenuItem(value: 'leave', child: Text('Leave')),
-                DropdownMenuItem(value: 'annual', child: Text('Annual Leave')),
-                DropdownMenuItem(value: 'sick', child: Text('Sick')),
-                DropdownMenuItem(value: 'secondment', child: Text('Secondment')),
-                DropdownMenuItem(value: 'custom', child: Text('Custom')),
-              ],
-              onChanged: (value) {
-                if (value != null) {
-                  type = value;
-                }
-              },
-              decoration: const InputDecoration(labelText: 'Type'),
-            ),
-            if (type == 'custom') ...[
+      builder: (context) => StatefulBuilder(
+        builder: (context, setState) => AlertDialog(
+          title: const Text('Set leave/secondment'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              DropdownButtonFormField<String>(
+                value: staffName,
+                items: staff
+                    .map(
+                      (name) => DropdownMenuItem(
+                        value: name,
+                        child: Text(name),
+                      ),
+                    )
+                    .toList(),
+                onChanged: (value) {
+                  if (value != null) {
+                    setState(() => staffName = value);
+                  }
+                },
+                decoration: const InputDecoration(labelText: 'Staff member'),
+              ),
               const SizedBox(height: 12),
-              TextField(
-                decoration: const InputDecoration(
-                  labelText: 'Custom leave label',
-                  hintText: 'e.g. Compassionate Leave',
+              DropdownButtonFormField<String>(
+                value: type,
+                items: const [
+                  DropdownMenuItem(value: 'leave', child: Text('Leave')),
+                  DropdownMenuItem(value: 'annual', child: Text('Annual Leave')),
+                  DropdownMenuItem(value: 'sick', child: Text('Sick')),
+                  DropdownMenuItem(
+                      value: 'secondment', child: Text('Secondment')),
+                  DropdownMenuItem(value: 'custom', child: Text('Custom')),
+                ],
+                onChanged: (value) {
+                  if (value != null) {
+                    setState(() => type = value);
+                  }
+                },
+                decoration: const InputDecoration(labelText: 'Type'),
+              ),
+              if (type == 'custom') ...[
+                const SizedBox(height: 12),
+                SafeTextField(
+                  decoration: const InputDecoration(
+                    labelText: 'Custom leave label',
+                    hintText: 'e.g. Compassionate Leave',
+                  ),
+                  onChanged: (value) => customLabel = value,
+                  controller: TextEditingController(text: customLabel),
                 ),
-                onChanged: (value) => customLabel = value,
-                controller: TextEditingController(text: customLabel),
+              ],
+              const SizedBox(height: 12),
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.calendar_today),
+                title: const Text('Start'),
+                subtitle: Text(DateFormat('MMM d, yyyy').format(start)),
+                onTap: () async {
+                  final picked = await showDatePicker(
+                    context: context,
+                    initialDate: start,
+                    firstDate:
+                        DateTime.now().subtract(const Duration(days: 730)),
+                    lastDate: DateTime.now().add(const Duration(days: 730)),
+                  );
+                  if (picked != null) {
+                    setState(() {
+                      start = picked;
+                      if (end.isBefore(start)) {
+                        end = start;
+                      }
+                    });
+                  }
+                },
+              ),
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.event_available),
+                title: const Text('End'),
+                subtitle: Text(DateFormat('MMM d, yyyy').format(end)),
+                onTap: () async {
+                  final picked = await showDatePicker(
+                    context: context,
+                    initialDate: end,
+                    firstDate:
+                        DateTime.now().subtract(const Duration(days: 730)),
+                    lastDate: DateTime.now().add(const Duration(days: 730)),
+                  );
+                  if (picked != null) {
+                    setState(() {
+                      end = picked;
+                      if (end.isBefore(start)) {
+                        start = end;
+                      }
+                    });
+                  }
+                },
               ),
             ],
-            const SizedBox(height: 12),
-            ListTile(
-              contentPadding: EdgeInsets.zero,
-              leading: const Icon(Icons.calendar_today),
-              title: const Text('Start'),
-              subtitle: Text(DateFormat('MMM d, yyyy').format(start)),
-              onTap: () async {
-                final picked = await showDatePicker(
-                  context: context,
-                  initialDate: start,
-                  firstDate: DateTime.now().subtract(const Duration(days: 730)),
-                  lastDate: DateTime.now().add(const Duration(days: 730)),
-                );
-                if (picked != null) {
-                  start = picked;
-                  if (end.isBefore(start)) {
-                    end = start;
-                  }
-                }
-              },
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Cancel'),
             ),
-            ListTile(
-              contentPadding: EdgeInsets.zero,
-              leading: const Icon(Icons.event_available),
-              title: const Text('End'),
-              subtitle: Text(DateFormat('MMM d, yyyy').format(end)),
-              onTap: () async {
-                final picked = await showDatePicker(
-                  context: context,
-                  initialDate: end,
-                  firstDate: DateTime.now().subtract(const Duration(days: 730)),
-                  lastDate: DateTime.now().add(const Duration(days: 730)),
-                );
-                if (picked != null) {
-                  end = picked;
-                  if (end.isBefore(start)) {
-                    start = end;
-                  }
-                }
-              },
+            FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Apply'),
             ),
           ],
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('Apply'),
-          ),
-        ],
       ),
     );
 
@@ -995,35 +2685,688 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
       if (staffMember.id.isEmpty) return;
       final effectiveType =
           type == 'custom' ? 'custom:${customLabel.trim()}' : type;
-      roster.setStaffLeaveStatus(
-        staffId: staffMember.id,
-        leaveType: effectiveType,
-        startDate: start,
-        endDate: end,
-      );
+      final code = _leaveTypeToShiftCode(effectiveType);
+      var date = start;
+      while (!date.isAfter(end)) {
+        roster.setOverride(staffMember.name, date, code, effectiveType);
+        date = date.add(const Duration(days: 1));
+      }
     }
   }
 
   String? _matchStaffName(String text, RosterNotifier roster) {
+    final lowered = text.toLowerCase();
+    final tokens = lowered.split(' ').where((t) => t.isNotEmpty).toList();
     final staff = roster.staffMembers.map((s) => s.name).toList();
     for (final name in staff) {
-      if (text.contains(name.toLowerCase())) {
+      final nameLower = name.toLowerCase();
+      if (lowered.contains(nameLower)) {
         return name;
+      }
+      final parts = nameLower.split(' ').where((t) => t.isNotEmpty).toList();
+      for (final part in parts) {
+        if (part.length < 2) continue;
+        final maxDistance = _maxDistanceForToken(part);
+        for (final token in tokens) {
+          if (token.length < 2) continue;
+          if (_levenshtein(token, part) <= maxDistance) {
+            return name;
+          }
+        }
       }
     }
     return null;
   }
 
+  String _leaveTypeToShiftCode(String leaveType) {
+    final normalized = leaveType.toLowerCase();
+    if (normalized == 'annual') return 'AL';
+    if (normalized == 'sick') return 'SICK';
+    if (normalized == 'secondment') return 'SECONDMENT';
+    if (normalized.startsWith('custom:')) {
+      final label = leaveType.substring('custom:'.length).trim();
+      if (label.isEmpty) return 'LEAVE';
+      final parts = label.split(RegExp(r'\\s+'));
+      final compact = parts.map((p) => p.substring(0, 1)).join();
+      final code = compact.isEmpty ? label : compact;
+      return code.toUpperCase().substring(0, code.length.clamp(1, 4));
+    }
+    return 'LEAVE';
+  }
+
+  void _handlePanToDateCommand(BuildContext context, String raw) {
+    final roster = ref.read(rosterProvider);
+    final text = _normalizeCommand(raw);
+    final dates = _extractAllDatesFromText(text);
+    DateTime? target;
+    if (dates.isNotEmpty) {
+      target = dates.first;
+    } else {
+      target = _extractMonthTarget(text);
+    }
+    if (target == null) {
+      _respondWithRC(context, 'Which date or month should I open?');
+      return;
+    }
+    roster.requestFocusDate(target);
+    _respondWithRC(
+      context,
+      'Moving the roster view to ${DateFormat('MMM d, yyyy').format(target)}.',
+    );
+  }
+
+  Future<void> _handleCreateAccessCodeCommand(
+    BuildContext context,
+    String raw,
+  ) async {
+    final rosterId = AwsService.instance.currentRosterId;
+    if (rosterId == null || rosterId.isEmpty) {
+      _respondWithRC(
+        context,
+        'No roster selected. Open a roster first, then ask me again.',
+      );
+      return;
+    }
+    if (!AwsService.instance.isAuthenticated) {
+      _respondWithRC(
+        context,
+        'Sign in first to create an access code.',
+      );
+      return;
+    }
+    final text = _normalizeCommand(raw);
+    String role = 'viewer';
+    if (text.contains('editor') || text.contains('edit')) {
+      role = 'editor';
+    }
+    int? expiresInHours;
+    final hoursMatch =
+        RegExp(r'(\\d{1,3})\\s*(hour|hours|hr|hrs)').firstMatch(text);
+    if (hoursMatch != null) {
+      final value = int.tryParse(hoursMatch.group(1)!);
+      if (value != null && value > 0) {
+        expiresInHours = value;
+      }
+    }
+    final daysMatch =
+        RegExp(r'(\\d{1,3})\\s*(day|days)').firstMatch(text);
+    if (daysMatch != null) {
+      final value = int.tryParse(daysMatch.group(1)!);
+      if (value != null && value > 0) {
+        expiresInHours = value * 24;
+      }
+    }
+    int? maxUses;
+    final maxMatch =
+        RegExp(r'(\\d{1,3})\\s*(use|uses|max)').firstMatch(text);
+    if (maxMatch != null) {
+      final value = int.tryParse(maxMatch.group(1)!);
+      if (value != null && value > 0) {
+        maxUses = value;
+      }
+    }
+    final customCode = _extractCustomCodeFromText(text);
+
+    try {
+      if (customCode != null) {
+        try {
+          final validation =
+              await AwsService.instance.validateShareCode(customCode);
+          if (validation['ok'] == true) {
+            _respondWithRC(context, 'That code is already in use.');
+            return;
+          }
+        } catch (e) {
+          final msg = e.toString().toLowerCase();
+          if (!msg.contains('not found') && !msg.contains('404')) {
+            _respondWithRC(context, 'Failed to validate code: $e');
+            return;
+          }
+        }
+      }
+      final response = await AwsService.instance.createShareCode(
+        rosterId: rosterId,
+        role: role,
+        expiresInHours: expiresInHours,
+        maxUses: maxUses,
+        customCode: customCode,
+      );
+      final code = response['code']?.toString() ?? '';
+      if (code.isEmpty) {
+        _respondWithRC(context, 'Access code created, but no code returned.');
+        return;
+      }
+      await Clipboard.setData(ClipboardData(text: code));
+      _respondWithRC(
+        context,
+        'Access code created: $code (${role == 'viewer' ? 'read-only' : role}). '
+        'Copied to clipboard.',
+      );
+    } catch (e) {
+      if (customCode != null) {
+        final suggestions = _extractSuggestionsFromError(e);
+        if (suggestions.isNotEmpty) {
+          _respondWithRC(
+            context,
+            'That code is taken. Try: ${suggestions.join(', ')}',
+          );
+          return;
+        }
+        try {
+          final fallback = await AwsService.instance.createShareCode(
+            rosterId: rosterId,
+            role: role,
+            expiresInHours: expiresInHours,
+            maxUses: maxUses,
+          );
+          final code = fallback['code']?.toString() ?? '';
+          if (code.isNotEmpty) {
+            await Clipboard.setData(ClipboardData(text: code));
+            _respondWithRC(
+              context,
+              'Custom code was taken. Generated unique code: $code. '
+              'Copied to clipboard.',
+            );
+            return;
+          }
+        } catch (_) {}
+      }
+      _respondWithRC(context, 'Failed to create access code: $e');
+    }
+  }
+
+  Future<void> _handleDuplicatePatternCommand(
+    BuildContext context,
+    String raw,
+  ) async {
+    final roster = ref.read(rosterProvider);
+    final text = _normalizeCommand(raw);
+    final includeStaff = text.contains('with staff') ||
+        text.contains('include staff') ||
+        text.contains('keep staff');
+    final includeOverrides = text.contains('with overrides') ||
+        text.contains('include overrides') ||
+        text.contains('keep overrides');
+    final name = _extractDuplicateName(text);
+
+    if (name == null || name.isEmpty) {
+      _respondWithRC(context, 'What name should I use for the duplicate?');
+      _showDuplicatePatternWizard(context);
+      return;
+    }
+
+    roster.saveRosterSnapshot(
+      name: name,
+      includeStaffNames: includeStaff,
+      includeOverrides: includeOverrides,
+    );
+    _respondWithRC(
+      context,
+      'Saved duplicate "$name". Staff: ${includeStaff ? 'kept' : 'not included'}, '
+      'Changes: ${includeOverrides ? 'kept' : 'not included'}.',
+    );
+  }
+
+  void _showDuplicatePatternWizard(BuildContext context) {
+    final nameController = TextEditingController();
+    bool includeStaff = true;
+    bool includeOverrides = false;
+    showDialog(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setState) {
+          return AlertDialog(
+            title: const Text('Duplicate Pattern'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                SafeTextField(
+                  controller: nameController,
+                  decoration: const InputDecoration(
+                    labelText: 'Duplicate name',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                SwitchListTile(
+                  title: const Text('Include staff names'),
+                  value: includeStaff,
+                  onChanged: (value) => setState(() => includeStaff = value),
+                ),
+                SwitchListTile(
+                  title: const Text('Include changes'),
+                  value: includeOverrides,
+                  onChanged: (value) => setState(() => includeOverrides = value),
+                ),
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed: () {
+                  final name = nameController.text.trim();
+                  if (name.isEmpty) return;
+                  ref.read(rosterProvider).saveRosterSnapshot(
+                        name: name,
+                        includeStaffNames: includeStaff,
+                        includeOverrides: includeOverrides,
+                      );
+                  Navigator.pop(context);
+                  _respondWithRC(context, 'Duplicate saved as "$name".');
+                },
+                child: const Text('Save'),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
   String _normalizeCommand(String raw) {
-    final lower = raw.toLowerCase();
+    var lower = raw.toLowerCase();
+    lower = _normalizeOrdinalText(lower);
     final cleaned = lower.replaceAll(RegExp(r'[^a-z0-9\\s]'), ' ');
     return cleaned.replaceAll(RegExp(r'\\s+'), ' ').trim();
+  }
+
+  String _normalizeOrdinalText(String text) {
+    var cleaned = text.replaceAll('-', ' ');
+    // Normalize numeric ordinals with space: "21 st" -> "21st"
+    cleaned = cleaned.replaceAllMapped(
+      RegExp(r'\\b(\\d{1,2})\\s+(st|nd|rd|th)\\b'),
+      (m) => '${m[1]}${m[2]}',
+    );
+
+    final unitOrdinals = <String, int>{
+      'first': 1,
+      'second': 2,
+      'third': 3,
+      'fourth': 4,
+      'fifth': 5,
+      'sixth': 6,
+      'seventh': 7,
+      'eighth': 8,
+      'ninth': 9,
+    };
+    final teenOrdinals = <String, int>{
+      'tenth': 10,
+      'eleventh': 11,
+      'twelfth': 12,
+      'thirteenth': 13,
+      'fourteenth': 14,
+      'fifteenth': 15,
+      'sixteenth': 16,
+      'seventeenth': 17,
+      'eighteenth': 18,
+      'nineteenth': 19,
+    };
+    final tensOrdinals = <String, int>{
+      'twentieth': 20,
+      'thirtieth': 30,
+      'fortieth': 40,
+      'fiftieth': 50,
+      'sixtieth': 60,
+      'seventieth': 70,
+      'eightieth': 80,
+      'ninetieth': 90,
+    };
+    final tens = <String, int>{
+      'twenty': 20,
+      'thirty': 30,
+      'forty': 40,
+      'fifty': 50,
+      'sixty': 60,
+      'seventy': 70,
+      'eighty': 80,
+      'ninety': 90,
+    };
+
+    // Replace compound ordinals like "twenty first" -> "21st"
+    cleaned = cleaned.replaceAllMapped(
+      RegExp(
+        r'\\b(twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)\\s+'
+        r'(first|second|third|fourth|fifth|sixth|seventh|eighth|ninth)\\b',
+      ),
+      (m) {
+        final value = (tens[m[1]] ?? 0) + (unitOrdinals[m[2]] ?? 0);
+        return _toOrdinal(value);
+      },
+    );
+
+    // Replace single-word ordinals
+    for (final entry in unitOrdinals.entries) {
+      cleaned = cleaned.replaceAllMapped(
+        RegExp('\\b${entry.key}\\b'),
+        (_) => _toOrdinal(entry.value),
+      );
+    }
+    for (final entry in teenOrdinals.entries) {
+      cleaned = cleaned.replaceAllMapped(
+        RegExp('\\b${entry.key}\\b'),
+        (_) => _toOrdinal(entry.value),
+      );
+    }
+    for (final entry in tensOrdinals.entries) {
+      cleaned = cleaned.replaceAllMapped(
+        RegExp('\\b${entry.key}\\b'),
+        (_) => _toOrdinal(entry.value),
+      );
+    }
+
+    return cleaned;
+  }
+
+  String _toOrdinal(int value) {
+    if (value % 100 >= 11 && value % 100 <= 13) {
+      return '${value}th';
+    }
+    switch (value % 10) {
+      case 1:
+        return '${value}st';
+      case 2:
+        return '${value}nd';
+      case 3:
+        return '${value}rd';
+      default:
+        return '${value}th';
+    }
+  }
+
+  List<String> _splitIntoClauses(String raw) {
+    final cleaned = raw.trim();
+    if (cleaned.isEmpty) return [];
+    if (_isMathLikeSentence(cleaned)) {
+      return [cleaned];
+    }
+    return cleaned
+        .split(RegExp(r'\\s*(?:;|\\band then\\b|\\bthen\\b|\\balso\\b|\\bplus\\b)\\s*',
+            caseSensitive: false))
+        .map((s) => s.trim())
+        .where((s) => s.isNotEmpty)
+        .toList();
+  }
+
+  bool _isMathLikeSentence(String text) {
+    final lowered = text.toLowerCase();
+    final hasDigit = RegExp(r'\\d').hasMatch(lowered);
+    final hasOp = RegExp(r'[+*/%\\-]').hasMatch(lowered) ||
+        _containsAny(lowered.split(' '), [
+          'plus',
+          'minus',
+          'times',
+          'multiplied',
+          'divided',
+          'over',
+        ]);
+    if (!hasDigit || !hasOp) return false;
+    // If it mentions roster keywords or staff names, treat as chained query instead.
+    if (lowered.contains('shift') ||
+        lowered.contains('roster') ||
+        lowered.contains('staff') ||
+        lowered.contains('rest')) {
+      return false;
+    }
+    return true;
   }
 
   bool _containsAny(List<String> tokens, List<String> keywords) {
     for (final keyword in keywords) {
       if (tokens.contains(keyword)) return true;
     }
+    return false;
+  }
+
+  int _maxDistanceForToken(String token) {
+    final length = token.length;
+    if (length <= 3) return 0;
+    if (length <= 5) return 1;
+    if (length <= 7) return 2;
+    return 3;
+  }
+
+  bool _containsAnyFuzzy(List<String> tokens, List<String> keywords) {
+    for (final keyword in keywords) {
+      if (tokens.contains(keyword)) return true;
+      final maxDistance = _maxDistanceForToken(keyword);
+      for (final token in tokens) {
+        if (token.length < 2) continue;
+        if (_levenshtein(token, keyword) <= maxDistance) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  bool _isQuestionLike(String text, List<String> tokens) {
+    if (text.contains('?')) return true;
+    if (_containsAnyFuzzy(tokens, ['what', 'who', 'when', 'where', 'how'])) {
+      return true;
+    }
+    return false;
+  }
+
+  bool _isPanToDateIntent(String text, List<String> tokens) {
+    final hasNav = _containsAnyFuzzy(tokens, [
+      'go',
+      'goto',
+      'jump',
+      'show',
+      'scroll',
+      'pan',
+      'move',
+      'navigate',
+      'open',
+      'view',
+    ]);
+    if (!hasNav) return false;
+    if (_containsAnyFuzzy(tokens, ['today', 'tomorrow', 'yesterday'])) {
+      return true;
+    }
+    if (_extractAllDatesFromText(text).isNotEmpty) return true;
+    if (_extractMonthTarget(text) != null) return true;
+    return false;
+  }
+
+  bool _isAccessCodeIntent(String text, List<String> tokens) {
+    if (text.contains('access code') ||
+        text.contains('share code') ||
+        text.contains('shared code') ||
+        text.contains('guest code') ||
+        text.contains('viewer code')) {
+      return true;
+    }
+    if (_containsAnyFuzzy(tokens, ['code']) &&
+        _containsAnyFuzzy(tokens, ['share', 'access', 'guest', 'viewer'])) {
+      return true;
+    }
+    return false;
+  }
+
+  bool _isDuplicatePatternIntent(String text, List<String> tokens) {
+    if (text.contains('duplicate pattern') ||
+        text.contains('copy pattern') ||
+        text.contains('duplicate roster') ||
+        text.contains('copy roster') ||
+        text.contains('save snapshot') ||
+        text.contains('save copy')) {
+      return true;
+    }
+    if (_containsAnyFuzzy(tokens, ['duplicate', 'copy', 'snapshot']) &&
+        _containsAnyFuzzy(tokens, ['pattern', 'roster'])) {
+      return true;
+    }
+    return false;
+  }
+
+  String? _extractDuplicateName(String text) {
+    final match = RegExp(r'(?:named|name|as)\\s+([a-z0-9 _-]{3,40})')
+        .firstMatch(text.toLowerCase());
+    if (match != null) {
+      return match.group(1)?.trim();
+    }
+    return null;
+  }
+
+  String? _extractCustomCodeFromText(String text) {
+    final lowered = text.toLowerCase();
+    final match = RegExp(
+      r'(?:custom|access|share|guest)?\\s*code\\s*[:=]?\\s*([a-z0-9_-]{4,24})',
+    ).firstMatch(lowered);
+    if (match != null) {
+      return match.group(1)?.toUpperCase();
+    }
+    return null;
+  }
+
+  List<String> _extractSuggestionsFromError(Object error) {
+    final raw = error.toString();
+    final listMatch = RegExp(r'\\[([^\\]]+)\\]').firstMatch(raw);
+    if (listMatch == null) return const [];
+    final items = listMatch.group(1)!.split(',');
+    return items
+        .map((item) => item.replaceAll(RegExp(r'[^a-zA-Z0-9_-]'), '').trim())
+        .where((item) => item.isNotEmpty)
+        .toList();
+  }
+
+  DateTime? _extractMonthTarget(String text) {
+    final lower = text.toLowerCase();
+    final now = DateTime.now();
+    if (lower.contains('this month')) {
+      return DateTime(now.year, now.month, 1);
+    }
+    if (lower.contains('next month')) {
+      final next = DateTime(now.year, now.month + 1, 1);
+      return next;
+    }
+    if (lower.contains('last month') || lower.contains('previous month')) {
+      final prev = DateTime(now.year, now.month - 1, 1);
+      return prev;
+    }
+    final monthNames = {
+      'jan': 1,
+      'feb': 2,
+      'mar': 3,
+      'apr': 4,
+      'may': 5,
+      'jun': 6,
+      'jul': 7,
+      'aug': 8,
+      'sep': 9,
+      'oct': 10,
+      'nov': 11,
+      'dec': 12,
+    };
+    final match = RegExp(
+      r'\\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\\b(?:\\s*(\\d{4}))?',
+    ).firstMatch(lower);
+    if (match != null) {
+      final month = monthNames[match.group(1)!]!;
+      final year =
+          match.group(2) != null ? int.parse(match.group(2)!) : now.year;
+      return DateTime(year, month, 1);
+    }
+    return null;
+  }
+
+  bool _isCancelLeaveIntent(String text, List<String> tokens) {
+    if (text.contains('cancel leave') ||
+        text.contains('remove leave') ||
+        text.contains('cancel annual') ||
+        text.contains('remove annual') ||
+        text.contains('cancel al') ||
+        text.contains('clear leave') ||
+        text.contains('unbook leave') ||
+        text.contains('delete leave') ||
+        text.contains('revoke leave') ||
+        text.contains('undo leave') ||
+        text.contains('dont set leave') ||
+        text.contains('do not set leave') ||
+        text.contains("don't set leave") ||
+        text.contains('dont book leave') ||
+        text.contains('do not book leave') ||
+        text.contains("don't book leave")) {
+      return true;
+    }
+    final hasCancel =
+        _containsAnyFuzzy(tokens, ['cancel', 'remove', 'clear', 'undo']);
+    final hasLeave = _containsAnyFuzzy(tokens, [
+      'leave',
+      'annual',
+      'al',
+      'vacation',
+    ]);
+    return hasCancel && hasLeave;
+  }
+
+  bool _isSetLeaveIntent(String text, List<String> tokens) {
+    if (text.contains('annual leave') ||
+        text.contains('book leave') ||
+        text.contains('set leave') ||
+        text.contains('add leave') ||
+        text.contains('request leave') ||
+        text.contains('apply leave') ||
+        text.contains('vacation') ||
+        text.contains('holiday')) {
+      return true;
+    }
+    final hasLeave = _containsAnyFuzzy(tokens, ['leave', 'annual', 'al']);
+    final hasSet = _containsAnyFuzzy(tokens, [
+      'set',
+      'book',
+      'add',
+      'apply',
+      'request',
+      'assign',
+    ]);
+    return hasLeave && hasSet;
+  }
+
+  String _inferLeaveTypeForSet(String raw) {
+    final text = raw.toLowerCase();
+    if (text.contains('sick') || text.contains('ill')) return 'sick';
+    if (text.contains('secondment')) return 'secondment';
+    if (text.contains('annual') ||
+        text.contains('al') ||
+        text.contains('vacation') ||
+        text.contains('holiday')) {
+      return 'annual';
+    }
+    return 'leave';
+  }
+
+  bool _shouldUseContextStaff(String text, List<String> tokens) {
+    if (_containsAny(tokens, ['him', 'her', 'them', 'they', 'their', 'that'])) {
+      return true;
+    }
+    if (text.contains('same person') || text.contains('that person')) {
+      return true;
+    }
+    if (text.contains('again')) return true;
+    return false;
+  }
+
+  bool _shouldUseContextDate(String text, List<String> tokens) {
+    if (_containsAny(tokens, ['same', 'that', 'there', 'then'])) return true;
+    if (text.contains('same day') ||
+        text.contains('same date') ||
+        text.contains('that day') ||
+        text.contains('that date')) {
+      return true;
+    }
+    return false;
+  }
+
+  bool _shouldUseContextShift(String text, List<String> tokens) {
+    if (text.contains('same shift') || text.contains('that shift')) {
+      return true;
+    }
+    if (_containsAny(tokens, ['same'])) return true;
     return false;
   }
 
@@ -1051,8 +3394,17 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
     List<String> tokens,
     RosterNotifier roster,
   ) {
+    if (_isQuestionLike(text, tokens) || _isShiftQueryIntent(text, tokens)) {
+      return false;
+    }
     final staffNames = _matchAllStaffNames(text, roster);
-    final dates = _extractAllDatesFromText(text);
+    final monthFirst = _isMonthFirst(ref.read(settingsProvider));
+    final dates = _collectDates(
+      text: text,
+      raw: raw,
+      weekStartDay: roster.weekStartDay,
+      monthFirst: monthFirst,
+    );
     final shift = _extractShiftCode(text);
     final hasSwap = _isSwapIntent(text, tokens, roster);
     final mentionsEvent =
@@ -1074,10 +3426,23 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
 
     if (staffNames.isNotEmpty && dates.isNotEmpty && shift == null) {
       final dateLabel = DateFormat('MMM d').format(dates.first);
+      final baseShift = roster.getBaseShiftForDate(
+        staffNames.first,
+        dates.first,
+      );
+      final baseLabel =
+          baseShift.isEmpty ? 'no base shift' : _shiftLabel(baseShift);
       _respondWithRC(
         context,
         'What should I do for ${staffNames.first} on $dateLabel? '
-        'Say: set shift, add leave, or swap.',
+        'Base pattern is $baseLabel. Say: set shift, add leave, or swap.',
+      );
+      _contextState.remember(
+        action: 'await_shift_for_change',
+        pendingStaff: staffNames.first,
+        pendingDates:
+            dates.map((d) => DateTime(d.year, d.month, d.day)).toList(),
+        pendingCreatedAt: DateTime.now(),
       );
       return true;
     }
@@ -1103,6 +3468,13 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
         context,
         'Which staff member should I set to ${_shiftLabelWithCode(shift)}?',
       );
+      _contextState.remember(
+        action: 'await_staff_for_change',
+        pendingShift: shift,
+        pendingDates:
+            dates.map((d) => DateTime(d.year, d.month, d.day)).toList(),
+        pendingCreatedAt: DateTime.now(),
+      );
       return true;
     }
 
@@ -1114,6 +3486,66 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
       return true;
     }
 
+    return false;
+  }
+
+  bool _tryBuildClarifyingQuestion(
+    BuildContext context,
+    String raw,
+    RosterNotifier roster,
+  ) {
+    final text = _normalizeCommand(raw);
+    final tokens = text.split(' ');
+    final staffMatch = _matchStaffName(text, roster);
+    final shiftMatch = _extractShiftCode(text);
+    final dateRange = _extractDateRangeFromText(text, roster.weekStartDay);
+    final isQuestion = _isQuestionLike(text, tokens);
+    final wantsEvent =
+        _containsAny(tokens, ['event', 'holiday', 'festival', 'payday']);
+    final wantsSwap = _isSwapIntent(text, tokens, roster);
+    final actionVerbPresent = _containsAnyFuzzy(tokens, [
+      'set',
+      'assign',
+      'change',
+      'override',
+      'swap',
+      'add',
+      'remove',
+      'delete',
+      'cancel',
+      'create',
+      'generate',
+      'build',
+      'make',
+    ]);
+
+    if (isQuestion) return false;
+    if (wantsSwap && (staffMatch == null || dateRange == null)) {
+      _respondWithRC(context, 'Tell me the two staff names and the date to swap.');
+      return true;
+    }
+    if (wantsEvent && actionVerbPresent && dateRange == null) {
+      _respondWithRC(context, 'Which date should I add the event to?');
+      return true;
+    }
+    if (actionVerbPresent) {
+      if (staffMatch == null && shiftMatch == null) {
+        _respondWithRC(context, 'Who should I update and what shift?');
+        return true;
+      }
+      if (staffMatch != null && shiftMatch == null) {
+        _respondWithRC(context, 'Which shift should I set for $staffMatch?');
+        return true;
+      }
+      if (staffMatch == null && shiftMatch != null) {
+        _respondWithRC(context, 'Which staff member should I update?');
+        return true;
+      }
+      if (dateRange == null) {
+        _respondWithRC(context, 'Which date should I apply that change?');
+        return true;
+      }
+    }
     return false;
   }
 
@@ -1188,6 +3620,282 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
     }
   }
 
+  bool _handleMathQuery(BuildContext context, String raw) {
+    final lower = raw.toLowerCase();
+    if (!lower.contains(RegExp(r'\\d')) &&
+        !_containsAny(lower.split(' '), [
+          'calculate',
+          'math',
+          'sum',
+          'plus',
+          'minus',
+          'times',
+          'multiplied',
+          'divided',
+        ])) {
+      return false;
+    }
+    final expr = _extractMathExpression(lower);
+    if (expr == null || expr.trim().isEmpty) return false;
+    try {
+      final result = _evaluateMathExpression(expr);
+      _respondWithRC(context, '$expr = $result');
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  bool _handleNameQuery(BuildContext context, String text) {
+    if (text.contains('your name') ||
+        text.contains('who are you') ||
+        text.contains('what are you called') ||
+        text.contains('what is your name')) {
+      _respondWithRC(context, "I'm RC (Roster Champion).");
+      return true;
+    }
+    return false;
+  }
+
+  bool _handleNextRestDayQuery(
+    BuildContext context,
+    String text,
+    RosterNotifier roster,
+  ) {
+    if (!text.contains('next') ||
+        !(text.contains('rest') || text.contains('off'))) {
+      return false;
+    }
+    if (!(text.contains('when') || text.contains('next time'))) {
+      return false;
+    }
+    final staff = _matchStaffName(text, roster);
+    if (staff == null) {
+      _respondWithRC(context, 'Which staff member should I check?');
+      return true;
+    }
+    final limitRange = _extractDateRangeFromText(text, roster.weekStartDay);
+    final daysAhead = _extractDurationDays(text) ?? 365;
+    final start = DateTime.now();
+    final end = limitRange?.end ?? start.add(Duration(days: daysAhead));
+    final maxCount = _extractCountHint(text) ?? 1;
+    final results = <DateTime>[];
+    var cursor = start;
+    while (!cursor.isAfter(end) && results.length < maxCount) {
+      final shift = roster.getShiftForDate(staff, cursor).toUpperCase();
+      if (shift == 'R' || shift == 'OFF') {
+        results.add(cursor);
+      }
+      cursor = cursor.add(const Duration(days: 1));
+    }
+    if (results.isEmpty) {
+      _respondWithRC(
+        context,
+        'No rest day found for $staff in the selected range.',
+      );
+      return true;
+    }
+    final label = results
+        .map((d) => DateFormat('EEE, MMM d').format(d))
+        .join(', ');
+    _respondWithRC(
+      context,
+      'Next ${results.length} rest day(s) for $staff: $label.',
+    );
+    return true;
+  }
+
+  int? _extractCountHint(String text) {
+    final match = RegExp(r'next\\s+(\\d+)').firstMatch(text);
+    if (match != null) {
+      return int.tryParse(match.group(1)!);
+    }
+    return null;
+  }
+
+  bool _handleRosterMathQuery(
+    BuildContext context,
+    String raw,
+    String normalized,
+    RosterNotifier roster,
+  ) {
+    if (!normalized.contains('hour') &&
+        !normalized.contains('hours') &&
+        !normalized.contains('total') &&
+        !normalized.contains('count') &&
+        !normalized.contains('compare')) {
+      return false;
+    }
+    final range = _extractDateRangeFromText(normalized, roster.weekStartDay);
+    if (range == null) return false;
+
+    final staffMatches = _matchAllStaffNames(normalized, roster);
+    if (staffMatches.isEmpty) return false;
+
+    final settings = ref.read(settingsProvider);
+    final hourMap = settings.shiftHourMap;
+
+    final summaries = <String>[];
+    for (final staff in staffMatches) {
+      final shifts = <String, int>{};
+      var totalHours = 0.0;
+      var date = range.start;
+      while (!date.isAfter(range.end)) {
+        final shift = roster.getShiftForDate(staff, date);
+        if (shift.isNotEmpty && shift != 'OFF') {
+          shifts[shift] = (shifts[shift] ?? 0) + 1;
+          totalHours += _estimateShiftHours(shift, hourMap);
+        }
+        date = date.add(const Duration(days: 1));
+      }
+      final parts = shifts.entries
+          .map((e) => '${e.value} ${_shiftLabel(e.key)}')
+          .join(', ');
+      summaries.add(
+        '$staff: $parts (${totalHours.toStringAsFixed(1)} hours)',
+      );
+    }
+
+    final label =
+        '${DateFormat('MMM d').format(range.start)} to ${DateFormat('MMM d').format(range.end)}';
+    _respondWithRC(
+      context,
+      '${summaries.join(' | ')} for $label.',
+    );
+    return true;
+  }
+
+  double _estimateShiftHours(String shift, Map<String, double> hourMap) {
+    final normalized = shift.toUpperCase();
+    if (hourMap.containsKey(normalized)) {
+      return hourMap[normalized] ?? 0.0;
+    }
+    if (normalized.contains('12')) return 12.0;
+    if (normalized == 'OFF' || normalized == 'R') return 0.0;
+    return 8.0;
+  }
+
+  String? _extractMathExpression(String text) {
+    var cleaned = text
+        .replaceAll('what is', '')
+        .replaceAll('calculate', '')
+        .replaceAll('math', '')
+        .replaceAll('=', '')
+        .trim();
+    cleaned = cleaned
+        .replaceAll('plus', '+')
+        .replaceAll('minus', '-')
+        .replaceAll('times', '*')
+        .replaceAll('x', '*')
+        .replaceAll('multiplied by', '*')
+        .replaceAll('divided by', '/')
+        .replaceAll('over', '/')
+        .replaceAll('percent', '%')
+        .replaceAll(RegExp(r'[^0-9.+*/%() -]'), ' ')
+        .replaceAll(RegExp(r'\\s+'), ' ')
+        .trim();
+    return cleaned;
+  }
+
+  String _evaluateMathExpression(String expr) {
+    final tokens = _tokenizeMath(expr);
+    final output = <String>[];
+    final ops = <String>[];
+    final precedence = {
+      '+': 1,
+      '-': 1,
+      '*': 2,
+      '/': 2,
+      '%': 2,
+    };
+    for (final token in tokens) {
+      if (double.tryParse(token) != null) {
+        output.add(token);
+      } else if (token == '(') {
+        ops.add(token);
+      } else if (token == ')') {
+        while (ops.isNotEmpty && ops.last != '(') {
+          output.add(ops.removeLast());
+        }
+        if (ops.isNotEmpty && ops.last == '(') {
+          ops.removeLast();
+        }
+      } else if (precedence.containsKey(token)) {
+        while (ops.isNotEmpty &&
+            precedence.containsKey(ops.last) &&
+            precedence[ops.last]! >= precedence[token]!) {
+          output.add(ops.removeLast());
+        }
+        ops.add(token);
+      }
+    }
+    while (ops.isNotEmpty) {
+      output.add(ops.removeLast());
+    }
+    final stack = <double>[];
+    for (final token in output) {
+      final value = double.tryParse(token);
+      if (value != null) {
+        stack.add(value);
+        continue;
+      }
+      if (stack.length < 2) {
+        throw StateError('Invalid expression');
+      }
+      final b = stack.removeLast();
+      final a = stack.removeLast();
+      switch (token) {
+        case '+':
+          stack.add(a + b);
+          break;
+        case '-':
+          stack.add(a - b);
+          break;
+        case '*':
+          stack.add(a * b);
+          break;
+        case '/':
+          stack.add(b == 0 ? double.nan : a / b);
+          break;
+        case '%':
+          stack.add(b == 0 ? double.nan : a % b);
+          break;
+      }
+    }
+    if (stack.isEmpty) {
+      throw StateError('Invalid expression');
+    }
+    final result = stack.single;
+    if (result.isNaN || result.isInfinite) return 'undefined';
+    if ((result - result.round()).abs() < 0.00001) {
+      return result.round().toString();
+    }
+    return result.toStringAsFixed(2);
+  }
+
+  List<String> _tokenizeMath(String expr) {
+    final tokens = <String>[];
+    final buffer = StringBuffer();
+    for (var i = 0; i < expr.length; i++) {
+      final ch = expr[i];
+      if ('0123456789.'.contains(ch)) {
+        buffer.write(ch);
+        continue;
+      }
+      if (buffer.isNotEmpty) {
+        tokens.add(buffer.toString());
+        buffer.clear();
+      }
+      if ('+-*/()%'.contains(ch)) {
+        tokens.add(ch);
+      }
+    }
+    if (buffer.isNotEmpty) {
+      tokens.add(buffer.toString());
+    }
+    return tokens;
+  }
+
   void _handleSwapCommand(BuildContext context, String raw) {
     final roster = ref.read(rosterProvider);
     if (roster.readOnly) {
@@ -1196,11 +3904,11 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
       );
       return;
     }
-    final text = raw.toLowerCase();
-    final staffNames = _matchAllStaffNames(text, roster);
-    final range = _extractDateRangeFromText(text, roster.weekStartDay);
-    final weekIndex = _extractPatternWeekIndex(text);
-    final endDate = _extractSwapEndDate(text);
+    final normalized = _normalizeCommand(raw);
+    final staffNames = _matchAllStaffNames(normalized, roster);
+    final range = _extractDateRangeFromText(normalized, roster.weekStartDay);
+    final weekIndex = _extractPatternWeekIndex(normalized);
+    final endDate = _extractSwapEndDate(normalized);
     _DateRange? effectiveRange = range;
     if (effectiveRange == null && weekIndex != null) {
       final start = _nextPatternWeekStart(
@@ -1218,12 +3926,37 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
       }
     }
     if (effectiveRange == null) {
+      final resolved = _resolveDatesForQuery(
+        normalized,
+        raw,
+        roster.weekStartDay,
+        null,
+        roster,
+      );
+      if (resolved != null && resolved.dates.isNotEmpty) {
+        final sorted = resolved.dates.toList()..sort();
+        final start = sorted.first;
+        final end = sorted.last;
+        effectiveRange = _DateRange(
+          start: start,
+          end: end,
+          explicitStart: true,
+          explicitEnd: sorted.length > 1,
+        );
+      }
+    }
+    if (effectiveRange == null) {
+      _contextState.remember(
+        action: 'await_date_for_swap',
+        pendingRaw: raw,
+        pendingCreatedAt: DateTime.now(),
+      );
       _respondWithRC(context, 'Which date should the swap happen?');
       return;
     }
 
     if (staffNames.isEmpty) {
-      final guess = _guessStaffName(text, roster);
+      final guess = _guessStaffName(normalized, roster);
       if (guess != null) {
         staffNames.add(guess);
       }
@@ -1231,6 +3964,13 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
 
     if (staffNames.isEmpty) {
       _respondWithRC(context, 'Which staff member needs the swap?');
+      return;
+    }
+    if (staffNames.length > 2) {
+      _respondWithRC(
+        context,
+        'Which two staff are swapping? Please name two people.',
+      );
       return;
     }
 
@@ -1257,11 +3997,11 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
       return;
     }
 
-    final isRecurring = text.contains('pattern') ||
-        text.contains('every') ||
-        text.contains('each') ||
-        text.contains('rest of year') ||
-        text.contains('months') ||
+    final isRecurring = normalized.contains('pattern') ||
+        normalized.contains('every') ||
+        normalized.contains('each') ||
+        normalized.contains('rest of year') ||
+        normalized.contains('months') ||
         weekIndex != null;
     if (isRecurring) {
       final fromShift = roster.getShiftForDate(fromPerson, effectiveRange.start);
@@ -1293,22 +4033,44 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
       return;
     }
 
-    final applied = effectiveRange.start == effectiveRange.end
-        ? (roster.applySwapForDate(
-                fromPerson: fromPerson,
-                toPerson: toPerson,
-                date: effectiveRange.start,
-                reason: 'AI swap request') ==
-            true)
-            ? 1
-            : 0
-        : roster.applySwapRange(
-            fromPerson: fromPerson,
-            toPerson: toPerson,
-            startDate: effectiveRange.start,
-            endDate: effectiveRange.end,
-            reason: 'AI swap request',
-          );
+    int applied = 0;
+    final resolvedDates = _resolveDatesForQuery(
+      normalized,
+      raw,
+      roster.weekStartDay,
+      null,
+      roster,
+    );
+    final datesList = resolvedDates?.dates ?? [];
+    if (datesList.length > 1 && !isRecurring) {
+      for (final date in datesList) {
+        if (roster.applySwapForDate(
+          fromPerson: fromPerson,
+          toPerson: toPerson,
+          date: date,
+          reason: 'AI swap request',
+        )) {
+          applied++;
+        }
+      }
+    } else if (effectiveRange.start == effectiveRange.end) {
+      applied = roster.applySwapForDate(
+        fromPerson: fromPerson,
+        toPerson: toPerson,
+        date: effectiveRange.start,
+        reason: 'AI swap request',
+      )
+          ? 1
+          : 0;
+    } else {
+      applied = roster.applySwapRange(
+        fromPerson: fromPerson,
+        toPerson: toPerson,
+        startDate: effectiveRange.start,
+        endDate: effectiveRange.end,
+        reason: 'AI swap request',
+      );
+    }
 
     if (applied == 0) {
       _respondWithRC(
@@ -1317,9 +4079,12 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
       );
       return;
     }
-    if (!text.contains('no debt') &&
-        !text.contains('even') &&
-        !text.contains('swap back')) {
+    final debtTokens = normalized.split(' ');
+    final skipDebt = normalized.contains('no debt') ||
+        normalized.contains('even') ||
+        normalized.contains('swap back') ||
+        _containsAnyFuzzy(debtTokens, ['nodebt', 'no-debt', 'even']);
+    if (!skipDebt) {
       roster.addSwapDebt(
         fromPerson: fromPerson,
         toPerson: toPerson,
@@ -1455,6 +4220,7 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
 
   List<String> _matchAllStaffNames(String text, RosterNotifier roster) {
     final lowered = text.toLowerCase();
+    final tokens = lowered.split(' ').where((t) => t.isNotEmpty).toList();
     final matches = <MapEntry<String, int>>[];
     for (final staff in roster.staffMembers) {
       final nameLower = staff.name.toLowerCase();
@@ -1463,8 +4229,59 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
         matches.add(MapEntry(staff.name, index));
       }
     }
+    if (matches.isEmpty) {
+      for (final staff in roster.staffMembers) {
+        final nameLower = staff.name.toLowerCase();
+        final parts = nameLower.split(' ').where((t) => t.isNotEmpty).toList();
+        int? bestIndex;
+        for (int tokenIndex = 0; tokenIndex < tokens.length; tokenIndex++) {
+          final token = tokens[tokenIndex];
+          if (token.length < 2) continue;
+          for (final part in parts) {
+            if (part.length < 2) continue;
+            final maxDistance = _maxDistanceForToken(part);
+            if (_levenshtein(token, part) <= maxDistance) {
+              bestIndex ??= tokenIndex;
+            }
+          }
+        }
+        if (bestIndex != null) {
+          matches.add(MapEntry(staff.name, bestIndex));
+        }
+      }
+    }
     matches.sort((a, b) => a.value.compareTo(b.value));
     return matches.map((e) => e.key).toList();
+  }
+
+  int _estimateCoverageNeed(
+    RosterNotifier roster,
+    DateTime date,
+    String? shift,
+  ) {
+    final normalized = shift?.toUpperCase();
+    if (normalized == null) {
+      return (roster.staffMembers.length / 4).ceil().clamp(1, 999);
+    }
+    if (normalized == 'N' || normalized == 'N12') {
+      return (roster.staffMembers.length / 4).ceil().clamp(1, 999);
+    }
+    if (normalized == 'D' || normalized == 'D12' || normalized == 'E' || normalized == 'L') {
+      return (roster.staffMembers.length / 3).ceil().clamp(1, 999);
+    }
+    return (roster.staffMembers.length / 4).ceil().clamp(1, 999);
+  }
+
+  String? _normalizeShiftForCoverage(String? code) {
+    if (code == null) return null;
+    final upper = code.toUpperCase();
+    if (upper == 'D' || upper == 'D12' || upper == 'E' || upper == 'L') {
+      return 'D';
+    }
+    if (upper == 'N' || upper == 'N12') {
+      return 'N';
+    }
+    return upper;
   }
 
   String? _guessStaffName(String text, RosterNotifier roster) {
@@ -1615,6 +4432,7 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
       );
       return;
     }
+    _contextState.remember(staff: staffName, shift: shift);
 
     final dates = _extractDatesForOverride(
       raw,
@@ -1634,23 +4452,103 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
       return;
     }
 
+    _confirmAndApplyChange(context, staffName, shift, dates);
+  }
+
+  void _confirmAndApplyChange(
+    BuildContext context,
+    String staffName,
+    String shift,
+    List<DateTime> dates,
+  ) {
+    final roster = ref.read(rosterProvider);
+    if (dates.isEmpty) return;
     if (dates.length == 1) {
+      final targetDate = dates.first;
+      final baseShift = roster.getBaseShiftForDate(staffName, targetDate);
+      final prevOverride = roster.overrides.firstWhere(
+        (o) =>
+            o.personName == staffName &&
+            o.date.year == targetDate.year &&
+            o.date.month == targetDate.month &&
+            o.date.day == targetDate.day,
+        orElse: () => models.Override(
+          id: '',
+          personName: staffName,
+          date: targetDate,
+          shift: '',
+          reason: '',
+          createdAt: DateTime.now(),
+        ),
+      );
+      if (shift == baseShift && prevOverride.id.isEmpty) {
+        _respondWithRC(
+          context,
+          '${staffName} already has ${_shiftLabel(shift)} on '
+              '${DateFormat('MMM d, yyyy').format(targetDate)}.',
+        );
+        return;
+      }
+      if (shift == baseShift && prevOverride.id.isNotEmpty) {
+        _confirmAction(
+          context,
+          title: 'Clear change',
+          message:
+              'This matches the base pattern. Clear the existing change instead?',
+          onConfirm: () {
+            roster.removeOverridesForDates(
+              people: [staffName],
+              dates: [targetDate],
+            );
+            _respondWithRC(context, 'Change cleared.');
+          },
+        );
+        return;
+      }
       _confirmAction(
         context,
         title: 'Set shift',
         message:
-            'Set $staffName to ${_shiftLabelWithCode(shift)} on ${DateFormat('MMM d, yyyy').format(dates.first)}?',
+            'Set $staffName to ${_shiftLabelWithCode(shift)} on ${DateFormat('MMM d, yyyy').format(targetDate)}?',
         onConfirm: () {
           final warning = _coverageWarningForChange(
             roster,
             staffName,
-            dates.first,
+            targetDate,
             shift,
           );
-          roster.setOverride(staffName, dates.first, shift, 'AI command');
+          final prevShift = prevOverride.id.isEmpty ? null : prevOverride.shift;
+          roster.setOverride(staffName, targetDate, shift, 'RC change');
           if (warning != null) {
             _respondWithRC(context, warning);
           }
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: const Text('Change applied.'),
+              action: SnackBarAction(
+                label: 'Undo',
+                onPressed: () {
+                  final base = roster.getBaseShiftForDate(
+                    staffName,
+                    targetDate,
+                  );
+                  if (prevShift == null || prevShift == base) {
+                    roster.removeOverridesForDates(
+                      people: [staffName],
+                      dates: [targetDate],
+                    );
+                  } else {
+                    roster.setOverride(
+                      staffName,
+                      targetDate,
+                      prevShift,
+                      'Undo change',
+                    );
+                  }
+                },
+              ),
+            ),
+          );
         },
       );
       return;
@@ -1668,6 +4566,7 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
       message:
           'Set $staffName to ${_shiftLabelWithCode(shift)} on ${sorted.length} dates ($preview$suffix)?',
       onConfirm: () {
+        final prevStates = <Map<String, dynamic>>[];
         for (final date in sorted) {
           final warning = _coverageWarningForChange(
             roster,
@@ -1675,13 +4574,1048 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
             date,
             shift,
           );
-          roster.setOverride(staffName, date, shift, 'AI command');
+          final prevOverride = roster.overrides.firstWhere(
+            (o) =>
+                o.personName == staffName &&
+                o.date.year == date.year &&
+                o.date.month == date.month &&
+                o.date.day == date.day,
+            orElse: () => models.Override(
+              id: '',
+              personName: staffName,
+              date: date,
+              shift: '',
+              reason: '',
+              createdAt: DateTime.now(),
+            ),
+          );
+          prevStates.add({
+            'date': date,
+            'shift': prevOverride.id.isEmpty ? null : prevOverride.shift,
+          });
+          roster.setOverride(staffName, date, shift, 'RC change');
           if (warning != null) {
             _respondWithRC(context, warning);
           }
         }
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: const Text('Changes applied.'),
+            action: SnackBarAction(
+              label: 'Undo',
+              onPressed: () {
+                for (final entry in prevStates) {
+                  final date = entry['date'] as DateTime;
+                  final prevShift = entry['shift'] as String?;
+                  final base = roster.getBaseShiftForDate(staffName, date);
+                  if (prevShift == null || prevShift == base) {
+                    roster.removeOverridesForDates(
+                      people: [staffName],
+                      dates: [date],
+                    );
+                  } else {
+                    roster.setOverride(
+                      staffName,
+                      date,
+                      prevShift,
+                      'Undo change',
+                    );
+                  }
+                }
+              },
+            ),
+          ),
+        );
       },
     );
+  }
+
+  void _confirmAndApplyBulkChange(
+    BuildContext context,
+    List<String> staffNames,
+    String shift,
+    List<DateTime> dates,
+  ) {
+    if (staffNames.isEmpty || dates.isEmpty) return;
+    final roster = ref.read(rosterProvider);
+    final sorted = dates.toList()..sort();
+    final preview = sorted
+        .take(5)
+        .map((d) => DateFormat('EEE d MMM').format(d))
+        .join(', ');
+    final suffix = sorted.length > 5 ? '...' : '';
+    _confirmAction(
+      context,
+      title: 'Set multiple shifts',
+      message:
+          'Set ${staffNames.join(', ')} to ${_shiftLabelWithCode(shift)} on ${sorted.length} dates '
+          '($preview$suffix)?',
+      onConfirm: () {
+        final prevStates = <Map<String, dynamic>>[];
+        for (final date in sorted) {
+          for (final staffName in staffNames) {
+            final prevOverride = roster.overrides.firstWhere(
+              (o) =>
+                  o.personName == staffName &&
+                  o.date.year == date.year &&
+                  o.date.month == date.month &&
+                  o.date.day == date.day,
+              orElse: () => models.Override(
+                id: '',
+                personName: staffName,
+                date: date,
+                shift: '',
+                reason: '',
+                createdAt: DateTime.now(),
+              ),
+            );
+            prevStates.add({
+              'name': staffName,
+              'date': date,
+              'shift': prevOverride.id.isEmpty ? null : prevOverride.shift,
+            });
+            roster.setOverride(staffName, date, shift, 'RC change');
+          }
+        }
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: const Text('Changes applied.'),
+            action: SnackBarAction(
+              label: 'Undo',
+              onPressed: () {
+                for (final entry in prevStates) {
+                  final name = entry['name'] as String;
+                  final date = entry['date'] as DateTime;
+                  final prevShift = entry['shift'] as String?;
+                  final base = roster.getBaseShiftForDate(name, date);
+                  if (prevShift == null || prevShift == base) {
+                    roster.removeOverridesForDates(
+                      people: [name],
+                      dates: [date],
+                    );
+                  } else {
+                    roster.setOverride(
+                      name,
+                      date,
+                      prevShift,
+                      'Undo change',
+                    );
+                  }
+                }
+              },
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  void _handleBulkOverrideCommand(
+    BuildContext context,
+    String raw,
+    List<String> staffNames,
+    String shift,
+  ) {
+    final roster = ref.read(rosterProvider);
+    if (roster.readOnly) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Read-only roster cannot be edited.')),
+      );
+      return;
+    }
+    final dates = _extractDatesForOverride(raw, roster.weekStartDay);
+    final range = _extractDateRangeFromText(raw, roster.weekStartDay);
+    if (dates.isEmpty && range == null) {
+      _respondWithRC(
+        context,
+        'Which dates should I apply ${_shiftLabelWithCode(shift)} for '
+        '${staffNames.join(', ')}?',
+      );
+      _showSetShiftWizard(
+        context,
+        initialShift: shift,
+      );
+      return;
+    }
+
+    if (range != null && (range.end.isAfter(range.start))) {
+      _confirmAction(
+        context,
+        title: 'Set bulk shifts',
+        message:
+            'Set ${staffNames.length} staff to ${_shiftLabelWithCode(shift)} from '
+            '${DateFormat('MMM d').format(range.start)} to ${DateFormat('MMM d').format(range.end)}?',
+        onConfirm: () {
+          final prevStates = <Map<String, dynamic>>[];
+          var cursor = DateTime(
+            range.start.year,
+            range.start.month,
+            range.start.day,
+          );
+          final end = DateTime(range.end.year, range.end.month, range.end.day);
+          while (!cursor.isAfter(end)) {
+            for (final name in staffNames) {
+              final prevOverride = roster.overrides.firstWhere(
+                (o) =>
+                    o.personName == name &&
+                    o.date.year == cursor.year &&
+                    o.date.month == cursor.month &&
+                    o.date.day == cursor.day,
+                orElse: () => models.Override(
+                  id: '',
+                  personName: name,
+                  date: cursor,
+                  shift: '',
+                  reason: '',
+                  createdAt: DateTime.now(),
+                ),
+              );
+              prevStates.add({
+                'name': name,
+                'date': cursor,
+                'shift': prevOverride.id.isEmpty ? null : prevOverride.shift,
+              });
+            }
+            cursor = cursor.add(const Duration(days: 1));
+          }
+          roster.addBulkOverridesAdvanced(
+            people: staffNames,
+            startDate: range.start,
+            endDate: range.end,
+            shift: shift,
+            reason: 'RC change',
+          );
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: const Text('Changes applied.'),
+              action: SnackBarAction(
+                label: 'Undo',
+                onPressed: () {
+                  for (final entry in prevStates) {
+                    final name = entry['name'] as String;
+                    final date = entry['date'] as DateTime;
+                    final prevShift = entry['shift'] as String?;
+                    final base = roster.getBaseShiftForDate(name, date);
+                    if (prevShift == null || prevShift == base) {
+                      roster.removeOverridesForDates(
+                        people: [name],
+                        dates: [date],
+                      );
+                    } else {
+                      roster.setOverride(
+                        name,
+                        date,
+                        prevShift,
+                        'Undo change',
+                      );
+                    }
+                  }
+                },
+              ),
+            ),
+          );
+        },
+      );
+      return;
+    }
+
+    final sorted = dates.toList()..sort();
+    final preview = sorted
+        .take(5)
+        .map((d) => DateFormat('EEE d MMM').format(d))
+        .join(', ');
+    final suffix = sorted.length > 5 ? '...' : '';
+    _confirmAction(
+      context,
+      title: 'Set multiple shifts',
+      message:
+          'Set ${staffNames.length} staff to ${_shiftLabelWithCode(shift)} on ${sorted.length} dates '
+          '($preview$suffix)?',
+      onConfirm: () {
+        final prevStates = <Map<String, dynamic>>[];
+        for (final date in sorted) {
+          for (final staffName in staffNames) {
+            final prevOverride = roster.overrides.firstWhere(
+              (o) =>
+                  o.personName == staffName &&
+                  o.date.year == date.year &&
+                  o.date.month == date.month &&
+                  o.date.day == date.day,
+              orElse: () => models.Override(
+                id: '',
+                personName: staffName,
+                date: date,
+                shift: '',
+                reason: '',
+                createdAt: DateTime.now(),
+              ),
+            );
+            prevStates.add({
+              'name': staffName,
+              'date': date,
+              'shift': prevOverride.id.isEmpty ? null : prevOverride.shift,
+            });
+            roster.setOverride(staffName, date, shift, 'RC change');
+          }
+        }
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: const Text('Changes applied.'),
+            action: SnackBarAction(
+              label: 'Undo',
+              onPressed: () {
+                for (final entry in prevStates) {
+                  final name = entry['name'] as String;
+                  final date = entry['date'] as DateTime;
+                  final prevShift = entry['shift'] as String?;
+                  final base = roster.getBaseShiftForDate(name, date);
+                  if (prevShift == null || prevShift == base) {
+                    roster.removeOverridesForDates(
+                      people: [name],
+                      dates: [date],
+                    );
+                  } else {
+                    roster.setOverride(
+                      name,
+                      date,
+                      prevShift,
+                      'Undo change',
+                    );
+                  }
+                }
+              },
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  void _handleRemoveOverrideCommand(
+    BuildContext context,
+    String raw, {
+    String? fallbackStaff,
+  }) {
+    final roster = ref.read(rosterProvider);
+    if (roster.readOnly) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Read-only roster cannot be edited.')),
+      );
+      return;
+    }
+    final text = _normalizeCommand(raw);
+    final staffNames = _matchAllStaffNames(text, roster);
+    if (staffNames.isEmpty && fallbackStaff != null) {
+      staffNames.add(fallbackStaff);
+    }
+    if (staffNames.isEmpty) {
+      _respondWithRC(context, 'Which staff member should I clear changes for?');
+      return;
+    }
+
+    final dates = _extractDatesForOverride(raw, roster.weekStartDay);
+    final range = _extractDateRangeFromText(text, roster.weekStartDay);
+    final leaveHint =
+        text.contains('leave') || text.contains('annual') || text.contains('al');
+    final changeHint =
+        text.contains('change') || text.contains('amend') || text.contains('update');
+    if (!changeHint && leaveHint) {
+      _handleRemoveLeaveCommand(
+        context,
+        raw,
+        fallbackStaff: staffNames.first,
+      );
+      return;
+    }
+    if (!changeHint &&
+        !leaveHint &&
+        (dates.isNotEmpty || range != null) &&
+        staffNames.isNotEmpty) {
+      _respondWithRC(
+        context,
+        'Do you want to remove changes or cancel leave?',
+      );
+      _contextState.remember(
+        action: 'clarify_change_remove',
+        staff: staffNames.first,
+        staffList: staffNames,
+      );
+      return;
+    }
+    if (dates.isEmpty && range == null) {
+      _respondWithRC(context, 'Which date or date range should I clear?');
+      return;
+    }
+
+    if (range != null) {
+      final start = range.start;
+      final end = range.end;
+      final removedList = roster.overrides.where((o) {
+        return staffNames.contains(o.personName) &&
+            !o.date.isBefore(start) &&
+            !o.date.isAfter(end);
+      }).toList();
+      final count = roster.overrides.where((o) {
+        return staffNames.contains(o.personName) &&
+            !o.date.isBefore(start) &&
+            !o.date.isAfter(end);
+      }).length;
+      _confirmAction(
+        context,
+        title: 'Clear changes',
+        message: count == 0
+            ? 'No changes found in that range. Clear anyway?'
+            : 'Remove $count change(s) for ${staffNames.join(', ')} '
+                'from ${DateFormat('MMM d').format(start)} to ${DateFormat('MMM d').format(end)}?',
+        onConfirm: () {
+          final removed = roster.removeOverridesAdvanced(
+            people: staffNames,
+            startDate: start,
+            endDate: end,
+          );
+          if (removed == 0) {
+            _respondWithRC(context, 'No changes were removed.');
+          } else {
+            _respondWithRC(context, 'Removed $removed change(s).');
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: const Text('Changes removed.'),
+                action: SnackBarAction(
+                  label: 'Undo',
+                  onPressed: () {
+                    for (final o in removedList) {
+                      roster.setOverride(
+                        o.personName,
+                        o.date,
+                        o.shift,
+                        o.reason ?? 'Restored change',
+                      );
+                    }
+                  },
+                ),
+              ),
+            );
+          }
+        },
+      );
+      return;
+    }
+
+    final normalizedDates = dates
+        .map((d) => DateTime(d.year, d.month, d.day))
+        .toSet()
+        .toList()
+      ..sort();
+    final removedList = roster.overrides.where((o) {
+      return staffNames.contains(o.personName) &&
+          normalizedDates.any((d) =>
+              d.year == o.date.year &&
+              d.month == o.date.month &&
+              d.day == o.date.day);
+    }).toList();
+    final preview = normalizedDates
+        .take(5)
+        .map((d) => DateFormat('EEE d MMM').format(d))
+        .join(', ');
+    final suffix = normalizedDates.length > 5 ? '...' : '';
+    _confirmAction(
+      context,
+      title: 'Clear changes',
+      message:
+          'Remove changes for ${staffNames.join(', ')} on ${normalizedDates.length} date(s) '
+          '($preview$suffix)?',
+      onConfirm: () {
+        final removed = roster.removeOverridesForDates(
+          people: staffNames,
+          dates: normalizedDates,
+        );
+        if (removed == 0) {
+          _respondWithRC(context, 'No changes were removed.');
+        } else {
+          _respondWithRC(context, 'Removed $removed change(s).');
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: const Text('Changes removed.'),
+              action: SnackBarAction(
+                label: 'Undo',
+                onPressed: () {
+                  for (final o in removedList) {
+                    roster.setOverride(
+                      o.personName,
+                      o.date,
+                      o.shift,
+                      o.reason ?? 'Restored change',
+                    );
+                  }
+                },
+              ),
+            ),
+          );
+        }
+      },
+    );
+  }
+
+  void _handleRemoveLeaveCommand(
+    BuildContext context,
+    String raw, {
+    String? fallbackStaff,
+  }) {
+    final roster = ref.read(rosterProvider);
+    if (roster.readOnly) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Read-only roster cannot be edited.')),
+      );
+      return;
+    }
+    final text = _normalizeCommand(raw);
+    final staffNames = _matchAllStaffNames(text, roster);
+    if (staffNames.isEmpty && fallbackStaff != null) {
+      staffNames.add(fallbackStaff);
+    }
+    if (staffNames.isEmpty) {
+      _respondWithRC(context, 'Which staff member should I cancel leave for?');
+      _contextState.remember(action: 'cancel_leave');
+      return;
+    }
+
+    var dates = _extractDatesForOverride(raw, roster.weekStartDay);
+    final range = _extractDateRangeFromText(text, roster.weekStartDay);
+    if (dates.isEmpty && range == null) {
+      final fallbackDates = _extractAllDatesFromText(text);
+      if (fallbackDates.isNotEmpty) {
+        dates = fallbackDates;
+      }
+    }
+
+    final suggestedDates = <DateTime>{};
+    if (range != null) {
+      var cursor = DateTime(range.start.year, range.start.month, range.start.day);
+      final end = DateTime(range.end.year, range.end.month, range.end.day);
+      while (!cursor.isAfter(end)) {
+        suggestedDates.add(cursor);
+        cursor = cursor.add(const Duration(days: 1));
+      }
+    } else {
+      suggestedDates.addAll(
+        dates.map((d) => DateTime(d.year, d.month, d.day)),
+      );
+    }
+
+    _contextState.remember(action: 'cancel_leave', staff: staffNames.first);
+    _showCancelLeaveCalendar(
+      context,
+      staffNames,
+      initialSelectedDates: suggestedDates.toList(),
+      initialRange: range,
+    );
+  }
+
+  Future<void> _showCancelLeaveCalendar(
+    BuildContext context,
+    List<String> staffNames,
+    {List<DateTime> initialSelectedDates = const [],
+    _DateRange? initialRange}
+  ) async {
+    final roster = ref.read(rosterProvider);
+    DateTime selected = DateTime.now();
+    final selectedDates = <DateTime>{};
+    final monthKey = ValueNotifier<int>(
+      DateTime.now().year * 100 + DateTime.now().month,
+    );
+    if (initialSelectedDates.isNotEmpty) {
+      for (final d in initialSelectedDates) {
+        selectedDates.add(DateTime(d.year, d.month, d.day));
+      }
+      selected = initialSelectedDates.first;
+    }
+    final years = List.generate(9, (i) => DateTime.now().year - 4 + i);
+    int selectedYear = selected.year;
+    int selectedMonth = selected.month;
+    bool applyToAll = staffNames.length > 1;
+    bool onlyShowMatching = true;
+    bool selectAllTypes = false;
+    final selectedTypes = <String>{'AL'};
+
+    Map<String, Set<DateTime>> buildAlDates(List<String> names) {
+      final map = <String, Set<DateTime>>{};
+      for (final name in names) {
+        map[name] = <DateTime>{};
+      }
+      for (final o in roster.overrides) {
+        if (o.shift.toUpperCase() != 'AL') continue;
+        if (!names.contains(o.personName)) continue;
+        map[o.personName]!.add(DateTime(o.date.year, o.date.month, o.date.day));
+      }
+      return map;
+    }
+
+    Set<DateTime> alDatesForStaff(List<String> names) {
+      final map = buildAlDates(names);
+      final all = <DateTime>{};
+      for (final set in map.values) {
+        all.addAll(set);
+      }
+      return all;
+    }
+
+    Set<String> availableChangeTypes(List<String> names) {
+      final types = <String>{};
+      for (final o in roster.overrides) {
+        if (!names.contains(o.personName)) continue;
+        types.add(o.shift.toUpperCase());
+      }
+      for (final staff in roster.staffMembers) {
+        if (!names.contains(staff.name)) continue;
+        if (staff.leaveType == 'secondment') types.add('SECONDMENT');
+        if (staff.leaveType == 'sick') types.add('SICK');
+        if (staff.leaveType == 'annual') types.add('AL');
+      }
+      return types..removeWhere((t) => t.trim().isEmpty);
+    }
+
+    bool hasMatchingChange(
+      List<String> names,
+      DateTime date,
+      Set<String> types,
+    ) {
+      if (types.contains('ANY')) return true;
+      final normalized = types.map((t) => t.toUpperCase()).toSet();
+      final overrideMatch = roster.overrides.any((o) {
+        if (!names.contains(o.personName)) return false;
+        if (o.date.year != date.year ||
+            o.date.month != date.month ||
+            o.date.day != date.day) return false;
+        final shift = o.shift.toUpperCase();
+        if (normalized.contains(shift)) return true;
+        if (normalized.contains('SICK') && (shift == 'SICK' || shift == 'ILL')) {
+          return true;
+        }
+        return false;
+      });
+      if (overrideMatch) return true;
+      // Also match against staff leave ranges (annual/sick/secondment) set via staff status.
+      for (final staff in roster.staffMembers) {
+        if (!names.contains(staff.name)) continue;
+        if (staff.leaveStart == null || staff.leaveEnd == null) continue;
+        final start = DateTime(
+          staff.leaveStart!.year,
+          staff.leaveStart!.month,
+          staff.leaveStart!.day,
+        );
+        final end = DateTime(
+          staff.leaveEnd!.year,
+          staff.leaveEnd!.month,
+          staff.leaveEnd!.day,
+        );
+        if (date.isBefore(start) || date.isAfter(end)) continue;
+        final leaveType = (staff.leaveType ?? '').toUpperCase();
+        if (normalized.contains('AL') &&
+            (leaveType == 'ANNUAL' || leaveType == 'AL')) {
+          return true;
+        }
+        if (normalized.contains('SICK') && leaveType == 'SICK') return true;
+        if (normalized.contains('SECONDMENT') && leaveType == 'SECONDMENT') {
+          return true;
+        }
+      }
+    return false;
+  }
+
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setState) {
+          final activeStaff = applyToAll ? staffNames : [staffNames.first];
+          final alDates = alDatesForStaff(activeStaff);
+          final changeTypes = availableChangeTypes(activeStaff);
+          if (selectAllTypes) {
+            selectedTypes
+              ..clear()
+              ..addAll(changeTypes)
+              ..add('ANY');
+          }
+          int alSelected = selectedDates
+              .where((d) => hasMatchingChange(activeStaff, d, selectedTypes))
+              .length;
+          int noAlSelected = selectedDates.length - alSelected;
+          return AlertDialog(
+            title: const Text('Cancel Annual Leave'),
+            content: SizedBox(
+              width: 420,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (staffNames.length > 1)
+                    SwitchListTile(
+                      contentPadding: EdgeInsets.zero,
+                      value: applyToAll,
+                      onChanged: (value) => setState(() => applyToAll = value),
+                      title: const Text('Apply to all selected staff'),
+                      subtitle: Text(applyToAll
+                          ? staffNames.join(', ')
+                          : staffNames.first),
+                    ),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: DropdownButtonFormField<int>(
+                          value: selectedMonth,
+                          decoration:
+                              const InputDecoration(labelText: 'Month'),
+                          items: List.generate(
+                            12,
+                            (i) => DropdownMenuItem(
+                              value: i + 1,
+                              child: Text(DateFormat('MMMM')
+                                  .format(DateTime(2024, i + 1, 1))),
+                            ),
+                          ),
+                          onChanged: (value) {
+                            if (value == null) return;
+                            setState(() {
+                              selectedMonth = value;
+                              selected = DateTime(selectedYear, selectedMonth, 1);
+                              monthKey.value =
+                                  selectedYear * 100 + selectedMonth;
+                            });
+                          },
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: DropdownButtonFormField<int>(
+                          value: selectedYear,
+                          decoration: const InputDecoration(labelText: 'Year'),
+                          items: years
+                              .map((y) => DropdownMenuItem(
+                                    value: y,
+                                    child: Text(y.toString()),
+                                  ))
+                              .toList(),
+                          onChanged: (value) {
+                            if (value == null) return;
+                            setState(() {
+                              selectedYear = value;
+                              selected = DateTime(selectedYear, selectedMonth, 1);
+                              monthKey.value =
+                                  selectedYear * 100 + selectedMonth;
+                            });
+                          },
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      FilterChip(
+                        label: const Text('All changes'),
+                        selected: selectAllTypes,
+                        onSelected: (value) {
+                          setState(() {
+                            selectAllTypes = value;
+                            if (!selectAllTypes) {
+                              selectedTypes.remove('ANY');
+                            }
+                          });
+                        },
+                      ),
+                      ...changeTypes.map((type) {
+                        final selected = selectedTypes.contains(type);
+                        final label = type == 'AL'
+                            ? 'Annual Leave'
+                            : type == 'SICK'
+                                ? 'Sick'
+                                : type == 'SECONDMENT'
+                                    ? 'Secondment'
+                                    : _shiftLabel(type);
+                        return FilterChip(
+                          label: Text(label),
+                          selected: selected,
+                          onSelected: (value) {
+                            setState(() {
+                              if (value) {
+                                selectedTypes.add(type);
+                              } else {
+                                selectedTypes.remove(type);
+                              }
+                            });
+                          },
+                        );
+                      }),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  ValueListenableBuilder<int>(
+                    valueListenable: monthKey,
+                    builder: (context, key, _) => CalendarDatePicker(
+                      key: ValueKey(key),
+                      initialDate: selected,
+                      firstDate:
+                          DateTime.now().subtract(const Duration(days: 3650)),
+                      lastDate:
+                          DateTime.now().add(const Duration(days: 3650)),
+                      selectableDayPredicate: (date) {
+                        if (!onlyShowMatching) return true;
+                        return hasMatchingChange(
+                          activeStaff,
+                          DateTime(date.year, date.month, date.day),
+                          selectedTypes,
+                        );
+                      },
+                      onDateChanged: (date) {
+                        selected = date;
+                      },
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      ElevatedButton.icon(
+                        onPressed: () {
+                          final picked = DateTime(
+                              selected.year, selected.month, selected.day);
+                          if (onlyShowMatching &&
+                              !hasMatchingChange(
+                                activeStaff,
+                                picked,
+                                selectedTypes,
+                              )) {
+                            _respondWithRC(
+                              context,
+                              'No matching change on ${DateFormat('MMM d').format(picked)}.',
+                            );
+                            return;
+                          }
+                          setState(() => selectedDates.add(picked));
+                        },
+                        icon: const Icon(Icons.add),
+                        label: const Text('Add date'),
+                      ),
+                      const SizedBox(width: 8),
+                      Text('${selectedDates.length} selected'),
+                    ],
+                  ),
+                  SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    value: onlyShowMatching,
+                    onChanged: (value) =>
+                        setState(() => onlyShowMatching = value),
+                    title: const Text('Only allow dates with matching changes'),
+                  ),
+                  Row(
+                    children: [
+                      ElevatedButton(
+                        onPressed: () async {
+                          final start = await showDatePicker(
+                            context: context,
+                            initialDate: DateTime.now(),
+                            firstDate: DateTime.now()
+                                .subtract(const Duration(days: 3650)),
+                            lastDate:
+                                DateTime.now().add(const Duration(days: 3650)),
+                          );
+                          if (start == null) return;
+                          final end = await showDatePicker(
+                            context: context,
+                            initialDate: start,
+                            firstDate: start,
+                            lastDate:
+                                DateTime.now().add(const Duration(days: 3650)),
+                          );
+                          if (end == null) return;
+                          final startDay =
+                              DateTime(start.year, start.month, start.day);
+                          final endDay =
+                              DateTime(end.year, end.month, end.day);
+                          var cursor = startDay;
+                          while (!cursor.isAfter(endDay)) {
+                            if (!onlyShowMatching ||
+                                hasMatchingChange(
+                                  activeStaff,
+                                  cursor,
+                                  selectedTypes,
+                                )) {
+                              selectedDates.add(cursor);
+                            }
+                            cursor = cursor.add(const Duration(days: 1));
+                          }
+                          setState(() {});
+                        },
+                        child: const Text('Select AL in range'),
+                      ),
+                      const SizedBox(width: 8),
+                      Text('Selected: $alSelected'),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  SizedBox(
+                    height: 90,
+                    child: Wrap(
+                      spacing: 6,
+                      runSpacing: 6,
+                      children: selectedDates
+                          .map(
+                            (d) => Chip(
+                              label: Text(DateFormat('MMM d').format(d)),
+                              onDeleted: () {
+                                setState(() => selectedDates.remove(d));
+                              },
+                            ),
+                          )
+                          .toList(),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Will remove $alSelected matching change(s). '
+                    '${noAlSelected > 0 ? '$noAlSelected selected date(s) have no matching change.' : ''}',
+                  ),
+                  const SizedBox(height: 8),
+                  SizedBox(
+                    height: 90,
+                    child: ListView(
+                      children: selectedDates
+                          .map((d) {
+                            final hasMatch =
+                                hasMatchingChange(activeStaff, d, selectedTypes);
+                            final baseShift =
+                                roster.getBaseShiftForDate(
+                              activeStaff.first,
+                              d,
+                            );
+                            return Text(
+                              '${DateFormat('EEE MMM d').format(d)} '
+                              '- ${hasMatch ? 'Matching change' : 'No match'} '
+                              '(base: ${_shiftLabel(baseShift)})',
+                            );
+                          })
+                          .toList(),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('Cancel'),
+              ),
+              ElevatedButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: const Text('Apply'),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+
+    if (confirmed != true) return;
+    if (selectedDates.isEmpty) {
+      _respondWithRC(context, 'No dates selected.');
+      return;
+    }
+    final applyStaff = applyToAll ? staffNames : [staffNames.first];
+    final dates = selectedDates.toList()..sort();
+    final types = selectAllTypes ? <String>{'ANY'} : selectedTypes;
+    final normalizedTypes = types.map((t) => t.toUpperCase()).toSet();
+
+    final removedOverrides = roster.overrides
+        .where((o) =>
+            applyStaff.contains(o.personName) &&
+            dates.any((d) =>
+                d.year == o.date.year &&
+                d.month == o.date.month &&
+                d.day == o.date.day) &&
+            (normalizedTypes.contains('ANY') ||
+                normalizedTypes.contains(o.shift.toUpperCase())))
+        .toList();
+
+    // Track additional AL dates removed from staff leave status for undo.
+    final removedAlFromStatus = <models.Override>[];
+    if (normalizedTypes.contains('ANY') || normalizedTypes.contains('AL')) {
+      for (final name in applyStaff) {
+        final staff =
+            roster.staffMembers.where((s) => s.name == name).firstOrNull;
+        if (staff == null) continue;
+        if (staff.leaveStart == null || staff.leaveEnd == null) continue;
+        final leaveType = (staff.leaveType ?? '').toUpperCase();
+        if (leaveType != 'ANNUAL' && leaveType != 'AL') continue;
+        final start = DateTime(
+          staff.leaveStart!.year,
+          staff.leaveStart!.month,
+          staff.leaveStart!.day,
+        );
+        final end = DateTime(
+          staff.leaveEnd!.year,
+          staff.leaveEnd!.month,
+          staff.leaveEnd!.day,
+        );
+        for (final d in dates) {
+          if (d.isBefore(start) || d.isAfter(end)) continue;
+          removedAlFromStatus.add(
+            models.Override(
+              id: DateTime.now().millisecondsSinceEpoch.toString(),
+              personName: name,
+              date: d,
+              shift: 'AL',
+              reason: 'Annual leave',
+              createdAt: DateTime.now(),
+            ),
+          );
+        }
+      }
+    }
+
+    int removed = 0;
+    if (normalizedTypes.contains('ANY') || normalizedTypes.contains('AL')) {
+      removed += roster.cancelAnnualLeaveForDates(
+        people: applyStaff,
+        dates: dates,
+      );
+    }
+    final nonLeaveTypes = normalizedTypes
+        .where((t) => t != 'AL' && t != 'ANY')
+        .toSet();
+    if (nonLeaveTypes.isNotEmpty) {
+      removed += roster.removeOverridesForDatesByShifts(
+        people: applyStaff,
+        dates: dates,
+        shifts: nonLeaveTypes,
+      );
+    }
+    if (removed == 0) {
+      _respondWithRC(context, 'No matching changes were removed.');
+    } else {
+      _respondWithRC(
+        context,
+        'Cancelled $removed change(s).',
+      );
+      final undoList = [...removedOverrides, ...removedAlFromStatus];
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: const Text('Changes cancelled.'),
+          action: SnackBarAction(
+            label: 'Undo',
+            onPressed: () {
+              for (final o in undoList) {
+                roster.setOverride(
+                  o.personName,
+                  o.date,
+                  o.shift,
+                  o.reason ?? 'Restored change',
+                );
+              }
+            },
+          ),
+        ),
+      );
+    }
   }
 
   String? _coverageWarningForChange(
@@ -1797,7 +5731,7 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
     } else {
       final parsed = _parseDateFromText(text);
       if (parsed != null) {
-        date = parsed;
+        date = parsed.date;
       }
     }
 
@@ -1987,8 +5921,14 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
     return null;
   }
 
-  List<DateTime> _extractAllDatesFromText(String text) {
-    final lowered = text.toLowerCase();
+  List<DateTime> _extractAllDatesFromText(
+    String text, {
+    bool monthFirst = false,
+  }) {
+    var lowered = text.toLowerCase();
+    lowered = _normalizeOrdinalText(lowered);
+    lowered = lowered.replaceAll(RegExp(r'[^a-z0-9\\s]'), ' ');
+    lowered = lowered.replaceAll(RegExp(r'\\s+'), ' ').trim();
     final dates = <DateTime>[];
     final today = DateTime.now();
 
@@ -2015,48 +5955,118 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
     }
 
     final slashMatches =
-        RegExp(r'(\\d{1,2})[/-](\\d{1,2})[/-](\\d{4})').allMatches(lowered);
+        RegExp(r'(\\d{1,2})[/-](\\d{1,2})[/-](\\d{2,4})').allMatches(lowered);
     for (final match in slashMatches) {
-      dates.add(DateTime(
-        int.parse(match.group(3)!),
-        int.parse(match.group(2)!),
-        int.parse(match.group(1)!),
-      ));
+      final rawYear = int.parse(match.group(3)!);
+      final year = rawYear < 100 ? 2000 + rawYear : rawYear;
+      final a = int.parse(match.group(1)!);
+      final b = int.parse(match.group(2)!);
+      final month = monthFirst ? a : b;
+      final day = monthFirst ? b : a;
+      dates.add(DateTime(year, month, day));
+    }
+    final shortSlashMatches =
+        RegExp(r'(\\d{1,2})[/-](\\d{1,2})\\b').allMatches(lowered);
+    for (final match in shortSlashMatches) {
+      final a = int.parse(match.group(1)!);
+      final b = int.parse(match.group(2)!);
+      int day = a;
+      int month = b;
+      if (a <= 12 && b > 12) {
+        month = a;
+        day = b;
+      }
+      dates.add(DateTime(today.year, month, day));
     }
 
     final monthNames = {
       'jan': 1,
+      'january': 1,
       'feb': 2,
+      'february': 2,
       'mar': 3,
+      'march': 3,
       'apr': 4,
+      'april': 4,
       'may': 5,
       'jun': 6,
+      'june': 6,
       'jul': 7,
+      'july': 7,
       'aug': 8,
+      'august': 8,
       'sep': 9,
+      'sept': 9,
+      'september': 9,
       'oct': 10,
+      'october': 10,
       'nov': 11,
+      'november': 11,
       'dec': 12,
+      'december': 12,
     };
+    final monthPattern =
+        '(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)';
     final dayMonthMatches = RegExp(
-      r'(\\d{1,2})(?:st|nd|rd|th)?\\s*(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)(?:\\s*(\\d{4}))?',
+      r'(\\d{1,2})(?:st|nd|rd|th)?(?:\\s+of)?\\s*' +
+          monthPattern +
+          r'(?:\\s*(\\d{2,4}))?',
     ).allMatches(lowered);
     for (final match in dayMonthMatches) {
       final day = int.parse(match.group(1)!);
-      final month = monthNames[match.group(2)!]!;
-      final year =
-          match.group(3) != null ? int.parse(match.group(3)!) : today.year;
+      final monthKey = match.group(2)!;
+      final month = monthNames[monthKey]!;
+      int year = today.year;
+      if (match.group(3) != null) {
+        final rawYear = int.parse(match.group(3)!);
+        year = rawYear < 100 ? 2000 + rawYear : rawYear;
+      }
+      dates.add(DateTime(year, month, day));
+    }
+    final compactDayMonthMatches = RegExp(
+      r'(\\d{1,2})(?:st|nd|rd|th)?' +
+          monthPattern +
+          r'(\\d{2,4})?',
+    ).allMatches(lowered);
+    for (final match in compactDayMonthMatches) {
+      final day = int.parse(match.group(1)!);
+      final monthKey = match.group(2)!;
+      final month = monthNames[monthKey]!;
+      int year = today.year;
+      if (match.group(3) != null) {
+        final rawYear = int.parse(match.group(3)!);
+        year = rawYear < 100 ? 2000 + rawYear : rawYear;
+      }
       dates.add(DateTime(year, month, day));
     }
 
     final monthDayMatches = RegExp(
-      r'(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\\s*(\\d{1,2})(?:st|nd|rd|th)?(?:\\s*(\\d{4}))?',
+      monthPattern +
+          r'\\s*(\\d{1,2})(?:st|nd|rd|th)?(?:\\s*(\\d{2,4}))?',
     ).allMatches(lowered);
     for (final match in monthDayMatches) {
       final day = int.parse(match.group(2)!);
-      final month = monthNames[match.group(1)!]!;
-      final year =
-          match.group(3) != null ? int.parse(match.group(3)!) : today.year;
+      final monthKey = match.group(1)!;
+      final month = monthNames[monthKey]!;
+      int year = today.year;
+      if (match.group(3) != null) {
+        final rawYear = int.parse(match.group(3)!);
+        year = rawYear < 100 ? 2000 + rawYear : rawYear;
+      }
+      dates.add(DateTime(year, month, day));
+    }
+    final compactMonthDayMatches = RegExp(
+      monthPattern + r'(\\d{1,2})(?:st|nd|rd|th)?(\\d{2,4})?',
+    ).allMatches(lowered);
+    for (final match in compactMonthDayMatches) {
+      final day = int.parse(match.group(2)!);
+      final monthKey = match.group(1)!;
+      final month = monthNames[monthKey]!;
+      int year = today.year;
+      if (match.group(3) != null) {
+        final rawYear = int.parse(match.group(3)!);
+        year = rawYear < 100 ? 2000 + rawYear : rawYear;
+      }
       dates.add(DateTime(year, month, day));
     }
 
@@ -2080,8 +6090,8 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
       if (start != null && end != null) {
         ranges.add(
           _DateRange(
-            start: _startOfDay(start),
-            end: _startOfDay(end),
+            start: _startOfDay(start.date),
+            end: _startOfDay(end.date),
             explicitStart: true,
             explicitEnd: true,
           ),
@@ -2135,84 +6145,174 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
     return DateTime(date.year, date.month, date.day);
   }
 
-  DateTime? _parseDateFromText(String text) {
-    final lowered = text.toLowerCase();
+  _ParsedDate? _parseDateFromText(
+    String text, {
+    bool monthFirst = false,
+  }) {
+    var lowered = text.toLowerCase();
+    lowered = _normalizeOrdinalText(lowered);
+    lowered = lowered.replaceAll(RegExp(r'[^a-z0-9\\s]'), ' ');
+    lowered = lowered.replaceAll(RegExp(r'\\s+'), ' ').trim();
     final today = DateTime.now();
     if (lowered.contains('today')) {
-      return DateTime(today.year, today.month, today.day);
+      return _ParsedDate(DateTime(today.year, today.month, today.day), 1.0);
     }
     if (lowered.contains('tomorrow')) {
       final tomorrow = today.add(const Duration(days: 1));
-      return DateTime(tomorrow.year, tomorrow.month, tomorrow.day);
+      return _ParsedDate(
+        DateTime(tomorrow.year, tomorrow.month, tomorrow.day),
+        1.0,
+      );
     }
     if (lowered.contains('yesterday')) {
       final yesterday = today.subtract(const Duration(days: 1));
-      return DateTime(yesterday.year, yesterday.month, yesterday.day);
+      return _ParsedDate(
+        DateTime(yesterday.year, yesterday.month, yesterday.day),
+        1.0,
+      );
     }
     final isoMatch = RegExp(r'(\\d{4})-(\\d{2})-(\\d{2})').firstMatch(lowered);
     if (isoMatch != null) {
-      return DateTime(
+      return _ParsedDate(
+        DateTime(
         int.parse(isoMatch.group(1)!),
         int.parse(isoMatch.group(2)!),
         int.parse(isoMatch.group(3)!),
+        ),
+        1.0,
       );
     }
     final slashMatch =
-        RegExp(r'(\\d{1,2})[/-](\\d{1,2})[/-](\\d{4})').firstMatch(lowered);
+        RegExp(r'(\\d{1,2})[/-](\\d{1,2})[/-](\\d{2,4})').firstMatch(lowered);
     if (slashMatch != null) {
-      return DateTime(
-        int.parse(slashMatch.group(3)!),
-        int.parse(slashMatch.group(2)!),
-        int.parse(slashMatch.group(1)!),
-      );
+      final rawYear = int.parse(slashMatch.group(3)!);
+      final year = rawYear < 100 ? 2000 + rawYear : rawYear;
+      final a = int.parse(slashMatch.group(1)!);
+      final b = int.parse(slashMatch.group(2)!);
+      final month = monthFirst ? a : b;
+      final day = monthFirst ? b : a;
+      final confidence = (a <= 12 && b <= 12) ? 0.6 : 1.0;
+      return _ParsedDate(DateTime(year, month, day), confidence);
+    }
+    final shortSlashMatch =
+        RegExp(r'(\\d{1,2})[/-](\\d{1,2})\\b').firstMatch(lowered);
+    if (shortSlashMatch != null) {
+      final a = int.parse(shortSlashMatch.group(1)!);
+      final b = int.parse(shortSlashMatch.group(2)!);
+      final now = DateTime.now();
+      int day = a;
+      int month = b;
+      if (a <= 12 && b > 12) {
+        month = a;
+        day = b;
+      }
+      return _ParsedDate(DateTime(now.year, month, day), 0.6);
     }
     final monthNames = {
       'jan': 1,
+      'january': 1,
       'feb': 2,
+      'february': 2,
       'mar': 3,
+      'march': 3,
       'apr': 4,
+      'april': 4,
       'may': 5,
       'jun': 6,
+      'june': 6,
       'jul': 7,
+      'july': 7,
       'aug': 8,
+      'august': 8,
       'sep': 9,
+      'sept': 9,
+      'september': 9,
       'oct': 10,
+      'october': 10,
       'nov': 11,
+      'november': 11,
       'dec': 12,
+      'december': 12,
     };
+    final monthPattern =
+        '(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)';
     final match = RegExp(
-      r'(\\d{1,2})(?:st|nd|rd|th)?\\s*(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)(?:\\s*(\\d{4}))?',
-    )
-        .firstMatch(lowered);
+      r'(\\d{1,2})(?:st|nd|rd|th)?(?:\\s+of)?\\s*' +
+          monthPattern +
+          r'(?:\\s*(\\d{2,4}))?',
+    ).firstMatch(lowered);
     if (match != null) {
       final day = int.parse(match.group(1)!);
-      final month = monthNames[match.group(2)!]!;
-      final year = match.group(3) != null
-          ? int.parse(match.group(3)!)
-          : DateTime.now().year;
-      return DateTime(year, month, day);
+      final monthKey = match.group(2)!;
+      final month = monthNames[monthKey]!;
+      int year = DateTime.now().year;
+      if (match.group(3) != null) {
+        final rawYear = int.parse(match.group(3)!);
+        year = rawYear < 100 ? 2000 + rawYear : rawYear;
+      }
+      return _ParsedDate(DateTime(year, month, day), 1.0);
+    }
+    final compactMatch = RegExp(
+      r'(\\d{1,2})(?:st|nd|rd|th)?' + monthPattern + r'(\\d{2,4})?',
+    ).firstMatch(lowered);
+    if (compactMatch != null) {
+      final day = int.parse(compactMatch.group(1)!);
+      final monthKey = compactMatch.group(2)!;
+      final month = monthNames[monthKey]!;
+      int year = DateTime.now().year;
+      if (compactMatch.group(3) != null) {
+        final rawYear = int.parse(compactMatch.group(3)!);
+        year = rawYear < 100 ? 2000 + rawYear : rawYear;
+      }
+      return _ParsedDate(DateTime(year, month, day), 1.0);
     }
     final reverseMatch = RegExp(
-      r'(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\\s*(\\d{1,2})(?:st|nd|rd|th)?(?:\\s*(\\d{4}))?',
+      monthPattern +
+          r'\\s*(\\d{1,2})(?:st|nd|rd|th)?(?:\\s*(\\d{2,4}))?',
     ).firstMatch(lowered);
     if (reverseMatch != null) {
       final day = int.parse(reverseMatch.group(2)!);
-      final month = monthNames[reverseMatch.group(1)!]!;
-      final year = reverseMatch.group(3) != null
-          ? int.parse(reverseMatch.group(3)!)
-          : DateTime.now().year;
-      return DateTime(year, month, day);
+      final monthKey = reverseMatch.group(1)!;
+      final month = monthNames[monthKey]!;
+      int year = DateTime.now().year;
+      if (reverseMatch.group(3) != null) {
+        final rawYear = int.parse(reverseMatch.group(3)!);
+        year = rawYear < 100 ? 2000 + rawYear : rawYear;
+      }
+      return _ParsedDate(DateTime(year, month, day), 1.0);
+    }
+    final reverseCompactMatch = RegExp(
+      monthPattern + r'(\\d{1,2})(?:st|nd|rd|th)?(\\d{2,4})?',
+    ).firstMatch(lowered);
+    if (reverseCompactMatch != null) {
+      final day = int.parse(reverseCompactMatch.group(2)!);
+      final monthKey = reverseCompactMatch.group(1)!;
+      final month = monthNames[monthKey]!;
+      int year = DateTime.now().year;
+      if (reverseCompactMatch.group(3) != null) {
+        final rawYear = int.parse(reverseCompactMatch.group(3)!);
+        year = rawYear < 100 ? 2000 + rawYear : rawYear;
+      }
+      return _ParsedDate(DateTime(year, month, day), 1.0);
     }
     return null;
   }
 
+
   List<DateTime> _extractDatesForOverride(String text, int weekStartDay) {
-    final lowered = text.toLowerCase();
+    var lowered = text.toLowerCase();
+    lowered = _normalizeOrdinalText(lowered);
+    lowered = lowered.replaceAll(RegExp(r'[^a-z0-9\\s]'), ' ');
+    lowered = lowered.replaceAll(RegExp(r'\\s+'), ' ').trim();
     final dates = <DateTime>{};
 
     final explicit = _parseDateFromText(lowered);
     if (explicit != null) {
-      dates.add(DateTime(explicit.year, explicit.month, explicit.day));
+      dates.add(DateTime(
+        explicit.date.year,
+        explicit.date.month,
+        explicit.date.day,
+      ));
     }
 
     final weekOffset = _extractWeekOffset(lowered);
@@ -2585,6 +6685,31 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
     _voiceService.speak(message, settings);
   }
 
+  void _clearExpiredPendingContext() {
+    final created = _contextState.pendingCreatedAt;
+    if (created == null) return;
+    final now = DateTime.now();
+    if (now.difference(created) > const Duration(minutes: 3)) {
+      _contextState.remember(
+        action: '',
+        pendingStaff: '',
+        pendingShift: '',
+        pendingDates: const [],
+      );
+    }
+  }
+
+  String _pendingSummary() {
+    final staff = _contextState.pendingStaff ?? _contextState.lastStaff ?? '';
+    final shift = _contextState.pendingShift ?? _contextState.lastShift ?? '';
+    final dates = _contextState.pendingDates ?? [];
+    final dateLabel = dates.isNotEmpty
+        ? dates.take(3).map((d) => DateFormat('MMM d').format(d)).join(', ')
+        : 'date?';
+    final shiftLabel = shift.isEmpty ? 'shift?' : _shiftLabelWithCode(shift);
+    return 'Pending: ${staff.isEmpty ? 'staff?' : staff} · $dateLabel · $shiftLabel';
+  }
+
   Future<void> _showRosterWizard(
     BuildContext context, {
     int? staffCount,
@@ -2607,7 +6732,7 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
         content: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            TextField(
+            SafeTextField(
               controller: staffController,
               keyboardType: TextInputType.number,
               decoration: const InputDecoration(
@@ -2615,7 +6740,7 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
               ),
             ),
             const SizedBox(height: 12),
-            TextField(
+            SafeTextField(
               controller: cycleController,
               keyboardType: TextInputType.number,
               decoration: const InputDecoration(
@@ -2698,7 +6823,8 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
       return;
     }
 
-    final date = _parseDateFromText(text) ?? DateTime.now();
+    final parsedDate = _parseDateFromText(text);
+    final date = parsedDate?.date ?? DateTime.now();
     final shiftMatch =
         RegExp(r'\\b(d12|n12|d|n|l|off|r|e|c1|c2|c3|c4|c)\\b')
             .firstMatch(text);
@@ -2780,7 +6906,7 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
                 }
               },
             ),
-            TextField(
+            SafeTextField(
               controller: shiftController,
               decoration: const InputDecoration(
                 labelText: 'Shift code',
@@ -3302,4 +7428,3 @@ class _SuggestionCard extends ConsumerWidget {
     );
   }
 }
-

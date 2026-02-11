@@ -9,6 +9,7 @@ const bedrock = new AWS.BedrockRuntime({
   region: process.env.BEDROCK_REGION || process.env.AWS_REGION,
 });
 const cognito = new AWS.CognitoIdentityServiceProvider();
+const secretsManager = new AWS.SecretsManager();
 
 const {
   ROSTERS_TABLE,
@@ -37,7 +38,82 @@ const {
   ROSTER_SALT,
   BEDROCK_MODEL_ID,
   USER_POOL_ID,
+  APP_CONFIG_SECRET_ARN,
 } = process.env;
+
+let cachedAppSecrets = null;
+
+async function loadAppSecrets() {
+  if (cachedAppSecrets) return cachedAppSecrets;
+  if (!APP_CONFIG_SECRET_ARN) {
+    cachedAppSecrets = {};
+    return cachedAppSecrets;
+  }
+  try {
+    const secret = await secretsManager
+      .getSecretValue({ SecretId: APP_CONFIG_SECRET_ARN })
+      .promise();
+    if (secret.SecretString) {
+      cachedAppSecrets = JSON.parse(secret.SecretString);
+    } else {
+      cachedAppSecrets = {};
+    }
+  } catch (err) {
+    console.error("Failed to load app secrets", err);
+    cachedAppSecrets = {};
+  }
+  return cachedAppSecrets;
+}
+
+async function getRuntimeConfig() {
+  const secrets = await loadAppSecrets();
+  const bedrockModelId =
+    secrets.bedrockModelId ||
+    BEDROCK_MODEL_ID ||
+    "anthropic.claude-3-haiku-20240307-v1:0";
+  return {
+    sesFrom: secrets.sesFrom || SES_FROM,
+    bedrockModelId,
+    updateUrls: {
+      default: secrets.updateUrls?.default || process.env.UPDATE_URL || "",
+      android: secrets.updateUrls?.android || process.env.UPDATE_URL_ANDROID || "",
+      windows: secrets.updateUrls?.windows || process.env.UPDATE_URL_WINDOWS || "",
+      linux: secrets.updateUrls?.linux || process.env.UPDATE_URL_LINUX || "",
+      ios: secrets.updateUrls?.ios || process.env.UPDATE_URL_IOS || "",
+      macos: secrets.updateUrls?.macos || process.env.UPDATE_URL_MACOS || "",
+    },
+    minVersions: {
+      default: secrets.minVersions?.default || process.env.MIN_APP_VERSION || "",
+      android:
+        secrets.minVersions?.android || process.env.MIN_APP_VERSION_ANDROID || "",
+      windows:
+        secrets.minVersions?.windows || process.env.MIN_APP_VERSION_WINDOWS || "",
+      linux: secrets.minVersions?.linux || process.env.MIN_APP_VERSION_LINUX || "",
+      ios: secrets.minVersions?.ios || process.env.MIN_APP_VERSION_IOS || "",
+      macos: secrets.minVersions?.macos || process.env.MIN_APP_VERSION_MACOS || "",
+    },
+    latestVersions: {
+      default:
+        secrets.latestVersions?.default || process.env.LATEST_APP_VERSION || "",
+      android:
+        secrets.latestVersions?.android ||
+        process.env.LATEST_APP_VERSION_ANDROID ||
+        "",
+      windows:
+        secrets.latestVersions?.windows ||
+        process.env.LATEST_APP_VERSION_WINDOWS ||
+        "",
+      linux:
+        secrets.latestVersions?.linux || process.env.LATEST_APP_VERSION_LINUX || "",
+      ios:
+        secrets.latestVersions?.ios || process.env.LATEST_APP_VERSION_IOS || "",
+      macos:
+        secrets.latestVersions?.macos ||
+        process.env.LATEST_APP_VERSION_MACOS ||
+        "",
+    },
+  };
+}
 
 const jsonResponse = (statusCode, body) => ({
   statusCode,
@@ -259,10 +335,11 @@ const publishNotification = async ({ subject, message }) => {
 };
 
 const sendEmail = async ({ to, subject, body }) => {
-  if (!SES_FROM || !to) return;
+  const config = await getRuntimeConfig();
+  if (!config.sesFrom || !to) return;
   await ses
     .sendEmail({
-      Source: SES_FROM,
+      Source: config.sesFrom,
       Destination: { ToAddresses: [to] },
       Message: {
         Subject: { Data: subject },
@@ -334,8 +411,8 @@ const safeJsonParse = (text) => {
 };
 
 const invokeBedrock = async (body) => {
-  const modelId =
-    BEDROCK_MODEL_ID || "anthropic.claude-3-haiku-20240307-v1:0";
+  const config = await getRuntimeConfig();
+  const modelId = config.bedrockModelId;
   const response = await bedrock
     .invokeModel({
       modelId,
@@ -413,9 +490,91 @@ exports.handler = async (event) => {
   }
   const method = event.requestContext?.http?.method || event.httpMethod;
 
-  const openRoutes = new Set(["/health", "/share/access", "/share/leave"]);
+  const openRoutes = new Set([
+    "/health",
+    "/app/version",
+    "/share/access",
+    "/share/leave",
+    "/share/validate",
+  ]);
   if (path === "/health") {
     return jsonResponse(200, { ok: true });
+  }
+
+  if (method === "GET" && path === "/app/version") {
+    const platform = (event.queryStringParameters?.platform || "").toLowerCase();
+    const config = await getRuntimeConfig();
+    const minVersion = config.minVersions[platform] || config.minVersions.default;
+    const latestVersion =
+      config.latestVersions[platform] || config.latestVersions.default;
+    const updateUrl = config.updateUrls[platform] || config.updateUrls.default;
+    return jsonResponse(200, {
+      minVersion,
+      latestVersion,
+      updateUrl,
+    });
+  }
+
+  if (method === "GET" && path === "/app/update") {
+    const platform = (event.queryStringParameters?.platform || "").toLowerCase();
+    const config = await getRuntimeConfig();
+    const bucket = process.env.UPDATE_BUCKET;
+    const manifestKey = process.env.UPDATE_MANIFEST_KEY;
+
+    let manifest = null;
+    if (bucket && manifestKey) {
+      try {
+        const obj = await s3
+          .getObject({ Bucket: bucket, Key: manifestKey })
+          .promise();
+        if (obj.Body) {
+          manifest = JSON.parse(obj.Body.toString("utf-8"));
+        }
+      } catch (e) {
+        // Ignore manifest load errors, fallback to env values
+      }
+    }
+
+    const manifestMin = manifest?.minVersion;
+    const manifestLatest = manifest?.latestVersion?.[platform];
+    const manifestKeyForPlatform = manifest?.files?.[platform];
+    const manifestUpdateUrl = manifest?.updatePage;
+
+    const minVersion =
+      manifestMin ||
+      config.minVersions[platform] ||
+      config.minVersions.default ||
+      "";
+    const latestVersion =
+      manifestLatest ||
+      config.latestVersions[platform] ||
+      config.latestVersions.default ||
+      "";
+
+    let updateUrl =
+      manifestUpdateUrl ||
+      config.updateUrls[platform] ||
+      config.updateUrls.default ||
+      "";
+
+    if (bucket && manifestKeyForPlatform) {
+      try {
+        const signed = s3.getSignedUrl("getObject", {
+          Bucket: bucket,
+          Key: manifestKeyForPlatform,
+          Expires: 900,
+        });
+        updateUrl = signed;
+      } catch (_) {}
+    }
+
+    return jsonResponse(200, {
+      minVersion,
+      latestVersion,
+      updateUrl,
+      platform,
+      manifestKey: manifestKey || null,
+    });
   }
 
   const userId = getUserId(event);
@@ -638,6 +797,37 @@ exports.handler = async (event) => {
       metadata: { name: roster.Item.name },
     });
 
+    return jsonResponse(200, { ok: true });
+  }
+
+  if (method === "POST" && path === "/rosters/rename") {
+    const { rosterId, name } = parseBody(event);
+    if (!rosterId) return jsonResponse(400, { error: "Missing rosterId" });
+    if (!name) return jsonResponse(400, { error: "Missing roster name" });
+    const canRename = await ensureRosterRole(rosterId, userId, "owner");
+    if (!canRename) {
+      return jsonResponse(403, { error: "Forbidden" });
+    }
+    const now = new Date().toISOString();
+    await dynamodb
+      .update({
+        TableName: ROSTERS_TABLE,
+        Key: { rosterId },
+        UpdateExpression: "SET #name = :name, updatedAt = :updatedAt",
+        ExpressionAttributeNames: { "#name": "name" },
+        ExpressionAttributeValues: {
+          ":name": name,
+          ":updatedAt": now,
+        },
+      })
+      .promise();
+    await writeAuditLog({
+      rosterId,
+      userId,
+      action: "roster_renamed",
+      metadata: { name },
+      timestamp: now,
+    });
     return jsonResponse(200, { ok: true });
   }
 
@@ -1098,6 +1288,24 @@ exports.handler = async (event) => {
       version: data.Item?.version ?? 0,
       last_modified: data.Item?.lastModified ?? null,
       last_modified_by: data.Item?.lastModifiedBy ?? null,
+    });
+  }
+
+  if (method === "POST" && path === "/share/validate") {
+    const { code } = parseBody(event);
+    if (!code) return jsonResponse(400, { error: "Missing code" });
+    const share = await loadShareCode(code);
+    const validation = validateShareCode(share);
+    if (!validation.ok) {
+      return jsonResponse(validation.status, { error: validation.error });
+    }
+    return jsonResponse(200, {
+      ok: true,
+      rosterId: share.rosterId,
+      role: share.role || "viewer",
+      expiresAt: share.expiresAt ?? null,
+      maxUses: share.maxUses ?? null,
+      uses: share.uses ?? 0,
     });
   }
 
@@ -1978,3 +2186,4 @@ exports.handler = async (event) => {
 
   return jsonResponse(404, { error: "Not found" });
 };
+

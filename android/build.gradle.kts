@@ -1,7 +1,15 @@
+import com.android.build.gradle.BaseExtension
+
 allprojects {
     repositories {
         google()
         mavenCentral()
+    }
+    configurations.all {
+        resolutionStrategy {
+            force("androidx.core:core-ktx:1.13.1")
+            force("androidx.core:core:1.13.1")
+        }
     }
 }
 
@@ -17,6 +25,19 @@ subprojects {
 }
 subprojects {
     project.evaluationDependsOn(":app")
+}
+
+gradle.beforeProject {
+    plugins.withId("com.android.library") {
+        extensions.configure<BaseExtension> {
+            compileSdkVersion(36)
+        }
+    }
+    plugins.withId("com.android.application") {
+        extensions.configure<BaseExtension> {
+            compileSdkVersion(36)
+        }
+    }
 }
 
 tasks.register<Delete>("clean") {

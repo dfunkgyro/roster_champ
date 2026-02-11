@@ -1,10 +1,13 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
+import 'dart:math';
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:amazon_cognito_identity_dart_2/cognito.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'models.dart' as models;
 import 'config/env_loader.dart';
 
@@ -48,9 +51,28 @@ class AwsService {
 
   Function(bool isAuthenticated)? _onAuthStateChanged;
 
+  String? _oauthState;
+  String? _oauthCodeVerifier;
+  Completer<void>? _oauthCompleter;
+  HttpServer? _oauthServer;
+  String? _lastOAuthError;
+  String? _lastOAuthErrorDescription;
+  Uri? _lastOAuthRedirect;
+  Uri? _lastOAuthAuthorizeUrl;
+  Timer? _oauthTimeoutTimer;
+  bool _usedOAuthSignIn = false;
+  String? _authProvider;
+
   set onAuthStateChanged(Function(bool isAuthenticated)? callback) {
     _onAuthStateChanged = callback;
   }
+
+  String? get lastOAuthError => _lastOAuthError;
+  String? get lastOAuthErrorDescription => _lastOAuthErrorDescription;
+  Uri? get lastOAuthRedirect => _lastOAuthRedirect;
+  Uri? get lastOAuthAuthorizeUrl => _lastOAuthAuthorizeUrl;
+  bool get usedOAuthSignIn => _usedOAuthSignIn;
+  String? get authProvider => _authProvider;
 
   Future<void> initialize() async {
     try {
@@ -100,6 +122,192 @@ class AwsService {
     return CognitoUserPool(_userPoolId!, _userPoolClientId!);
   }
 
+  String _randomString(int length) {
+    const charset =
+        'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+    final rand = Random.secure();
+    return List.generate(length, (_) => charset[rand.nextInt(charset.length)])
+        .join();
+  }
+
+  String _pkceChallenge(String verifier) {
+    final digest = sha256.convert(utf8.encode(verifier));
+    return base64Url
+        .encode(digest.bytes)
+        .replaceAll('=', '')
+        .replaceAll('+', '-')
+        .replaceAll('/', '_');
+  }
+
+  Future<void> signInWithGoogle({bool forceAccountPicker = false}) async {
+    if (!_initialized || _cognitoDomain == null || _userPoolClientId == null) {
+      throw Exception('OAuth not configured');
+    }
+
+    final isDesktop = !kIsWeb &&
+        (Platform.isWindows || Platform.isLinux || Platform.isMacOS);
+    final isMobile =
+        !kIsWeb && (Platform.isAndroid || Platform.isIOS);
+    final redirectUri = isDesktop
+        ? (_desktopRedirectUri ?? _redirectUri)
+        : (isMobile ? _redirectUri : (_redirectUri ?? _desktopRedirectUri));
+    if (redirectUri == null || redirectUri.isEmpty) {
+      throw Exception('Redirect URI not configured');
+    }
+
+    _oauthState = _randomString(24);
+    _oauthCodeVerifier = _randomString(64);
+    final codeChallenge = _pkceChallenge(_oauthCodeVerifier!);
+
+    final authorizeUri = Uri.parse('$_cognitoDomain/oauth2/authorize').replace(
+      queryParameters: {
+        'response_type': 'code',
+        'client_id': _userPoolClientId!,
+        'redirect_uri': redirectUri,
+        'scope': 'openid email profile',
+        'state': _oauthState!,
+        'identity_provider': 'Google',
+        if (forceAccountPicker) 'prompt': 'select_account',
+        if (forceAccountPicker) 'max_age': '0',
+        'code_challenge_method': 'S256',
+        'code_challenge': codeChallenge,
+      },
+    );
+    _lastOAuthAuthorizeUrl = authorizeUri;
+    _usedOAuthSignIn = true;
+
+    _oauthCompleter = Completer<void>();
+
+    if (isDesktop) {
+      await _startLoopbackServer(redirectUri);
+    }
+
+    if (!await launchUrl(authorizeUri, mode: LaunchMode.externalApplication)) {
+      throw Exception('Unable to launch browser for Google sign-in');
+    }
+
+    _oauthTimeoutTimer?.cancel();
+    _oauthTimeoutTimer = Timer(const Duration(minutes: 2), () {
+      if (_oauthCompleter != null && !_oauthCompleter!.isCompleted) {
+        _oauthCompleter!
+            .completeError(Exception('Google sign-in timed out'));
+      }
+      cancelGoogleSignIn();
+    });
+
+    await _oauthCompleter?.future;
+  }
+
+  Future<void> _startLoopbackServer(String redirectUri) async {
+    final uri = Uri.parse(redirectUri);
+    final port = uri.port;
+    _oauthServer?.close(force: true);
+    _oauthServer = await HttpServer.bind(InternetAddress.loopbackIPv4, port);
+    _oauthServer?.listen((request) async {
+      final query = request.uri.queryParameters;
+      await handleAuthRedirect(request.uri);
+      request.response.statusCode = 200;
+      request.response.headers.set('Content-Type', 'text/html');
+      request.response.write(
+        '<html><body>You can close this window.</body></html>',
+      );
+      await request.response.close();
+      if (query.containsKey('code') || query.containsKey('error')) {
+        await _oauthServer?.close(force: true);
+        _oauthServer = null;
+      }
+    });
+  }
+
+  Future<void> handleAuthRedirect(Uri uri) async {
+    final code = uri.queryParameters['code'];
+    final state = uri.queryParameters['state'];
+    final error = uri.queryParameters['error'];
+    _lastOAuthRedirect = uri;
+    _lastOAuthError = error;
+    _lastOAuthErrorDescription = uri.queryParameters['error_description'];
+
+    if (error != null) {
+      _oauthTimeoutTimer?.cancel();
+      _oauthCompleter?.completeError(Exception(error));
+      cancelGoogleSignIn();
+      return;
+    }
+
+    if (code == null || state == null || state != _oauthState) {
+      return;
+    }
+
+    final isDesktop = !kIsWeb &&
+        (Platform.isWindows || Platform.isLinux || Platform.isMacOS);
+    final isMobile =
+        !kIsWeb && (Platform.isAndroid || Platform.isIOS);
+    final redirectUri = isDesktop
+        ? (_desktopRedirectUri ?? _redirectUri)
+        : (isMobile ? _redirectUri : (_redirectUri ?? _desktopRedirectUri));
+    if (redirectUri == null) {
+      _oauthCompleter?.completeError(Exception('Missing redirect URI'));
+      return;
+    }
+
+    try {
+      await _exchangeAuthCode(code, redirectUri);
+      _oauthTimeoutTimer?.cancel();
+      _oauthCompleter?.complete();
+    } catch (e) {
+      _oauthTimeoutTimer?.cancel();
+      _oauthCompleter?.completeError(e);
+    }
+  }
+
+  void cancelGoogleSignIn() {
+    _oauthTimeoutTimer?.cancel();
+    _oauthTimeoutTimer = null;
+    _oauthState = null;
+    _oauthCodeVerifier = null;
+    if (_oauthCompleter != null && !_oauthCompleter!.isCompleted) {
+      _oauthCompleter!.completeError(Exception('Google sign-in cancelled'));
+    }
+    _oauthCompleter = null;
+    _oauthServer?.close(force: true);
+    _oauthServer = null;
+  }
+
+  Future<void> _exchangeAuthCode(String code, String redirectUri) async {
+    final tokenUri = Uri.parse('$_cognitoDomain/oauth2/token');
+    final response = await http.post(
+      tokenUri,
+      headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+      body: {
+        'grant_type': 'authorization_code',
+        'client_id': _userPoolClientId!,
+        'code': code,
+        'redirect_uri': redirectUri,
+        'code_verifier': _oauthCodeVerifier!,
+      },
+    );
+
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw Exception(
+        'OAuth token exchange failed (${response.statusCode}): ${response.body}',
+      );
+    }
+
+    final payload = jsonDecode(response.body) as Map<String, dynamic>;
+    _idToken = payload['id_token'] as String?;
+    _accessToken = payload['access_token'] as String?;
+    _refreshToken = payload['refresh_token'] as String?;
+    if (_idToken == null) {
+      throw Exception('OAuth token response missing id_token');
+    }
+
+    _hydrateFromToken();
+    _authProvider = _usedOAuthSignIn ? 'google' : 'password';
+    await _loadAwsCredentials(_idToken!);
+    await _saveSession();
+    _onAuthStateChanged?.call(true);
+  }
+
   Future<void> _loadSession() async {
     final prefs = await SharedPreferences.getInstance();
     _idToken = prefs.getString('aws_id_token');
@@ -115,6 +323,7 @@ class AwsService {
     _offlineDisplayName = prefs.getString('offline_display_name');
     _offlineSalt = prefs.getString('offline_salt');
     _offlinePasswordHash = prefs.getString('offline_password_hash');
+    _authProvider = prefs.getString('auth_provider');
     _hydrateFromToken();
   }
 
@@ -144,6 +353,9 @@ class AwsService {
     if (_currentRosterId != null) {
       await prefs.setString('aws_current_roster_id', _currentRosterId!);
     }
+    if (_authProvider != null) {
+      await prefs.setString('auth_provider', _authProvider!);
+    }
   }
 
   Future<void> _clearSession() async {
@@ -156,6 +368,7 @@ class AwsService {
     await prefs.remove('aws_session_token');
     await prefs.remove('aws_expire_time');
     await prefs.remove('aws_current_roster_id');
+    await prefs.remove('auth_provider');
   }
 
   void _hydrateFromToken() {
@@ -382,6 +595,26 @@ class AwsService {
   }
 
   Future<void> signOut() async {
+    if (_usedOAuthSignIn && _cognitoDomain != null && _userPoolClientId != null) {
+      final isDesktop = !kIsWeb &&
+          (Platform.isWindows || Platform.isLinux || Platform.isMacOS);
+      final isMobile =
+          !kIsWeb && (Platform.isAndroid || Platform.isIOS);
+      final logoutUri = isDesktop
+          ? (_desktopRedirectUri ?? _redirectUri)
+          : (isMobile ? _redirectUri : (_redirectUri ?? _desktopRedirectUri));
+      if (logoutUri != null && logoutUri.isNotEmpty) {
+        final uri = Uri.parse('$_cognitoDomain/oauth2/logout').replace(
+          queryParameters: {
+            'client_id': _userPoolClientId!,
+            'logout_uri': logoutUri,
+          },
+        );
+        try {
+          await launchUrl(uri, mode: LaunchMode.externalApplication);
+        } catch (_) {}
+      }
+    }
     _idToken = null;
     _accessToken = null;
     _refreshToken = null;
@@ -395,6 +628,12 @@ class AwsService {
     _currentRosterId = null;
     _offlineAuthenticated = false;
     _updatesTimer?.cancel();
+    _usedOAuthSignIn = false;
+    _authProvider = null;
+    _lastOAuthError = null;
+    _lastOAuthErrorDescription = null;
+    _lastOAuthRedirect = null;
+    _lastOAuthAuthorizeUrl = null;
     await _clearSession();
     _onAuthStateChanged?.call(false);
   }
@@ -459,6 +698,28 @@ class AwsService {
       'displayName': displayName,
       'email': _userEmail,
     });
+  }
+
+  Future<Map<String, dynamic>> getAppVersionInfo({String? platform}) async {
+    final query = platform == null || platform.isEmpty
+        ? ''
+        : '?platform=${Uri.encodeComponent(platform)}';
+    final response = await _get('/app/version$query');
+    if (response is Map) {
+      return Map<String, dynamic>.from(response as Map);
+    }
+    return {};
+  }
+
+  Future<Map<String, dynamic>> getAppUpdateInfo({String? platform}) async {
+    final query = platform == null || platform.isEmpty
+        ? ''
+        : '?platform=${Uri.encodeComponent(platform)}';
+    final response = await _get('/app/update$query');
+    if (response is Map) {
+      return Map<String, dynamic>.from(response as Map);
+    }
+    return {};
   }
 
   Future<Map<String, dynamic>?> getUserSettings() async {
@@ -592,6 +853,11 @@ class AwsService {
     return Map<String, dynamic>.from(response as Map);
   }
 
+  Future<Map<String, dynamic>> validateShareCode(String code) async {
+    final response = await _postNoAuth('/share/validate', {'code': code});
+    return Map<String, dynamic>.from(response as Map);
+  }
+
   Future<String> submitLeaveRequestWithCode({
     required String code,
     required DateTime startDate,
@@ -629,6 +895,10 @@ class AwsService {
       _currentRosterId = null;
       await _saveSession();
     }
+  }
+
+  Future<void> renameRoster(String rosterId, String name) async {
+    await _post('/rosters/rename', {'rosterId': rosterId, 'name': name});
   }
 
   Future<String> createOrg(String name) async {
@@ -874,6 +1144,10 @@ class AwsService {
     });
   }
 
+  void stopRosterUpdates() {
+    _updatesTimer?.cancel();
+  }
+
   Future<List<models.RosterUpdate>> getRosterUpdates(
     String rosterId,
     String? since,
@@ -945,7 +1219,7 @@ class AwsService {
     throw Exception('AWS API POST error: ${response.statusCode} ${response.body}');
   }
 
-  Future<dynamic> _postNoAuth(String path, Map<String, dynamic> body) async {
+Future<dynamic> _postNoAuth(String path, Map<String, dynamic> body) async {
     final url = Uri.parse('$_apiUrl$path');
     final response = await http.post(
       url,
@@ -1126,4 +1400,7 @@ class AwsService {
     }
   }
 }
+
+
+
 

@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../providers.dart';
 import '../models.dart' as models;
+import 'package:roster_champ/safe_text_field.dart';
 
 class PatternEditorScreen extends ConsumerStatefulWidget {
   const PatternEditorScreen({super.key});
@@ -445,7 +446,7 @@ class _PatternEditorScreenState extends ConsumerState<PatternEditorScreen> {
         content: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            TextField(
+            SafeTextField(
               controller: _customShiftController,
               decoration: const InputDecoration(
                 labelText: 'Shift Code',
@@ -657,7 +658,7 @@ class _PatternEditorScreenState extends ConsumerState<PatternEditorScreen> {
         content: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            TextField(
+            SafeTextField(
               controller: _customShiftController,
               decoration: const InputDecoration(
                 labelText: 'Shift Code',

@@ -23,9 +23,123 @@ export default $config({
       deletionWindowInDays: 7,
     });
 
+    const userProfilesTable = new aws.dynamodb.Table("user-profiles", {
+      attributes: [{ name: "userId", type: "S" }],
+      hashKey: "userId",
+      billingMode: "PAY_PER_REQUEST",
+      serverSideEncryption: {
+        enabled: true,
+        kmsKeyArn: kmsKey.arn,
+      },
+    });
+
+    const appSecrets = new aws.secretsmanager.Secret("roster-app-secrets", {
+      name: `roster-app-secrets-${stageName}`,
+    });
+
+    const appSecretsPayload = {
+      sesFrom: process.env.SES_FROM ?? "",
+      bedrockModelId:
+        process.env.BEDROCK_MODEL_ID ?? "anthropic.claude-3-haiku-20240307-v1:0",
+      updateUrls: {
+        default: process.env.UPDATE_URL ?? "",
+        android: process.env.UPDATE_URL_ANDROID ?? "",
+        windows: process.env.UPDATE_URL_WINDOWS ?? "",
+        linux: process.env.UPDATE_URL_LINUX ?? "",
+        ios: process.env.UPDATE_URL_IOS ?? "",
+        macos: process.env.UPDATE_URL_MACOS ?? "",
+      },
+      minVersions: {
+        default: process.env.MIN_APP_VERSION ?? "",
+        android: process.env.MIN_APP_VERSION_ANDROID ?? "",
+        windows: process.env.MIN_APP_VERSION_WINDOWS ?? "",
+        linux: process.env.MIN_APP_VERSION_LINUX ?? "",
+        ios: process.env.MIN_APP_VERSION_IOS ?? "",
+        macos: process.env.MIN_APP_VERSION_MACOS ?? "",
+      },
+      latestVersions: {
+        default: process.env.LATEST_APP_VERSION ?? "",
+        android: process.env.LATEST_APP_VERSION_ANDROID ?? "",
+        windows: process.env.LATEST_APP_VERSION_WINDOWS ?? "",
+        linux: process.env.LATEST_APP_VERSION_LINUX ?? "",
+        ios: process.env.LATEST_APP_VERSION_IOS ?? "",
+        macos: process.env.LATEST_APP_VERSION_MACOS ?? "",
+      },
+    };
+
+    new aws.secretsmanager.SecretVersion("roster-app-secrets-version", {
+      secretId: appSecrets.id,
+      secretString: JSON.stringify(appSecretsPayload),
+    });
+
+    const distRoot = path.resolve(process.cwd(), "backend/.dist");
+    const apiOutDir = path.join(distRoot, "api");
+    const schedulerOutDir = path.join(distRoot, "scheduler");
+    const triggersOutDir = path.join(distRoot, "triggers");
+    fs.mkdirSync(apiOutDir, { recursive: true });
+    fs.mkdirSync(schedulerOutDir, { recursive: true });
+    fs.mkdirSync(triggersOutDir, { recursive: true });
+
+    const postConfirmRole = new aws.iam.Role("post-confirm-role", {
+      assumeRolePolicy: aws.iam.assumeRolePolicyForPrincipal({
+        Service: "lambda.amazonaws.com",
+      }),
+    });
+
+    new aws.iam.RolePolicyAttachment("post-confirm-basic", {
+      role: postConfirmRole.name,
+      policyArn: aws.iam.ManagedPolicies.AWSLambdaBasicExecutionRole,
+    });
+
+    new aws.iam.RolePolicy("post-confirm-policy", {
+      role: postConfirmRole.id,
+      policy: userProfilesTable.arn.apply((profilesArn) =>
+        JSON.stringify({
+          Version: "2012-10-17",
+          Statement: [
+            {
+              Effect: "Allow",
+              Action: ["dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:GetItem"],
+              Resource: profilesArn,
+            },
+          ],
+        })
+      ),
+    });
+
+    const postConfirmHandlerPath = path.resolve(
+      process.cwd(),
+      "backend/triggers/post_confirmation.js"
+    );
+    const postConfirmBundlePath = path.join(triggersOutDir, "post_confirmation.js");
+    await esbuild.build({
+      entryPoints: [postConfirmHandlerPath],
+      bundle: true,
+      platform: "node",
+      target: ["node18"],
+      outfile: postConfirmBundlePath,
+    });
+
+    const postConfirmFunction = new aws.lambda.Function("post-confirmation", {
+      runtime: "nodejs18.x",
+      role: postConfirmRole.arn,
+      handler: "post_confirmation.handler",
+      code: new pulumi.asset.AssetArchive({
+        "post_confirmation.js": new pulumi.asset.FileAsset(postConfirmBundlePath),
+      }),
+      environment: {
+        variables: {
+          USER_PROFILES_TABLE: userProfilesTable.name,
+        },
+      },
+    });
+
     const userPool = new aws.cognito.UserPool("roster-user-pool", {
       autoVerifiedAttributes: ["email"],
       usernameAttributes: ["email"],
+      lambdaConfig: {
+        postConfirmation: postConfirmFunction.arn,
+      },
     });
 
     const domainSuffix = new random.RandomString("roster-domain-suffix", {
@@ -34,13 +148,73 @@ export default $config({
       upper: false,
     });
 
-    const userPoolDomain = new aws.cognito.UserPoolDomain(
-      "roster-user-pool-domain",
-      {
-        domain: pulumi.interpolate`roster-${stageName}-${domainSuffix.result}`,
-        userPoolId: userPool.id,
+    const customDomainEnv = process.env.COGNITO_CUSTOM_DOMAIN?.trim();
+    const disableCustomDomain =
+      (process.env.COGNITO_CUSTOM_DOMAIN_DISABLED ?? "").toLowerCase() === "true" ||
+      process.env.COGNITO_CUSTOM_DOMAIN_DISABLED === "1";
+    const keepCertOnDisable =
+      (process.env.COGNITO_CUSTOM_DOMAIN_KEEP_CERT ?? "").toLowerCase() === "true" ||
+      process.env.COGNITO_CUSTOM_DOMAIN_KEEP_CERT === "1";
+    const customDomain = disableCustomDomain
+      ? ""
+      : customDomainEnv && customDomainEnv.length > 0
+          ? customDomainEnv
+          : "auth.rosterchampion.com";
+    let validationOptions: pulumi.Output<
+      aws.types.output.acm.CertificateDomainValidationOption[] | undefined
+    > | undefined;
+
+    let userPoolDomain: aws.cognito.UserPoolDomain;
+    if (customDomain) {
+      const cert = new aws.acm.Certificate(
+        "roster-custom-domain-cert",
+        {
+          domainName: customDomain,
+          validationMethod: "DNS",
+        },
+        {
+          protect: true,
+        }
+      );
+      validationOptions = cert.domainValidationOptions;
+      userPoolDomain = new aws.cognito.UserPoolDomain(
+        "roster-user-pool-domain",
+        {
+          domain: customDomain,
+          userPoolId: userPool.id,
+          certificateArn: cert.arn,
+        }
+      );
+    } else {
+      if (keepCertOnDisable) {
+        new aws.acm.Certificate(
+          "roster-custom-domain-cert",
+          {
+            domainName: customDomainEnv && customDomainEnv.length > 0
+              ? customDomainEnv
+              : "auth.rosterchampion.com",
+            validationMethod: "DNS",
+          },
+          {
+            protect: true,
+          }
+        );
       }
-    );
+      userPoolDomain = new aws.cognito.UserPoolDomain(
+        "roster-user-pool-domain",
+        {
+          domain: pulumi.interpolate`roster-${stageName}-${domainSuffix.result}`,
+          userPoolId: userPool.id,
+        }
+      );
+    }
+
+    new aws.lambda.Permission("post-confirmation-permission", {
+      action: "lambda:InvokeFunction",
+      function: postConfirmFunction.name,
+      principal: "cognito-idp.amazonaws.com",
+      sourceArn: userPool.arn,
+    });
 
     const redirectUris = [
       "rosterchamp://auth",
@@ -48,16 +222,45 @@ export default $config({
       "http://localhost:53682/",
     ];
 
+    const googleClientId =
+      process.env.GOOGLE_OAUTH_CLIENT_ID?.trim() ?? "";
+    const googleClientSecret =
+      process.env.GOOGLE_OAUTH_CLIENT_SECRET?.trim() ?? "";
+
     const supportedProviders: string[] = ["COGNITO"];
+
+    if (googleClientId && googleClientSecret) {
+      const googleProvider = new aws.cognito.IdentityProvider(
+        "roster-google-idp",
+        {
+          userPoolId: userPool.id,
+          providerName: "Google",
+          providerType: "Google",
+          providerDetails: {
+            client_id: googleClientId,
+            client_secret: googleClientSecret,
+            authorize_scopes: "openid email profile",
+          },
+          attributeMapping: {
+            email: "email",
+            username: "sub",
+            given_name: "given_name",
+            family_name: "family_name",
+            name: "name",
+          },
+        }
+      );
+      supportedProviders.push(googleProvider.providerName);
+    }
 
     const userPoolClient = new aws.cognito.UserPoolClient(
       "roster-user-pool-client",
       {
         userPoolId: userPool.id,
         generateSecret: false,
-        allowedOAuthFlows: ["code"],
-        allowedOAuthFlowsUserPoolClient: true,
-        allowedOAuthScopes: ["openid", "email", "profile"],
+        allowedOauthFlows: ["code"],
+        allowedOauthFlowsUserPoolClient: true,
+        allowedOauthScopes: ["openid", "email", "profile"],
         supportedIdentityProviders: supportedProviders,
         callbackUrls: redirectUris,
         logoutUrls: redirectUris,
@@ -388,16 +591,6 @@ export default $config({
       ],
     });
 
-    const userProfilesTable = new aws.dynamodb.Table("user-profiles", {
-      attributes: [{ name: "userId", type: "S" }],
-      hashKey: "userId",
-      billingMode: "PAY_PER_REQUEST",
-      serverSideEncryption: {
-        enabled: true,
-        kmsKeyArn: kmsKey.arn,
-      },
-    });
-
     const rosterSalt = new random.RandomPassword("roster-salt", {
       length: 24,
       special: false,
@@ -513,6 +706,7 @@ export default $config({
         exportsBucket.arn,
         notificationsTopic.arn,
         userProfilesTable.arn,
+        appSecrets.arn,
         userPool.arn,
         kmsKey.arn,
       ]).apply(
@@ -538,6 +732,7 @@ export default $config({
           exportsArn,
           notificationsArn,
           profilesArn,
+          secretsArn,
           userPoolArn,
           kmsArn,
         ]) =>
@@ -606,6 +801,11 @@ export default $config({
               },
               {
                 Effect: "Allow",
+                Action: ["secretsmanager:GetSecretValue"],
+                Resource: secretsArn,
+              },
+              {
+                Effect: "Allow",
                 Action: [
                   "s3:PutObject",
                   "s3:GetObject",
@@ -622,12 +822,6 @@ export default $config({
           })
       ),
     });
-
-    const distRoot = path.resolve(process.cwd(), "backend/.dist");
-    const apiOutDir = path.join(distRoot, "api");
-    const schedulerOutDir = path.join(distRoot, "scheduler");
-    fs.mkdirSync(apiOutDir, { recursive: true });
-    fs.mkdirSync(schedulerOutDir, { recursive: true });
 
     const handlerPath = path.resolve(process.cwd(), "backend/api/index.js");
     const apiBundlePath = path.join(apiOutDir, "index.js");
@@ -669,13 +863,13 @@ export default $config({
           EXPORTS_BUCKET: exportsBucket.bucket,
           CLOUDFRONT_URL: exportsDistribution.domainName,
           SNS_TOPIC_ARN: notificationsTopic.arn,
-          SES_FROM: process.env.SES_FROM ?? "",
           SES_REGION: process.env.SES_REGION ?? region,
+          APP_CONFIG_SECRET_ARN: appSecrets.arn,
           USER_PROFILES_TABLE: userProfilesTable.name,
           ROSTER_SALT: rosterSalt.result,
-          BEDROCK_MODEL_ID:
-            process.env.BEDROCK_MODEL_ID ?? "anthropic.claude-3-haiku-20240307-v1:0",
           USER_POOL_ID: userPool.id,
+          UPDATE_BUCKET: exportsBucket.bucket,
+          UPDATE_MANIFEST_KEY: process.env.UPDATE_MANIFEST_KEY ?? "updates/manifest.json",
         },
       },
     });
@@ -920,6 +1114,8 @@ export default $config({
       userPoolId: userPool.id,
       userPoolClientId: userPoolClient.id,
       cognitoDomain: userPoolDomain.domain,
+      cognitoCustomDomain: customDomain || null,
+      cognitoDomainValidation: validationOptions ?? null,
       identityPoolId: identityPool.id,
       exportsBucket: exportsBucket.bucket,
       exportsCdn: exportsDistribution.domainName,

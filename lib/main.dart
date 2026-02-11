@@ -1,8 +1,14 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'dart:math';
+import 'dart:io';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:package_info_plus/package_info_plus.dart';
+import 'package:url_launcher/url_launcher.dart';
+import 'package:app_links/app_links.dart';
 import 'package:roster_champ/home_screen.dart';
 import 'providers.dart';
 import 'screens/onboarding_screen.dart';
@@ -49,12 +55,18 @@ class _RosterChampAppState extends ConsumerState<RosterChampApp> {
   bool _awsConfigured = false;
   bool _aiConfigured = false;
   bool _isGuestMode = false;
+  bool _requiresUpdate = false;
+  String? _updateUrl;
+  String? _minVersion;
+  String? _latestVersion;
+  StreamSubscription<Uri>? _linkSubscription;
 
   @override
   void initState() {
     super.initState();
     _initializeApp();
     _setupAuthListener();
+    _setupDeepLinks();
   }
 
   void _setupAuthListener() {
@@ -75,6 +87,23 @@ class _RosterChampAppState extends ConsumerState<RosterChampApp> {
         }
       }
     };
+  }
+
+  void _setupDeepLinks() {
+    try {
+      final appLinks = AppLinks();
+      _linkSubscription = appLinks.uriLinkStream.listen(
+        (uri) => AwsService.instance.handleAuthRedirect(uri),
+        onError: (error) => debugPrint('App link error: $error'),
+      );
+      appLinks.getInitialLink().then((uri) {
+        if (uri != null) {
+          AwsService.instance.handleAuthRedirect(uri);
+        }
+      });
+    } catch (e) {
+      debugPrint('Deep link setup error: $e');
+    }
   }
 
   void _enterGuestMode() {
@@ -117,6 +146,8 @@ class _RosterChampAppState extends ConsumerState<RosterChampApp> {
 
       // Load settings
       await ref.read(settingsProvider.notifier).loadSettings();
+
+      await _checkAppVersion();
 
       // Check initial auth state
       _isAuthenticated = AwsService.instance.isAuthenticated;
@@ -236,7 +267,73 @@ class _RosterChampAppState extends ConsumerState<RosterChampApp> {
   }
 
   @override
+  void dispose() {
+    _linkSubscription?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _checkAppVersion() async {
+    try {
+      final info = await PackageInfo.fromPlatform();
+      final platform = _platformLabel();
+      final versionInfo =
+          await AwsService.instance.getAppUpdateInfo(platform: platform);
+      final minVersion = versionInfo['minVersion']?.toString() ?? '';
+      final latestVersion = versionInfo['latestVersion']?.toString() ?? '';
+      final updateUrl = versionInfo['updateUrl']?.toString() ?? '';
+      _minVersion = minVersion;
+      _latestVersion = latestVersion;
+      _updateUrl = updateUrl;
+      if (_isVersionNewer(minVersion, info.version)) {
+        _requiresUpdate = true;
+      // Soft update notification handled in UI, not blocking.
+    } catch (e) {
+      debugPrint('Version check failed: $e');
+    }
+  }
+
+  String _platformLabel() {
+    if (!kIsWeb && Platform.isWindows) {
+      return 'windows';
+    }
+    if (!kIsWeb && Platform.isAndroid) {
+      return 'android';
+    }
+    if (!kIsWeb && Platform.isIOS) {
+      return 'ios';
+    }
+    return 'unknown';
+  }
+
+  bool _isVersionNewer(String required, String current) {
+    if (required.isEmpty) return false;
+    final reqParts = required.split('.');
+    final curParts = current.split('.');
+    final maxLen = reqParts.length > curParts.length
+        ? reqParts.length
+        : curParts.length;
+    for (var i = 0; i < maxLen; i++) {
+      final req = i < reqParts.length ? int.tryParse(reqParts[i]) ?? 0 : 0;
+      final cur = i < curParts.length ? int.tryParse(curParts[i]) ?? 0 : 0;
+      if (req > cur) return true;
+      if (req < cur) return false;
+    }
+    return false;
+  }
+
+  @override
   Widget build(BuildContext context) {
+    if (_requiresUpdate) {
+      return MaterialApp(
+        debugShowCheckedModeBanner: false,
+        home: UpdateRequiredScreen(
+          minVersion: _minVersion ?? '',
+          latestVersion: _latestVersion ?? '',
+          updateUrl: _updateUrl,
+        ),
+        theme: ThemeManager.instance.currentTheme,
+      );
+    }
     final settings = ref.watch(settingsProvider);
     final themeMode = ThemeManager.instance.getThemeMode(settings.themeMode);
 
@@ -288,8 +385,16 @@ class _RosterChampAppState extends ConsumerState<RosterChampApp> {
         GlobalWidgetsLocalizations.delegate,
         GlobalCupertinoLocalizations.delegate,
       ],
-      theme: ThemeManager.instance.getLightTheme(settings.colorScheme),
-      darkTheme: ThemeManager.instance.getDarkTheme(settings.colorScheme),
+      theme: ThemeManager.instance.getLightTheme(
+        settings.colorScheme,
+        settings.layoutStyle,
+        true,
+      ),
+      darkTheme: ThemeManager.instance.getDarkTheme(
+        settings.colorScheme,
+        settings.layoutStyle,
+        true,
+      ),
       themeMode: themeMode,
       home: _buildHomeScreen(),
     );
@@ -298,7 +403,6 @@ class _RosterChampAppState extends ConsumerState<RosterChampApp> {
   Widget _buildHomeScreen() {
     if (!_isAuthenticated && !_isGuestMode) {
       return LoginScreen(
-        onGuestMode: _enterGuestMode,
         onAccessCode: _enterSharedRoster,
       );
     } else if (!_hasRoster && ref.read(rosterProvider).staffMembers.isEmpty) {
@@ -311,6 +415,64 @@ class _RosterChampAppState extends ConsumerState<RosterChampApp> {
         onExitGuestMode: _exitGuestMode,
       );
     }
+  }
+}
+
+class UpdateRequiredScreen extends StatelessWidget {
+  final String minVersion;
+  final String latestVersion;
+  final String? updateUrl;
+
+  const UpdateRequiredScreen({
+    super.key,
+    required this.minVersion,
+    required this.latestVersion,
+    required this.updateUrl,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.system_update,
+                  size: 72, color: Theme.of(context).colorScheme.primary),
+              const SizedBox(height: 16),
+              Text(
+                'Update Required',
+                style: Theme.of(context).textTheme.headlineSmall,
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'Please update to continue using Roster Champion.',
+                textAlign: TextAlign.center,
+              ),
+              if (minVersion.isNotEmpty) ...[
+                const SizedBox(height: 8),
+                Text('Minimum version: $minVersion'),
+              ],
+              if (latestVersion.isNotEmpty) ...[
+                const SizedBox(height: 4),
+                Text('Latest version: $latestVersion'),
+              ],
+              const SizedBox(height: 16),
+              FilledButton.icon(
+                onPressed: updateUrl == null || updateUrl!.isEmpty
+                    ? null
+                    : () => launchUrl(Uri.parse(updateUrl!),
+                        mode: LaunchMode.externalApplication),
+                icon: const Icon(Icons.open_in_new),
+                label: const Text('Update Now'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 }
 

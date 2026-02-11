@@ -36,6 +36,10 @@ class EnvLoader {
         'COGNITO_REDIRECT_URI',
         defaultValue: 'rosterchamp://auth',
       ),
+      'COGNITO_DESKTOP_REDIRECT_URI': const String.fromEnvironment(
+        'COGNITO_DESKTOP_REDIRECT_URI',
+        defaultValue: 'http://127.0.0.1:53682/',
+      ),
       'COGNITO_IDENTITY_POOL_ID': const String.fromEnvironment(
         'COGNITO_IDENTITY_POOL_ID',
         defaultValue: 'us-east-1:d5e17b9b-d839-4f91-9940-62e61909b443',

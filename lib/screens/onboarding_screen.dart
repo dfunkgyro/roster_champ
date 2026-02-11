@@ -246,7 +246,7 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
             textAlign: TextAlign.center,
           ),
           const SizedBox(height: 48),
-          _buildFeatureRow(Icons.edit_calendar, 'Manage Shifts & Overrides'),
+          _buildFeatureRow(Icons.edit_calendar, 'Manage Shifts & Changes'),
           _buildFeatureRow(Icons.event, 'Track Events & Holidays'),
           _buildFeatureRow(Icons.insights, 'View Analytics & Reports'),
           _buildFeatureRow(Icons.sync,
