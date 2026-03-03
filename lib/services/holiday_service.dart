@@ -145,6 +145,36 @@ class HolidayService {
     return holidays;
   }
 
+  Future<Map<String, HolidayItem>> getHolidaysRange({
+    required String countryCode,
+    required DateTime start,
+    required DateTime end,
+    List<String> additionalCountries = const [],
+    List<String> allowedTypes = const [],
+  }) async {
+    final map = <String, HolidayItem>{};
+    final years = <int>{start.year, end.year};
+    final countries = <String>{
+      countryCode.toUpperCase(),
+      ...additionalCountries.map((c) => c.toUpperCase()),
+    };
+    for (final code in countries) {
+      for (final year in years) {
+        final items = await getHolidays(countryCode: code, year: year);
+        for (final item in items) {
+          if (item.date.isBefore(start) || item.date.isAfter(end)) continue;
+          if (allowedTypes.isNotEmpty &&
+              !item.types.any((t) => allowedTypes.contains(t))) {
+            continue;
+          }
+          final key = '${item.date.toIso8601String().split('T')[0]}-$code';
+          map[key] = item;
+        }
+      }
+    }
+    return map;
+  }
+
   void _addChineseNewYear(List<HolidayItem> holidays, int year) {
     final date = _chineseNewYearDates[year];
     if (date == null) return;

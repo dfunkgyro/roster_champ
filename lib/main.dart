@@ -9,11 +9,13 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:app_links/app_links.dart';
+import 'package:universal_html/html.dart' as html;
 import 'package:roster_champ/home_screen.dart';
 import 'providers.dart';
 import 'screens/onboarding_screen.dart';
 import 'screens/roster_sharing_screen.dart';
 import 'screens/login_screen.dart';
+import 'screens/paywall_screen.dart';
 import 'aws_service.dart';
 import 'ai_service.dart';
 import 'models.dart' as models;
@@ -24,20 +26,6 @@ import 'services/analytics_service.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-
-  // Load environment variables first
-  await EnvLoader.instance.load();
-
-  // Initialize services
-  await AwsService.instance.initialize();
-  await AiService.instance.initialize();
-  await ThemeManager.instance.initialize();
-  await AnalyticsService.instance.initialize();
-  AnalyticsService.instance.trackEvent(
-    'app_start',
-    type: 'lifecycle',
-  );
-
   runApp(const ProviderScope(child: RosterChampApp()));
 }
 
@@ -48,25 +36,107 @@ class RosterChampApp extends ConsumerStatefulWidget {
   ConsumerState<RosterChampApp> createState() => _RosterChampAppState();
 }
 
-class _RosterChampAppState extends ConsumerState<RosterChampApp> {
+class _RosterChampAppState extends ConsumerState<RosterChampApp>
+    with WidgetsBindingObserver {
   bool _isInitializing = true;
   bool _isAuthenticated = false;
   bool _hasRoster = false;
   bool _awsConfigured = false;
   bool _aiConfigured = false;
   bool _isGuestMode = false;
+  bool _isOffline = false;
   bool _requiresUpdate = false;
   String? _updateUrl;
   String? _minVersion;
   String? _latestVersion;
+  bool _isBillingLocked = false;
+  bool _billingChecked = false;
+  String? _subscriptionStatus;
+  String? _subscriptionPlan;
+  bool _trialActive = false;
+  String? _trialEndsAt;
+  String? _initWarning;
+  String _initStage = 'startup';
+  String? _initError;
   StreamSubscription<Uri>? _linkSubscription;
+  Uri? _pendingAuthRedirect;
+  Timer? _connectionTimer;
+  models.ConnectionStatus? _lastAwsStatus;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    if (!kIsWeb && Platform.isWindows) {
+      _isInitializing = false;
+      _initWarning = 'Windows startup bypassed initialization screen.';
+    }
     _initializeApp();
+    _startInitWatchdog();
+    _forceDesktopInitExit();
     _setupAuthListener();
     _setupDeepLinks();
+    _startConnectionMonitor();
+  }
+
+  void _logInit(String message) {
+    try {
+      final file = File(
+        '${Directory.systemTemp.path}${Platform.pathSeparator}roster_init.log',
+      );
+      final stamp = DateTime.now().toIso8601String();
+      file.writeAsStringSync('[$stamp] $message\n', mode: FileMode.append);
+    } catch (_) {
+      // Ignore logging failures.
+    }
+  }
+
+  void _setInitStage(String stage, {String? error}) {
+    if (mounted) {
+      setState(() {
+        _initStage = stage;
+        if (error != null) _initError = error;
+      });
+    } else {
+      _initStage = stage;
+      if (error != null) _initError = error;
+    }
+    _logInit(error == null ? stage : '$stage | $error');
+  }
+
+  void _forceDesktopInitExit() {
+    if (kIsWeb) return;
+    if (!Platform.isWindows) return;
+    Future.delayed(const Duration(seconds: 3), () {
+      if (!mounted) return;
+      if (_isInitializing) {
+        setState(() {
+          _isInitializing = false;
+          _initWarning =
+              'Startup timed out on Windows. You can sign in now.';
+        });
+      }
+    });
+  }
+
+  void _startInitWatchdog() {
+    Future.delayed(const Duration(seconds: 12), () {
+      if (!mounted) return;
+      if (_isInitializing) {
+        setState(() {
+          _isInitializing = false;
+          _initWarning =
+              'Startup is taking longer than expected. You can sign in now.';
+        });
+      }
+    });
+  }
+
+  void _startConnectionMonitor() {
+    _connectionTimer?.cancel();
+    _connectionTimer = Timer.periodic(const Duration(seconds: 25), (_) async {
+      await _checkConnections();
+    });
   }
 
   void _setupAuthListener() {
@@ -75,7 +145,7 @@ class _RosterChampAppState extends ConsumerState<RosterChampApp> {
         setState(() {
           _isAuthenticated = isAuthenticated;
           _isGuestMode = false;
-          _hasRoster = AwsService.instance.currentRosterId != null;
+          _billingChecked = false;
         });
         ref.read(staffNameProvider).loadForUser(
               userId: AwsService.instance.userId,
@@ -83,7 +153,7 @@ class _RosterChampAppState extends ConsumerState<RosterChampApp> {
             );
         ref.read(settingsProvider.notifier).loadSettings();
         if (isAuthenticated) {
-          _loadRosterData();
+          _handlePostAuthLoad();
         }
       }
     };
@@ -91,6 +161,16 @@ class _RosterChampAppState extends ConsumerState<RosterChampApp> {
 
   void _setupDeepLinks() {
     try {
+      if (kIsWeb) {
+        final uri = Uri.base;
+        if (uri.queryParameters.containsKey('code')) {
+          _pendingAuthRedirect = uri;
+          // Clean URL after handling auth redirect.
+          final cleaned = uri.replace(queryParameters: {});
+          html.window.history.replaceState(null, '', cleaned.toString());
+        }
+        return;
+      }
       final appLinks = AppLinks();
       _linkSubscription = appLinks.uriLinkStream.listen(
         (uri) => AwsService.instance.handleAuthRedirect(uri),
@@ -140,16 +220,57 @@ class _RosterChampAppState extends ConsumerState<RosterChampApp> {
 
   Future<void> _initializeApp() async {
     try {
+      _setInitStage('services_init');
+      await _initializeServices();
+      if (_pendingAuthRedirect != null) {
+        try {
+          await AwsService.instance.handleAuthRedirect(_pendingAuthRedirect!);
+        } catch (e) {
+          debugPrint('Web auth redirect failed: $e');
+        } finally {
+          _pendingAuthRedirect = null;
+        }
+      }
+      _setInitStage('connectivity');
+      try {
+        final connected = await AwsService.instance
+            .checkConnection()
+            .timeout(const Duration(seconds: 4));
+        _isOffline = !connected;
+        ref.read(awsStatusProvider.notifier).state = models.ServiceStatus(
+          status: connected
+              ? models.ConnectionStatus.connected
+              : models.ConnectionStatus.disconnected,
+          message: connected ? 'Connected to AWS' : 'Offline mode',
+          lastChecked: DateTime.now(),
+        );
+      } catch (_) {
+        _isOffline = true;
+        ref.read(awsStatusProvider.notifier).state = models.ServiceStatus(
+          status: models.ConnectionStatus.disconnected,
+          message: 'Offline mode',
+          lastChecked: DateTime.now(),
+        );
+      }
+      _setInitStage('config_check');
       // Check service configurations
       _awsConfigured = AwsService.instance.isConfigured;
       _aiConfigured = AiService.instance.isConfigured;
 
       // Load settings
+      _setInitStage('load_settings');
       await ref.read(settingsProvider.notifier).loadSettings();
+      final settings = ref.read(settingsProvider);
+      if (!settings.staySignedIn) {
+        await AwsService.instance.signOutLocal();
+        _isAuthenticated = false;
+      }
 
+      _setInitStage('check_version');
       await _checkAppVersion();
 
       // Check initial auth state
+      _setInitStage('auth_state');
       _isAuthenticated = AwsService.instance.isAuthenticated;
       _hasRoster = AwsService.instance.currentRosterId != null;
       await ref.read(staffNameProvider).loadForUser(
@@ -157,19 +278,43 @@ class _RosterChampAppState extends ConsumerState<RosterChampApp> {
             email: AwsService.instance.userEmail,
           );
 
-      if (_isAuthenticated) {
+      if (_isAuthenticated && !_isOffline) {
+        _setInitStage('post_auth');
+        await AwsService.instance.ensureCurrentRosterSelected();
+        _hasRoster = AwsService.instance.currentRosterId != null;
+        await _loadRosterData();
+        await _refreshSubscriptionStatus();
+      } else if (_isAuthenticated && _isOffline) {
+        _setInitStage('offline_auth');
+        final cached = await AwsService.instance.getCachedSubscription();
+        _subscriptionStatus = cached['status']?.toString();
+        _subscriptionPlan = cached['plan']?.toString();
+        _trialActive = (_subscriptionStatus == 'trialing');
+        final offlineAllowed =
+            await AwsService.instance.isCachedSubscriptionActive(graceDays: 7);
+        _isBillingLocked = !offlineAllowed;
+        _billingChecked = true;
         await _loadRosterData();
       }
 
       // Set up real-time sync if authenticated and has roster
-      if (_isAuthenticated && _hasRoster) {
+      if (_isAuthenticated && _hasRoster && !_isOffline) {
+        _setInitStage('realtime_sync');
         ref.read(rosterProvider).setupRealtimeSync();
       }
 
       // Check connections
-      await _checkConnections();
+      if (!_isOffline) {
+        _setInitStage('check_connections');
+        await _checkConnections();
+      }
+      _setInitStage('ready');
     } catch (e) {
       debugPrint('App initialization error: $e');
+      _setInitStage('error', error: e.toString());
+      if (mounted) {
+        _initWarning = 'Startup issue: $e';
+      }
     } finally {
       if (mounted) {
         setState(() => _isInitializing = false);
@@ -177,13 +322,56 @@ class _RosterChampAppState extends ConsumerState<RosterChampApp> {
     }
   }
 
+  Future<void> _initializeServices() async {
+    await EnvLoader.instance.load();
+    await _runWithTimeout(() => AwsService.instance.initialize(),
+        const Duration(seconds: 8), 'AWS init timeout');
+    await _runWithTimeout(() => AiService.instance.initialize(),
+        const Duration(seconds: 6), 'AI init timeout');
+    await _runWithTimeout(() => ThemeManager.instance.initialize(),
+        const Duration(seconds: 4), 'Theme init timeout');
+    await _runWithTimeout(() => AnalyticsService.instance.initialize(),
+        const Duration(seconds: 4), 'Analytics init timeout');
+    AnalyticsService.instance.trackEvent(
+      'app_start',
+      type: 'lifecycle',
+    );
+  }
+
+  Future<void> _runWithTimeout(
+    Future<void> Function() action,
+    Duration timeout,
+    String timeoutMessage,
+  ) async {
+    try {
+      await action().timeout(timeout);
+    } catch (e) {
+      debugPrint(timeoutMessage);
+    }
+  }
+
   Future<void> _loadRosterData() async {
     try {
-      if (_isAuthenticated && AwsService.instance.currentRosterId != null) {
+      if (_isOffline) {
         await ErrorHandler.wrapAsync(
-          () => ref.read(rosterProvider).loadFromAWS(),
-          context: 'Loading from AWS',
+          () => ref.read(rosterProvider).loadFromLocal(),
+          context: 'Loading from local storage',
         );
+        return;
+      }
+
+      if (_isAuthenticated && AwsService.instance.currentRosterId != null) {
+        try {
+          await ErrorHandler.wrapAsync(
+            () => ref.read(rosterProvider).loadFromAWS(),
+            context: 'Loading from AWS',
+          );
+        } catch (e) {
+          await ErrorHandler.wrapAsync(
+            () => ref.read(rosterProvider).loadFromLocal(),
+            context: 'Loading from local storage',
+          );
+        }
       } else {
         await ErrorHandler.wrapAsync(
           () => ref.read(rosterProvider).loadFromLocal(),
@@ -199,22 +387,30 @@ class _RosterChampAppState extends ConsumerState<RosterChampApp> {
     // Check AWS connection only if configured
     if (_awsConfigured) {
       try {
+        final previous = ref.read(awsStatusProvider).status;
         ref.read(awsStatusProvider.notifier).state = models.ServiceStatus(
           status: models.ConnectionStatus.connecting,
           lastChecked: DateTime.now(),
         );
 
         final connected = await AwsService.instance.checkConnection();
+        final nextStatus = connected
+            ? models.ConnectionStatus.connected
+            : models.ConnectionStatus.error;
 
         ref.read(awsStatusProvider.notifier).state = models.ServiceStatus(
-          status: connected
-              ? models.ConnectionStatus.connected
-              : models.ConnectionStatus.error,
+          status: nextStatus,
           message: connected
               ? 'Connected to AWS'
               : 'AWS connection failed. Fix: Check internet - Verify API URL - Sign in',
           lastChecked: DateTime.now(),
         );
+        _isOffline = !connected;
+        if (previous != models.ConnectionStatus.connected &&
+            nextStatus == models.ConnectionStatus.connected) {
+          await ref.read(rosterProvider).tryProcessPendingSync();
+        }
+        _lastAwsStatus = nextStatus;
       } catch (e) {
         ref.read(awsStatusProvider.notifier).state = models.ServiceStatus(
           status: models.ConnectionStatus.error,
@@ -222,6 +418,7 @@ class _RosterChampAppState extends ConsumerState<RosterChampApp> {
               'AWS error: $e. Fix: Check internet - Verify API URL - Sign in',
           lastChecked: DateTime.now(),
         );
+        _isOffline = true;
       }
     } else {
       ref.read(awsStatusProvider.notifier).state = models.ServiceStatus(
@@ -229,6 +426,7 @@ class _RosterChampAppState extends ConsumerState<RosterChampApp> {
         message: 'AWS not configured',
         lastChecked: DateTime.now(),
       );
+      _isOffline = true;
     }
 
     // Check AI connection only if configured
@@ -268,8 +466,104 @@ class _RosterChampAppState extends ConsumerState<RosterChampApp> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _linkSubscription?.cancel();
+    _connectionTimer?.cancel();
     super.dispose();
+  }
+
+  Future<void> _handlePostAuthLoad() async {
+    await AwsService.instance.ensureCurrentRosterSelected();
+    if (mounted) {
+      setState(() {
+        _hasRoster = AwsService.instance.currentRosterId != null;
+      });
+    }
+    await _loadRosterData();
+    await _refreshSubscriptionStatus();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    final settings = ref.read(settingsProvider);
+    if (state == AppLifecycleState.resumed) {
+      _refreshSubscriptionStatus();
+    } else if ((state == AppLifecycleState.paused ||
+            state == AppLifecycleState.detached) &&
+        settings.signOutOnExit) {
+      AwsService.instance.signOutLocal();
+      if (mounted) {
+        setState(() {
+          _isAuthenticated = false;
+          _billingChecked = false;
+          _isBillingLocked = false;
+        });
+      }
+    }
+    super.didChangeAppLifecycleState(state);
+  }
+
+  Future<void> _refreshSubscriptionStatus() async {
+    if (!_isAuthenticated || _isGuestMode) return;
+    try {
+      try {
+        await AwsService.instance.refreshBillingStatus();
+      } catch (e) {
+        debugPrint('Billing reconcile failed: $e');
+      }
+      final profile = await AwsService.instance.getProfile();
+      final status = profile['subscriptionStatus']?.toString() ?? 'inactive';
+      final plan = profile['subscriptionPlan']?.toString() ?? 'none';
+      final periodEnd =
+          profile['subscriptionPeriodEnd']?.toString();
+      final trialEndsAt = profile['trialEndsAt']?.toString();
+      final trialActive =
+          profile['trialActive'] == true ||
+          profile['subscriptionStatus']?.toString() == 'trialing' ||
+          _isTrialStillValid(trialEndsAt);
+      final normalizedPlan = plan.toLowerCase();
+      final hasPaidPlan = normalizedPlan == 'starter' ||
+          normalizedPlan == 'operations' ||
+          normalizedPlan == 'enterprise';
+      final active =
+          trialActive ||
+          (status == 'active' && hasPaidPlan) ||
+          (status == 'trialing');
+      await AwsService.instance.cacheSubscriptionStatus(
+        status: status,
+        plan: plan,
+        periodEnd: periodEnd,
+      );
+      if (mounted) {
+        setState(() {
+          _subscriptionStatus = status;
+          _subscriptionPlan = plan;
+          _trialActive = trialActive;
+          _trialEndsAt = trialEndsAt;
+          _isBillingLocked = !active;
+          _billingChecked = true;
+        });
+      }
+    } catch (e) {
+      debugPrint('Subscription status check failed: $e');
+      final cachedActive =
+          await AwsService.instance.isCachedSubscriptionActive();
+      final cached = await AwsService.instance.getCachedSubscription();
+      if (mounted) {
+        setState(() {
+          _subscriptionStatus =
+              cached['status']?.toString() ?? 'inactive';
+          _subscriptionPlan =
+              cached['plan']?.toString() ?? 'none';
+          _trialEndsAt = cached['trialEndsAt']?.toString();
+          _trialActive =
+              cached['status']?.toString() == 'trialing' ||
+              _isTrialStillValid(_trialEndsAt);
+          _isBillingLocked = !cachedActive;
+          _billingChecked = true;
+        });
+      }
+    }
   }
 
   Future<void> _checkAppVersion() async {
@@ -286,10 +580,18 @@ class _RosterChampAppState extends ConsumerState<RosterChampApp> {
       _updateUrl = updateUrl;
       if (_isVersionNewer(minVersion, info.version)) {
         _requiresUpdate = true;
+      }
       // Soft update notification handled in UI, not blocking.
     } catch (e) {
       debugPrint('Version check failed: $e');
     }
+  }
+
+  bool _isTrialStillValid(String? trialEndsAt) {
+    if (trialEndsAt == null || trialEndsAt.isEmpty) return false;
+    final parsed = DateTime.tryParse(trialEndsAt);
+    if (parsed == null) return false;
+    return parsed.toUtc().isAfter(DateTime.now().toUtc());
   }
 
   String _platformLabel() {
@@ -323,6 +625,7 @@ class _RosterChampAppState extends ConsumerState<RosterChampApp> {
 
   @override
   Widget build(BuildContext context) {
+    final settings = ref.watch(settingsProvider);
     if (_requiresUpdate) {
       return MaterialApp(
         debugShowCheckedModeBanner: false,
@@ -331,13 +634,51 @@ class _RosterChampAppState extends ConsumerState<RosterChampApp> {
           latestVersion: _latestVersion ?? '',
           updateUrl: _updateUrl,
         ),
-        theme: ThemeManager.instance.currentTheme,
+        theme: ThemeManager.instance.getLightTheme(
+          settings.colorScheme,
+          settings.layoutStyle,
+          true,
+        ),
       );
     }
-    final settings = ref.watch(settingsProvider);
     final themeMode = ThemeManager.instance.getThemeMode(settings.themeMode);
 
     if (_isInitializing) {
+      if (!kIsWeb && Platform.isWindows) {
+        // Windows: never block on init spinner.
+        return MaterialApp(
+          locale: Locale(settings.languageCode),
+          supportedLocales: const [
+            Locale('en'),
+            Locale('es'),
+            Locale('fr'),
+            Locale('de'),
+            Locale('it'),
+            Locale('pt'),
+            Locale('zh'),
+            Locale('ja'),
+            Locale('ko'),
+            Locale('ar'),
+          ],
+          localizationsDelegates: const [
+            GlobalMaterialLocalizations.delegate,
+            GlobalWidgetsLocalizations.delegate,
+            GlobalCupertinoLocalizations.delegate,
+          ],
+          theme: ThemeManager.instance.getLightTheme(
+            settings.colorScheme,
+            settings.layoutStyle,
+            true,
+          ),
+          darkTheme: ThemeManager.instance.getDarkTheme(
+            settings.colorScheme,
+            settings.layoutStyle,
+            true,
+          ),
+          themeMode: themeMode,
+          home: _buildHomeScreen(),
+        );
+      }
       return MaterialApp(
         locale: Locale(settings.languageCode),
         supportedLocales: const [
@@ -364,7 +705,7 @@ class _RosterChampAppState extends ConsumerState<RosterChampApp> {
       );
     }
 
-    return MaterialApp(
+    final app = MaterialApp(
       title: 'Roster Champion',
       debugShowCheckedModeBanner: false,
       locale: Locale(settings.languageCode),
@@ -398,12 +739,60 @@ class _RosterChampAppState extends ConsumerState<RosterChampApp> {
       themeMode: themeMode,
       home: _buildHomeScreen(),
     );
+    if (!kIsWeb && Platform.isWindows) {
+      return Stack(
+        children: [
+          app,
+          Positioned(
+            left: 12,
+            right: 12,
+            bottom: 12,
+            child: IgnorePointer(
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                decoration: BoxDecoration(
+                  color: Colors.black.withOpacity(0.7),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: DefaultTextStyle(
+                  style: const TextStyle(color: Colors.white, fontSize: 12),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('Init stage: $_initStage'),
+                      Text('Init error: ${_initError ?? '-'}'),
+                      Text('AWS configured: $_awsConfigured'),
+                      Text('Authenticated: $_isAuthenticated'),
+                      if (_initWarning != null)
+                        Text('Warning: $_initWarning'),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      );
+    }
+    return app;
   }
 
   Widget _buildHomeScreen() {
     if (!_isAuthenticated && !_isGuestMode) {
       return LoginScreen(
         onAccessCode: _enterSharedRoster,
+        initialMessage: _initWarning,
+      );
+    } else if (_isAuthenticated && !_billingChecked) {
+      return const PaywallScreen.loading();
+    } else if (_isAuthenticated && _isBillingLocked) {
+      return PaywallScreen(
+        subscriptionStatus: _subscriptionStatus ?? 'inactive',
+        subscriptionPlan: _subscriptionPlan ?? 'none',
+        trialActive: _trialActive,
+        trialEndsAt: _trialEndsAt,
+        onRefreshStatus: _refreshSubscriptionStatus,
       );
     } else if (!_hasRoster && ref.read(rosterProvider).staffMembers.isEmpty) {
       return OnboardingScreen(isGuestMode: _isGuestMode);
@@ -521,8 +910,8 @@ class _AnimatedLaunchScreenState extends State<AnimatedLaunchScreen>
           end: Alignment.lerp(Alignment.bottomRight, Alignment.centerLeft, pulse2)!,
           colors: [
             Color.lerp(const Color(0xFF0B132B), const Color(0xFF1F2F55), pulse)!,
-            Color.lerp(const Color(0xFF5A189A), const Color(0xFF0F4C5C), pulse2)!,
-            Color.lerp(const Color(0xFFF72585), const Color(0xFF4CC9F0), pulse)!,
+            Color.lerp(const Color(0xFF2AA15F), const Color(0xFF0F4C5C), pulse2)!,
+            Color.lerp(const Color(0xFF2AA1A1), const Color(0xFF4CC9F0), pulse)!,
           ],
         );
 
@@ -544,27 +933,6 @@ class _AnimatedLaunchScreenState extends State<AnimatedLaunchScreen>
                 child: Column(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    Container(
-                      width: 82,
-                      height: 82,
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        color: Colors.white.withOpacity(0.15),
-                        boxShadow: [
-                          BoxShadow(
-                            color: Colors.white.withOpacity(0.2),
-                            blurRadius: 20,
-                            spreadRadius: 2,
-                          ),
-                        ],
-                      ),
-                      child: const Icon(
-                        Icons.calendar_today_rounded,
-                        size: 38,
-                        color: Colors.white,
-                      ),
-                    ),
-                    const SizedBox(height: 24),
                     Text(
                       'Roster Champion',
                       style: GoogleFonts.spaceGrotesk(
@@ -582,7 +950,14 @@ class _AnimatedLaunchScreenState extends State<AnimatedLaunchScreen>
                         color: Colors.white.withOpacity(0.75),
                       ),
                     ),
-                    const SizedBox(height: 30),
+                    const SizedBox(height: 24),
+                    Image.asset(
+                      'assets/images/rc4eee.gif',
+                      width: 340,
+                      height: 340,
+                      fit: BoxFit.contain,
+                    ),
+                    const SizedBox(height: 24),
                     const SizedBox(
                       width: 42,
                       height: 42,
@@ -702,16 +1077,33 @@ class _PatternPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
+    final baseOpacity = 0.05 + (0.03 * sin(2 * pi * progress));
     final paint = Paint()
-      ..color = Colors.white.withOpacity(0.08)
-      ..strokeWidth = 1.2;
+      ..color = Colors.white.withOpacity(baseOpacity)
+      ..strokeWidth = 1.0;
+    final boldPaint = Paint()
+      ..color = Colors.white.withOpacity(baseOpacity + 0.04)
+      ..strokeWidth = 1.6;
 
-    final spacing = 28.0;
+    final spacing = 32.0;
     final offset = spacing * progress;
-    for (double x = -size.height; x < size.width + size.height; x += spacing) {
-      final start = Offset(x + offset, 0);
-      final end = Offset(x - size.height + offset, size.height);
-      canvas.drawLine(start, end, paint);
+    for (double x = -spacing; x < size.width + spacing; x += spacing) {
+      final isMajor = (x / spacing).round() % 4 == 0;
+      final dx = x + offset;
+      canvas.drawLine(
+        Offset(dx % (size.width + spacing), 0),
+        Offset(dx % (size.width + spacing), size.height),
+        isMajor ? boldPaint : paint,
+      );
+    }
+    for (double y = -spacing; y < size.height + spacing; y += spacing) {
+      final isMajor = (y / spacing).round() % 4 == 0;
+      final dy = y + offset * 0.6;
+      canvas.drawLine(
+        Offset(0, dy % (size.height + spacing)),
+        Offset(size.width, dy % (size.height + spacing)),
+        isMajor ? boldPaint : paint,
+      );
     }
   }
 

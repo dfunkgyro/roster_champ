@@ -48,7 +48,14 @@ dependencies:
   speech_to_text: ^7.3.0
   flutter_tts: ^4.2.5
   audioplayers: ^6.5.1
+
+dependency_overrides:
+  speech_to_text_windows:
+    path: third_party/speech_to_text_windows
   scrollable_positioned_list: ^0.3.8
+  flutter_stripe: ^10.2.0
+  universal_html: ^2.2.4
+  local_auth: ^2.2.0
   
   # Cloud Services
   amazon_cognito_identity_dart_2: ^3.8.1

@@ -46,6 +46,8 @@ class _RosterGeneratorViewState extends ConsumerState<RosterGeneratorView> {
   GeneratedRoster? _preview;
   int _dayOffset = 0;
   int _weekOffset = 0;
+  String _bulkShift = 'D';
+  int _bulkDayIndex = 0;
   bool _useSavedNames = false;
   final List<_CoverTierRow> _coverTiers = [];
   final TextEditingController _templateNameController =
@@ -220,6 +222,16 @@ class _RosterGeneratorViewState extends ConsumerState<RosterGeneratorView> {
   Widget build(BuildContext context) {
     final roster = ref.watch(rosterProvider);
     final labels = roster.weekDayLabels;
+    final shiftChoices = <String>{
+      ...roster.getShiftTypes(),
+      'R',
+      'AL',
+      'OFF',
+    }.toList();
+    shiftChoices.sort();
+    if (!shiftChoices.contains(_bulkShift)) {
+      _bulkShift = shiftChoices.isNotEmpty ? shiftChoices.first : 'D';
+    }
     final quickMaxTeams =
         int.tryParse(_rotationWeeksController.text.trim()) ?? 16;
     final maxNightTeams = quickMaxTeams < 1 ? 1 : quickMaxTeams;
@@ -471,6 +483,11 @@ class _RosterGeneratorViewState extends ConsumerState<RosterGeneratorView> {
             _showComparison && _quickMode
                 ? _buildComparisonPreview(labels)
                 : _buildPreviewTable(labels, _preview!),
+          if (_preview != null && _editingPreview) ...[
+            const SizedBox(height: 12),
+            _buildSectionTitle('Quick pattern edits'),
+            _buildQuickEditControls(labels, shiftChoices),
+          ],
           if (_quickMode && _preview != null) ...[
             const SizedBox(height: 12),
             FilledButton.icon(
@@ -896,22 +913,59 @@ class _RosterGeneratorViewState extends ConsumerState<RosterGeneratorView> {
   }
 
   Widget _buildOffsetControls() {
-    return Row(
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Expanded(
-          child: _buildOffsetControl(
-            label: 'Day offset',
-            value: _dayOffset,
-            onChanged: (value) => setState(() => _dayOffset = value),
-          ),
+        const Text(
+          'Align the generated pattern to the correct day/week before applying.',
+          style: TextStyle(fontSize: 12, color: Colors.grey),
         ),
-        const SizedBox(width: 12),
-        Expanded(
-          child: _buildOffsetControl(
-            label: 'Week offset',
-            value: _weekOffset,
-            onChanged: (value) => setState(() => _weekOffset = value),
-          ),
+        const SizedBox(height: 8),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            OutlinedButton.icon(
+              onPressed: () => setState(() => _dayOffset -= 1),
+              icon: const Icon(Icons.chevron_left),
+              label: const Text('Day -1'),
+            ),
+            OutlinedButton.icon(
+              onPressed: () => setState(() => _dayOffset += 1),
+              icon: const Icon(Icons.chevron_right),
+              label: const Text('Day +1'),
+            ),
+            OutlinedButton.icon(
+              onPressed: () => setState(() => _weekOffset -= 1),
+              icon: const Icon(Icons.fast_rewind),
+              label: const Text('Week -1'),
+            ),
+            OutlinedButton.icon(
+              onPressed: () => setState(() => _weekOffset += 1),
+              icon: const Icon(Icons.fast_forward),
+              label: const Text('Week +1'),
+            ),
+          ],
+        ),
+        const SizedBox(height: 8),
+        Row(
+          children: [
+            Expanded(
+              child: _buildOffsetControl(
+                label: 'Day alignment (±1 day)',
+                value: _dayOffset,
+                onChanged: (value) => setState(() => _dayOffset = value),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: _buildOffsetControl(
+                label: 'Week alignment (±1 week)',
+                value: _weekOffset,
+                onChanged: (value) => setState(() => _weekOffset = value),
+              ),
+            ),
+          ],
         ),
       ],
     );
@@ -949,6 +1003,122 @@ class _RosterGeneratorViewState extends ConsumerState<RosterGeneratorView> {
         ),
       ],
     );
+  }
+
+  Widget _buildQuickEditControls(
+    List<String> labels,
+    List<String> shiftChoices,
+  ) {
+    return Card(
+      elevation: 0,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+        side: BorderSide(color: Colors.grey.shade300),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Apply a shift across all weeks instantly.',
+              style: TextStyle(fontSize: 12, color: Colors.grey),
+            ),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Expanded(
+                  child: DropdownButtonFormField<String>(
+                    value: _bulkShift,
+                    items: shiftChoices
+                        .map(
+                          (shift) => DropdownMenuItem(
+                            value: shift,
+                            child: Text(shift),
+                          ),
+                        )
+                        .toList(),
+                    onChanged: (value) {
+                      if (value == null) return;
+                      setState(() => _bulkShift = value);
+                    },
+                    decoration: const InputDecoration(
+                      labelText: 'Shift',
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: DropdownButtonFormField<int>(
+                    value: _bulkDayIndex.clamp(0, labels.length - 1),
+                    items: labels
+                        .asMap()
+                        .entries
+                        .map(
+                          (entry) => DropdownMenuItem(
+                            value: entry.key,
+                            child: Text(entry.value),
+                          ),
+                        )
+                        .toList(),
+                    onChanged: (value) {
+                      if (value == null) return;
+                      setState(() => _bulkDayIndex = value);
+                    },
+                    decoration: const InputDecoration(
+                      labelText: 'Single day',
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                FilledButton.tonal(
+                  onPressed: () => _applyShiftToPreviewDays(
+                    List.generate(labels.length, (i) => i),
+                  ),
+                  child: const Text('Whole week'),
+                ),
+                FilledButton.tonal(
+                  onPressed: () => _applyShiftToPreviewDays([0, 1, 2, 3, 4]),
+                  child: const Text('Mon–Fri'),
+                ),
+                FilledButton.tonal(
+                  onPressed: () => _applyShiftToPreviewDays([5, 6]),
+                  child: const Text('Sat–Sun'),
+                ),
+                FilledButton.tonal(
+                  onPressed: () => _applyShiftToPreviewDays([_bulkDayIndex]),
+                  child: Text('Apply ${labels[_bulkDayIndex]}'),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _applyShiftToPreviewDays(List<int> dayIndices) {
+    final preview = _preview;
+    if (preview == null) return;
+    final updated = preview.pattern
+        .map((week) => List<String>.from(week))
+        .toList();
+    for (final week in updated) {
+      for (final index in dayIndices) {
+        if (index >= 0 && index < week.length) {
+          week[index] = _bulkShift;
+        }
+      }
+    }
+    setState(() => _preview = GeneratedRoster(pattern: updated));
   }
 
   GeneratedRoster _applyOffsets(

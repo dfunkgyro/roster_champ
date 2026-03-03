@@ -72,6 +72,10 @@ enum AvailabilityType {
   availability,
   leave,
   preference,
+  training,
+  shiftChange,
+  swap,
+  general,
 }
 
 enum ActivityLogLevel {
@@ -357,6 +361,7 @@ class AvailabilityRequest {
   final DateTime endDate;
   final RequestStatus status;
   final String notes;
+  final String? guestName;
   final String? reviewedBy;
   final String? reviewNote;
   final DateTime createdAt;
@@ -373,6 +378,7 @@ class AvailabilityRequest {
     required this.notes,
     required this.createdAt,
     required this.updatedAt,
+    this.guestName,
     this.reviewedBy,
     this.reviewNote,
   });
@@ -387,6 +393,7 @@ class AvailabilityRequest {
         endDate: DateTime.parse(json['endDate'] as String),
         status: _parseRequestStatus(json['status']),
         notes: json['notes'] as String? ?? '',
+        guestName: json['guestName'] as String?,
         reviewedBy: json['reviewedBy'] as String?,
         reviewNote: json['reviewNote'] as String?,
         createdAt: DateTime.parse(json['createdAt'] as String),
@@ -402,6 +409,7 @@ class AvailabilityRequest {
         'endDate': endDate.toIso8601String(),
         'status': status.name,
         'notes': notes,
+        'guestName': guestName,
         'reviewedBy': reviewedBy,
         'reviewNote': reviewNote,
         'createdAt': createdAt.toIso8601String(),
@@ -443,6 +451,99 @@ class TimeClockEntry {
       date: DateTime.parse(json['date'] as String),
       hours: (json['hours'] as num?)?.toDouble() ?? 0,
       source: json['source'] as String? ?? 'import',
+    );
+  }
+}
+
+class TickSheetEntry {
+  final String staffId;
+  final String date;
+  final String status;
+  final String? comment;
+  final double? overtimeHours;
+  final String? overtimeJobNumber;
+  final String? overtimeLocation;
+  final String? overtimeReason;
+  final bool convertToToil;
+  final double? toilHours;
+  final DateTime updatedAt;
+  final String? updatedBy;
+
+  TickSheetEntry({
+    required this.staffId,
+    required this.date,
+    required this.status,
+    this.comment,
+    this.overtimeHours,
+    this.overtimeJobNumber,
+    this.overtimeLocation,
+    this.overtimeReason,
+    this.convertToToil = false,
+    this.toilHours,
+    required this.updatedAt,
+    this.updatedBy,
+  });
+
+  TickSheetEntry copyWith({
+    String? staffId,
+    String? date,
+    String? status,
+    String? comment,
+    double? overtimeHours,
+    String? overtimeJobNumber,
+    String? overtimeLocation,
+    String? overtimeReason,
+    bool? convertToToil,
+    double? toilHours,
+    DateTime? updatedAt,
+    String? updatedBy,
+  }) {
+    return TickSheetEntry(
+      staffId: staffId ?? this.staffId,
+      date: date ?? this.date,
+      status: status ?? this.status,
+      comment: comment ?? this.comment,
+      overtimeHours: overtimeHours ?? this.overtimeHours,
+      overtimeJobNumber: overtimeJobNumber ?? this.overtimeJobNumber,
+      overtimeLocation: overtimeLocation ?? this.overtimeLocation,
+      overtimeReason: overtimeReason ?? this.overtimeReason,
+      convertToToil: convertToToil ?? this.convertToToil,
+      toilHours: toilHours ?? this.toilHours,
+      updatedAt: updatedAt ?? this.updatedAt,
+      updatedBy: updatedBy ?? this.updatedBy,
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        'staffId': staffId,
+        'date': date,
+        'status': status,
+        'comment': comment,
+        'overtimeHours': overtimeHours,
+        'overtimeJobNumber': overtimeJobNumber,
+        'overtimeLocation': overtimeLocation,
+        'overtimeReason': overtimeReason,
+        'convertToToil': convertToToil,
+        'toilHours': toilHours,
+        'updatedAt': updatedAt.toIso8601String(),
+        'updatedBy': updatedBy,
+      };
+
+  factory TickSheetEntry.fromJson(Map<String, dynamic> json) {
+    return TickSheetEntry(
+      staffId: json['staffId'] as String? ?? '',
+      date: json['date'] as String? ?? '',
+      status: json['status'] as String? ?? 'pending',
+      comment: json['comment'] as String?,
+      overtimeHours: (json['overtimeHours'] as num?)?.toDouble(),
+      overtimeJobNumber: json['overtimeJobNumber'] as String?,
+      overtimeLocation: json['overtimeLocation'] as String?,
+      overtimeReason: json['overtimeReason'] as String?,
+      convertToToil: json['convertToToil'] as bool? ?? false,
+      toilHours: (json['toilHours'] as num?)?.toDouble(),
+      updatedAt: DateTime.tryParse(json['updatedAt'] as String? ?? '') ??
+          DateTime.now(),
+      updatedBy: json['updatedBy'] as String?,
     );
   }
 }
@@ -1355,6 +1456,15 @@ AvailabilityType _parseAvailabilityType(dynamic raw) {
         return AvailabilityType.leave;
       case 'preference':
         return AvailabilityType.preference;
+      case 'training':
+        return AvailabilityType.training;
+      case 'shiftChange':
+      case 'shift_change':
+        return AvailabilityType.shiftChange;
+      case 'swap':
+        return AvailabilityType.swap;
+      case 'general':
+        return AvailabilityType.general;
       case 'availability':
       default:
         return AvailabilityType.availability;
@@ -1470,6 +1580,8 @@ class AppSettings {
   final String holidayCountryCode;
   final List<String> holidayTypes;
   final List<String> additionalHolidayCountries;
+  final bool autoHolidaySyncEnabled;
+  final List<String> autoHolidayCountries;
   final bool showHolidayOverlay;
   final bool showObservanceOverlay;
   final bool showSportsOverlay;
@@ -1494,12 +1606,20 @@ class AppSettings {
   final String voiceOutputEngine;
   final List<String> voiceWakeWords;
   final String voiceOutputVoice;
+  final bool voiceOutputMuted;
   final Map<String, double> shiftHourMap;
+  final bool dstAdjustmentsEnabled;
   final bool analyticsEnabled;
   final bool analyticsCloudEnabled;
   final bool adaptiveLearningEnabled;
   final bool adaptiveLearningGlobalOptIn;
   final bool performanceMode;
+  final bool staySignedIn;
+  final bool signOutOnExit;
+  final bool toilEnabled;
+  final bool toilAutoConvertOvertime;
+  final double toilMultiplier;
+  final double toilHoursPerDay;
 
   const AppSettings({
     this.darkMode = false,
@@ -1515,6 +1635,8 @@ class AppSettings {
     this.holidayCountryCode = 'US',
     this.holidayTypes = const ['Public', 'Bank'],
     this.additionalHolidayCountries = const [],
+    this.autoHolidaySyncEnabled = true,
+    this.autoHolidayCountries = const ['US', 'GB', 'CN', 'IN'],
     this.showHolidayOverlay = true,
     this.showObservanceOverlay = true,
     this.showSportsOverlay = false,
@@ -1543,6 +1665,7 @@ class AppSettings {
       'roster champion',
     ],
     this.voiceOutputVoice = 'aws:Joanna',
+    this.voiceOutputMuted = false,
     this.shiftHourMap = const {
       'D': 8,
       'E': 8,
@@ -1558,12 +1681,20 @@ class AppSettings {
       'R': 0,
       'OFF': 0,
       'AL': 0,
+      'TOIL': 0,
     },
+    this.dstAdjustmentsEnabled = true,
     this.analyticsEnabled = true,
     this.analyticsCloudEnabled = true,
     this.adaptiveLearningEnabled = true,
     this.adaptiveLearningGlobalOptIn = false,
     this.performanceMode = true,
+    this.staySignedIn = true,
+    this.signOutOnExit = false,
+    this.toilEnabled = true,
+    this.toilAutoConvertOvertime = false,
+    this.toilMultiplier = 1.5,
+    this.toilHoursPerDay = 8,
   });
 
   AppSettings copyWith({
@@ -1580,6 +1711,8 @@ class AppSettings {
     String? holidayCountryCode,
     List<String>? holidayTypes,
     List<String>? additionalHolidayCountries,
+    bool? autoHolidaySyncEnabled,
+    List<String>? autoHolidayCountries,
     bool? showHolidayOverlay,
     bool? showObservanceOverlay,
     bool? showSportsOverlay,
@@ -1604,12 +1737,20 @@ class AppSettings {
     String? voiceOutputEngine,
     List<String>? voiceWakeWords,
     String? voiceOutputVoice,
+    bool? voiceOutputMuted,
     Map<String, double>? shiftHourMap,
+    bool? dstAdjustmentsEnabled,
     bool? analyticsEnabled,
     bool? analyticsCloudEnabled,
     bool? adaptiveLearningEnabled,
     bool? adaptiveLearningGlobalOptIn,
     bool? performanceMode,
+    bool? staySignedIn,
+    bool? signOutOnExit,
+    bool? toilEnabled,
+    bool? toilAutoConvertOvertime,
+    double? toilMultiplier,
+    double? toilHoursPerDay,
   }) {
     return AppSettings(
       darkMode: darkMode ?? this.darkMode,
@@ -1626,6 +1767,10 @@ class AppSettings {
       holidayTypes: holidayTypes ?? this.holidayTypes,
       additionalHolidayCountries:
           additionalHolidayCountries ?? this.additionalHolidayCountries,
+      autoHolidaySyncEnabled:
+          autoHolidaySyncEnabled ?? this.autoHolidaySyncEnabled,
+      autoHolidayCountries:
+          autoHolidayCountries ?? this.autoHolidayCountries,
       showHolidayOverlay: showHolidayOverlay ?? this.showHolidayOverlay,
       showObservanceOverlay:
           showObservanceOverlay ?? this.showObservanceOverlay,
@@ -1651,7 +1796,10 @@ class AppSettings {
       voiceOutputEngine: voiceOutputEngine ?? this.voiceOutputEngine,
       voiceWakeWords: voiceWakeWords ?? this.voiceWakeWords,
       voiceOutputVoice: voiceOutputVoice ?? this.voiceOutputVoice,
+      voiceOutputMuted: voiceOutputMuted ?? this.voiceOutputMuted,
       shiftHourMap: shiftHourMap ?? this.shiftHourMap,
+      dstAdjustmentsEnabled:
+          dstAdjustmentsEnabled ?? this.dstAdjustmentsEnabled,
       analyticsEnabled: analyticsEnabled ?? this.analyticsEnabled,
       analyticsCloudEnabled:
           analyticsCloudEnabled ?? this.analyticsCloudEnabled,
@@ -1660,6 +1808,13 @@ class AppSettings {
       adaptiveLearningGlobalOptIn:
           adaptiveLearningGlobalOptIn ?? this.adaptiveLearningGlobalOptIn,
       performanceMode: performanceMode ?? this.performanceMode,
+      staySignedIn: staySignedIn ?? this.staySignedIn,
+      signOutOnExit: signOutOnExit ?? this.signOutOnExit,
+      toilEnabled: toilEnabled ?? this.toilEnabled,
+      toilAutoConvertOvertime:
+          toilAutoConvertOvertime ?? this.toilAutoConvertOvertime,
+      toilMultiplier: toilMultiplier ?? this.toilMultiplier,
+      toilHoursPerDay: toilHoursPerDay ?? this.toilHoursPerDay,
     );
   }
 
@@ -1677,6 +1832,8 @@ class AppSettings {
       'holidayCountryCode': holidayCountryCode,
       'holidayTypes': holidayTypes,
       'additionalHolidayCountries': additionalHolidayCountries,
+      'autoHolidaySyncEnabled': autoHolidaySyncEnabled,
+      'autoHolidayCountries': autoHolidayCountries,
       'showHolidayOverlay': showHolidayOverlay,
       'showObservanceOverlay': showObservanceOverlay,
       'showSportsOverlay': showSportsOverlay,
@@ -1701,12 +1858,20 @@ class AppSettings {
       'voiceOutputEngine': voiceOutputEngine,
       'voiceWakeWords': voiceWakeWords,
       'voiceOutputVoice': voiceOutputVoice,
+      'voiceOutputMuted': voiceOutputMuted,
       'shiftHourMap': shiftHourMap,
+      'dstAdjustmentsEnabled': dstAdjustmentsEnabled,
       'analyticsEnabled': analyticsEnabled,
       'analyticsCloudEnabled': analyticsCloudEnabled,
       'adaptiveLearningEnabled': adaptiveLearningEnabled,
       'adaptiveLearningGlobalOptIn': adaptiveLearningGlobalOptIn,
       'performanceMode': performanceMode,
+      'staySignedIn': staySignedIn,
+      'signOutOnExit': signOutOnExit,
+      'toilEnabled': toilEnabled,
+      'toilAutoConvertOvertime': toilAutoConvertOvertime,
+      'toilMultiplier': toilMultiplier,
+      'toilHoursPerDay': toilHoursPerDay,
       };
 
   factory AppSettings.fromJson(Map<String, dynamic> json) => AppSettings(
@@ -1724,14 +1889,21 @@ class AppSettings {
       holidayCountryCode:
           json['holidayCountryCode'] as String? ?? 'US',
       holidayTypes: (json['holidayTypes'] as List<dynamic>?)
-              ?.map((e) => e.toString())
-              .toList() ??
+          ?.map((e) => e.toString())
+          .toList() ??
           const ['Public', 'Bank'],
       additionalHolidayCountries:
           (json['additionalHolidayCountries'] as List<dynamic>?)
-                  ?.map((e) => e.toString())
-                  .toList() ??
-              const [],
+              ?.map((e) => e.toString())
+              .toList() ??
+          const [],
+      autoHolidaySyncEnabled:
+          json['autoHolidaySyncEnabled'] as bool? ?? true,
+      autoHolidayCountries:
+          (json['autoHolidayCountries'] as List<dynamic>?)
+              ?.map((e) => e.toString())
+              .toList() ??
+          const ['US', 'GB', 'CN', 'IN'],
       showHolidayOverlay:
           json['showHolidayOverlay'] as bool? ?? true,
       showObservanceOverlay:
@@ -1776,6 +1948,8 @@ class AppSettings {
             const ['rc', 'roster champ', 'roster champion'],
         voiceOutputVoice:
             json['voiceOutputVoice'] as String? ?? 'aws:Joanna',
+        voiceOutputMuted:
+            json['voiceOutputMuted'] as bool? ?? false,
         shiftHourMap: (json['shiftHourMap'] as Map?)
                 ?.map((key, value) => MapEntry(
                       key.toString(),
@@ -1797,6 +1971,8 @@ class AppSettings {
               'OFF': 0,
               'AL': 0,
             },
+        dstAdjustmentsEnabled:
+            json['dstAdjustmentsEnabled'] as bool? ?? true,
         analyticsEnabled: json['analyticsEnabled'] as bool? ?? true,
         analyticsCloudEnabled: json['analyticsCloudEnabled'] as bool? ?? true,
         adaptiveLearningEnabled:
@@ -1804,6 +1980,15 @@ class AppSettings {
         adaptiveLearningGlobalOptIn:
             json['adaptiveLearningGlobalOptIn'] as bool? ?? false,
         performanceMode: json['performanceMode'] as bool? ?? true,
+        staySignedIn: json['staySignedIn'] as bool? ?? true,
+        signOutOnExit: json['signOutOnExit'] as bool? ?? false,
+        toilEnabled: json['toilEnabled'] as bool? ?? true,
+        toilAutoConvertOvertime:
+            json['toilAutoConvertOvertime'] as bool? ?? false,
+        toilMultiplier:
+            (json['toilMultiplier'] as num?)?.toDouble() ?? 1.5,
+        toilHoursPerDay:
+            (json['toilHoursPerDay'] as num?)?.toDouble() ?? 8,
       );
 }
 

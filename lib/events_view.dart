@@ -4,12 +4,138 @@ import 'package:intl/intl.dart';
 import 'providers.dart';
 import 'dialogs.dart';
 import 'models.dart' as models;
+import 'services/holiday_service.dart';
+import 'services/public_event_service.dart';
+import 'services/dst_service.dart';
 
-class EventsView extends ConsumerWidget {
+Color _eventColorForType(models.EventType type) {
+  switch (type) {
+    case models.EventType.holiday:
+      return Colors.red;
+    case models.EventType.training:
+      return Colors.blue;
+    case models.EventType.meeting:
+      return Colors.purple;
+    case models.EventType.deadline:
+      return Colors.orange;
+    case models.EventType.birthday:
+      return Colors.pink;
+    case models.EventType.anniversary:
+      return Colors.green;
+    case models.EventType.payday:
+      return Colors.teal;
+    case models.EventType.religious:
+      return Colors.deepPurple;
+    case models.EventType.cultural:
+      return Colors.deepOrange;
+    case models.EventType.sports:
+      return Colors.teal;
+    default:
+      return Colors.grey;
+  }
+}
+
+class EventsView extends ConsumerStatefulWidget {
   const EventsView({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<EventsView> createState() => _EventsViewState();
+}
+
+class _EventsViewState extends ConsumerState<EventsView> {
+  bool _loadingOverlay = false;
+  List<models.Event> _overlayEvents = [];
+
+  @override
+  void initState() {
+    super.initState();
+    _loadOverlayEvents();
+  }
+
+  @override
+  void didUpdateWidget(covariant EventsView oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    _loadOverlayEvents();
+  }
+
+  Future<void> _loadOverlayEvents() async {
+    if (_loadingOverlay) return;
+    setState(() => _loadingOverlay = true);
+    try {
+      final settings = ref.read(settingsProvider);
+      final now = DateTime.now();
+      final start = DateTime(now.year, now.month, now.day);
+      final end = DateTime(now.year + 1, now.month, now.day);
+
+      final holidays = await HolidayService.instance.getHolidaysRange(
+        countryCode: settings.holidayCountryCode,
+        additionalCountries: settings.additionalHolidayCountries,
+        start: start,
+        end: end,
+        allowedTypes: settings.holidayTypes,
+      );
+      final publicEventMap = await PublicEventService.instance.getPublicEvents(
+        settings: settings,
+        start: start,
+        end: end,
+      );
+
+      final overlay = <models.Event>[];
+      for (final item in holidays.values) {
+        overlay.add(
+          models.Event(
+            id: 'holiday-${item.date.toIso8601String()}-${item.name.hashCode}',
+            title: item.localName.isNotEmpty ? item.localName : item.name,
+            description: item.types.isNotEmpty
+                ? item.types.join(', ')
+                : 'Holiday',
+            date: item.date,
+            eventType: models.EventType.holiday,
+          ),
+        );
+      }
+
+      for (final entry in publicEventMap.entries) {
+        overlay.addAll(entry.value);
+      }
+
+      if (settings.dstAdjustmentsEnabled) {
+        var cursor = start;
+        while (!cursor.isAfter(end)) {
+          final delta = DstService.dayDeltaMinutes(cursor);
+          if (delta != 0) {
+            final label = DstService.deltaLabel(cursor) ?? 'DST change';
+            overlay.add(
+              models.Event(
+                id: 'dst-${cursor.toIso8601String()}',
+                title: label,
+                description: 'Daylight saving time change',
+                date: cursor,
+                eventType: models.EventType.custom,
+              ),
+            );
+          }
+          cursor = cursor.add(const Duration(days: 1));
+        }
+      }
+
+      overlay.sort((a, b) => a.date.compareTo(b.date));
+      if (mounted) {
+        setState(() => _overlayEvents = overlay);
+      }
+    } catch (_) {
+      if (mounted) {
+        setState(() => _overlayEvents = []);
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _loadingOverlay = false);
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final roster = ref.watch(rosterProvider);
     final events = roster.events;
     final isReadOnly = roster.readOnly;
@@ -51,7 +177,7 @@ class EventsView extends ConsumerWidget {
     final sortedEvents = List<models.Event>.from(events)
       ..sort((a, b) => a.date.compareTo(b.date));
 
-    if (events.isEmpty) {
+    if (events.isEmpty && _overlayEvents.isEmpty) {
       return emptyState();
     }
 
@@ -72,13 +198,32 @@ class EventsView extends ConsumerWidget {
               ],
             ),
           ),
+        if (_loadingOverlay)
+          const Padding(
+            padding: EdgeInsets.all(16),
+            child: LinearProgressIndicator(),
+          ),
         Expanded(
           child: ListView.builder(
             padding: const EdgeInsets.all(16),
-            itemCount: sortedEvents.length,
+            itemCount: sortedEvents.length + (_overlayEvents.isEmpty ? 0 : 1 + _overlayEvents.length),
             itemBuilder: (context, index) {
-              final event = sortedEvents[index];
-              return _EventCard(event: event);
+              if (index < sortedEvents.length) {
+                final event = sortedEvents[index];
+                return _EventCard(event: event);
+              }
+              final overlayIndex = index - sortedEvents.length;
+              if (overlayIndex == 0) {
+                return Padding(
+                  padding: const EdgeInsets.only(top: 12, bottom: 8),
+                  child: Text(
+                    'Holiday & Observance Overlays',
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                );
+              }
+              final overlayEvent = _overlayEvents[overlayIndex - 1];
+              return _OverlayEventCard(event: overlayEvent);
             },
           ),
         ),
@@ -102,6 +247,28 @@ class EventsView extends ConsumerWidget {
   }
 }
 
+class _OverlayEventCard extends StatelessWidget {
+  final models.Event event;
+
+  const _OverlayEventCard({required this.event});
+
+  @override
+  Widget build(BuildContext context) {
+    final color = _eventColorForType(event.eventType);
+    return Card(
+      margin: const EdgeInsets.only(bottom: 12),
+      child: ListTile(
+        leading: Icon(Icons.event, color: color),
+        title: Text(event.title),
+        subtitle: Text(
+          '${DateFormat('MMM d, yyyy').format(event.date)}'
+          '${event.description != null && event.description!.isNotEmpty ? ' • ${event.description}' : ''}',
+        ),
+      ),
+    );
+  }
+}
+
 class _EventCard extends ConsumerWidget {
   final models.Event event;
 
@@ -109,7 +276,7 @@ class _EventCard extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final color = _getEventColor(event.eventType);
+    final color = _eventColorForType(event.eventType);
     final isPast = event.date.isBefore(DateTime.now());
     final isReadOnly = ref.watch(rosterProvider).readOnly;
 
@@ -216,32 +383,7 @@ class _EventCard extends ConsumerWidget {
     );
   }
 
-  Color _getEventColor(models.EventType type) {
-    switch (type) {
-      case models.EventType.holiday:
-        return Colors.red;
-      case models.EventType.training:
-        return Colors.blue;
-      case models.EventType.meeting:
-        return Colors.purple;
-      case models.EventType.deadline:
-        return Colors.orange;
-      case models.EventType.birthday:
-        return Colors.pink;
-      case models.EventType.anniversary:
-        return Colors.green;
-      case models.EventType.payday:
-        return Colors.teal;
-      case models.EventType.religious:
-        return Colors.deepPurple;
-      case models.EventType.cultural:
-        return Colors.deepOrange;
-      case models.EventType.sports:
-        return Colors.teal;
-      default:
-        return Colors.grey;
-    }
-  }
+  Color _getEventColor(models.EventType type) => _eventColorForType(type);
 
   Icon _getEventIcon(models.EventType type) {
     switch (type) {

@@ -1,13 +1,16 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../providers.dart';
 import '../aws_service.dart';
 import 'login_screen.dart';
 import '../home_screen.dart';
 import '../ai_suggestions_view.dart';
+import '../import_roster_screen.dart';
 import 'package:roster_champ/safe_text_field.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
@@ -37,6 +40,9 @@ class _RosterSharingScreenState extends ConsumerState<RosterSharingScreen> {
       TextEditingController();
   final TextEditingController _templatePasswordController =
       TextEditingController();
+  Timer? _draftTimer;
+  Timer? _sessionKeepAlive;
+  static const _draftKey = 'roster_create_draft';
 
   bool _isLoading = false;
   List<Map<String, dynamic>> _userRosters = [];
@@ -46,6 +52,11 @@ class _RosterSharingScreenState extends ConsumerState<RosterSharingScreen> {
   int? _shareExpiresInHours;
   String? _generatedCode;
   List<String> _codeSuggestions = [];
+  String _sharePlan = 'none';
+  int _sharePlanMaxUses = 0;
+  int _sharePlanMaxMonths = 0;
+  bool _shareCodesLoading = false;
+  List<Map<String, dynamic>> _shareCodes = [];
   String? _pendingTemplateCode;
   String? _pendingTemplatePassword;
   bool _templateIncludeStaff = true;
@@ -57,10 +68,17 @@ class _RosterSharingScreenState extends ConsumerState<RosterSharingScreen> {
   void initState() {
     super.initState();
     _loadUserRosters();
+    _loadSharePlan();
+    _loadShareCodes();
+    _loadDraft();
+    _setupDraftListeners();
+    _startSessionKeepAlive();
   }
 
   @override
   void dispose() {
+    _draftTimer?.cancel();
+    _sessionKeepAlive?.cancel();
     _rosterNameController.dispose();
     _rosterIdController.dispose();
     _passwordController.dispose();
@@ -71,6 +89,138 @@ class _RosterSharingScreenState extends ConsumerState<RosterSharingScreen> {
     _templateCodeController.dispose();
     _templatePasswordController.dispose();
     super.dispose();
+  }
+
+  void _setupDraftListeners() {
+    void listener() => _scheduleDraftSave();
+    _rosterNameController.addListener(listener);
+    _passwordController.addListener(listener);
+    _templateCodeController.addListener(listener);
+    _templatePasswordController.addListener(listener);
+  }
+
+  void _scheduleDraftSave() {
+    _draftTimer?.cancel();
+    _draftTimer = Timer(const Duration(milliseconds: 600), _saveDraft);
+  }
+
+  Future<void> _loadSharePlan() async {
+    try {
+      final cached = await AwsService.instance.getCachedSubscription();
+      final plan = (cached['plan']?.toString().toLowerCase() ?? 'none');
+      int maxUses = 0;
+      int maxMonths = 0;
+      switch (plan) {
+        case 'enterprise':
+          maxUses = 100;
+          maxMonths = 36;
+          break;
+        case 'operations':
+          maxUses = 25;
+          maxMonths = 24;
+          break;
+        case 'starter':
+          maxUses = 16;
+          maxMonths = 16;
+          break;
+        default:
+          maxUses = 0;
+          maxMonths = 0;
+      }
+      if (mounted) {
+        setState(() {
+          _sharePlan = plan;
+          _sharePlanMaxUses = maxUses;
+          _sharePlanMaxMonths = maxMonths;
+        });
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _loadShareCodes({String? rosterId}) async {
+    setState(() => _shareCodesLoading = true);
+    try {
+      final response = await AwsService.instance.listShareCodes(
+        rosterId: rosterId,
+      );
+      final items = response['items'];
+      if (items is List) {
+        _shareCodes = items
+            .map((item) => Map<String, dynamic>.from(item as Map))
+            .toList();
+      } else {
+        _shareCodes = [];
+      }
+    } catch (_) {
+      _shareCodes = [];
+    }
+    if (mounted) {
+      setState(() => _shareCodesLoading = false);
+    }
+  }
+
+  Future<void> _saveDraft() async {
+    final payload = <String, dynamic>{
+      'rosterName': _rosterNameController.text.trim(),
+      'password': _passwordController.text,
+      'templateCode': _templateCodeController.text.trim(),
+      'templatePassword': _templatePasswordController.text,
+      'includeStaff': _templateIncludeStaff,
+      'includeOverrides': _templateIncludeOverrides,
+      'compressed': _templateCompressed,
+      'expiresAt': _templateExpiresAt?.toIso8601String(),
+    };
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_draftKey, jsonEncode(payload));
+    } catch (_) {}
+  }
+
+  Future<void> _loadDraft() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(_draftKey);
+      if (raw == null || raw.trim().isEmpty) return;
+      final data = jsonDecode(raw) as Map<String, dynamic>;
+      _rosterNameController.text = data['rosterName']?.toString() ?? '';
+      _passwordController.text = data['password']?.toString() ?? '';
+      _templateCodeController.text =
+          data['templateCode']?.toString() ?? '';
+      _templatePasswordController.text =
+          data['templatePassword']?.toString() ?? '';
+      _templateIncludeStaff =
+          data['includeStaff']?.toString() == 'true';
+      _templateIncludeOverrides =
+          data['includeOverrides']?.toString() == 'true';
+      _templateCompressed =
+          data['compressed']?.toString() != 'false';
+      final expiresRaw = data['expiresAt']?.toString();
+      if (expiresRaw != null && expiresRaw.isNotEmpty) {
+        _templateExpiresAt = DateTime.tryParse(expiresRaw);
+      }
+      if (_templateCodeController.text.trim().isNotEmpty) {
+        _pendingTemplateCode = _templateCodeController.text.trim();
+        _pendingTemplatePassword = _templatePasswordController.text.trim();
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _clearDraft() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove(_draftKey);
+    } catch (_) {}
+  }
+
+  void _startSessionKeepAlive() {
+    _sessionKeepAlive?.cancel();
+    _sessionKeepAlive = Timer.periodic(
+      const Duration(minutes: 4),
+      (_) async {
+        if (!AwsService.instance.isAuthenticated) return;
+        await AwsService.instance.ensureSessionFresh();
+      },
+    );
   }
 
   Future<void> _loadUserRosters() async {
@@ -91,18 +241,21 @@ class _RosterSharingScreenState extends ConsumerState<RosterSharingScreen> {
   }
 
   Future<void> _createRoster() async {
-    if (_rosterNameController.text.isEmpty) {
-      if (_pendingTemplateCode != null &&
-          _pendingTemplateCode!.trim().isNotEmpty) {
-        _rosterNameController.text =
-            'Template Roster ${DateTime.now().toString().split(' ').first}';
-      } else {
-        return;
-      }
+    if (_rosterNameController.text.trim().isEmpty) {
+      final today = DateTime.now();
+      final dateLabel =
+          '${today.year}-${today.month.toString().padLeft(2, '0')}-${today.day.toString().padLeft(2, '0')}';
+      final timeLabel =
+          '${today.hour.toString().padLeft(2, '0')}${today.minute.toString().padLeft(2, '0')}';
+      _rosterNameController.text = _pendingTemplateCode != null &&
+              _pendingTemplateCode!.trim().isNotEmpty
+          ? 'Template Roster $dateLabel'
+          : 'Roster $dateLabel $timeLabel';
     }
 
     setState(() => _isLoading = true);
     try {
+      await AwsService.instance.ensureSessionFresh();
       final password =
           _passwordController.text.isEmpty ? null : _passwordController.text;
       final rosterId = await AwsService.instance.createRoster(
@@ -130,12 +283,27 @@ class _RosterSharingScreenState extends ConsumerState<RosterSharingScreen> {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Roster created successfully')),
         );
+        await _clearDraft();
         Navigator.of(context).pushAndRemoveUntil(
           MaterialPageRoute(builder: (context) => const HomeScreen()),
           (route) => false,
         );
       }
     } catch (e) {
+      final message = e.toString();
+      if (message.contains('NotAuthorizedException') ||
+          message.contains('token expired') ||
+          message.contains('Session expired')) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text(
+                'Session expired. Sign in again to finish. Your draft is saved.',
+              ),
+            ),
+          );
+        }
+      }
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Error creating roster: $e')),
@@ -623,6 +791,7 @@ class _RosterSharingScreenState extends ConsumerState<RosterSharingScreen> {
           const SnackBar(content: Text('Share code created')),
         );
       }
+      await _loadShareCodes(rosterId: rosterId);
     } catch (e) {
       final body = _parseErrorBody(e);
       if (body != null && body['suggestions'] is List) {
@@ -643,6 +812,36 @@ class _RosterSharingScreenState extends ConsumerState<RosterSharingScreen> {
       }
     }
     setState(() => _isLoading = false);
+  }
+
+  Future<void> _revokeShareCode(String code) async {
+    setState(() => _isLoading = true);
+    try {
+      await AwsService.instance.revokeShareCode(code);
+      final rosterId = _selectedRosterId;
+      await _loadShareCodes(rosterId: rosterId);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Share code revoked')),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error revoking share code: $e')),
+        );
+      }
+    }
+    setState(() => _isLoading = false);
+  }
+
+  Future<void> _copyToClipboard(String value) async {
+    if (value.trim().isEmpty) return;
+    await Clipboard.setData(ClipboardData(text: value));
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Access code copied')),
+    );
   }
 
   Future<void> _openSharedRoster() async {
@@ -669,8 +868,11 @@ class _RosterSharingScreenState extends ConsumerState<RosterSharingScreen> {
   }
 
   Future<void> _switchRoster(String rosterId) async {
-    final shouldSwitch = await _confirmRosterSwitch(rosterId);
-    if (!shouldSwitch) return;
+    final isCurrent = AwsService.instance.currentRosterId == rosterId;
+    if (!isCurrent) {
+      final shouldSwitch = await _confirmRosterSwitch(rosterId);
+      if (!shouldSwitch) return;
+    }
 
     setState(() => _isLoading = true);
     try {
@@ -752,11 +954,54 @@ class _RosterSharingScreenState extends ConsumerState<RosterSharingScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final planLabel = _sharePlan.isEmpty || _sharePlan == 'none'
+        ? 'No subscription'
+        : _sharePlan[0].toUpperCase() + _sharePlan.substring(1);
+    final maxMonths = _sharePlanMaxMonths;
+    final maxUses = _sharePlanMaxUses;
+    final maxHours = maxMonths > 0 ? maxMonths * 30 * 24 : null;
+    final expiryOptions = <int?>[];
+    if (maxMonths > 0) {
+      expiryOptions.add(null);
+      for (final hours in [24, 168, 720, 2160]) {
+        if (maxHours == null || hours <= maxHours) {
+          expiryOptions.add(hours);
+        }
+      }
+    } else {
+      expiryOptions.add(null);
+      expiryOptions.addAll([24, 168, 720, 2160]);
+    }
+
     return DefaultTabController(
       length: 4,
       initialIndex: widget.initialTabIndex,
       child: Scaffold(
         appBar: AppBar(
+          leadingWidth: 84,
+          leading: Row(
+            children: [
+              IconButton(
+                tooltip: 'Back',
+                icon: const Icon(Icons.arrow_back),
+                onPressed: () => Navigator.maybePop(context),
+              ),
+              InkWell(
+                borderRadius: BorderRadius.circular(16),
+                onTap: () => Navigator.maybePop(context),
+                child: Padding(
+                  padding: const EdgeInsets.all(4),
+                  child: Image.asset(
+                    'assets/images/rc1gold1a.gif',
+                    width: 28,
+                    height: 28,
+                    fit: BoxFit.contain,
+                    semanticLabel: 'Roster Champion mascot',
+                  ),
+                ),
+              ),
+            ],
+          ),
           title: const Text('Roster Sharing'),
           actions: [
             IconButton(
@@ -850,6 +1095,17 @@ class _RosterSharingScreenState extends ConsumerState<RosterSharingScreen> {
     );
   }
 
+  Future<void> _openTemplateImport() async {
+    await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => const ImportRosterScreen(
+          openTemplateOnStart: true,
+        ),
+      ),
+    );
+  }
+
   Widget _buildMyRostersTab() {
     if (_isLoading) {
       return const Center(child: CircularProgressIndicator());
@@ -862,12 +1118,44 @@ class _RosterSharingScreenState extends ConsumerState<RosterSharingScreen> {
     }).toList();
 
     if (_userRosters.isEmpty) {
-      return const Center(child: Text('No rosters found yet.'));
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.calendar_today_outlined, size: 64),
+              const SizedBox(height: 12),
+              const Text('No rosters found yet.'),
+              const SizedBox(height: 16),
+              FilledButton.icon(
+                onPressed: _openTemplateImport,
+                icon: const Icon(Icons.qr_code_rounded),
+                label: const Text('Use Template Code'),
+              ),
+            ],
+          ),
+        ),
+      );
     }
 
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
+        Card(
+          margin: const EdgeInsets.only(bottom: 16),
+          child: ListTile(
+            leading: const Icon(Icons.qr_code_rounded),
+            title: const Text('Use Template Code'),
+            subtitle: const Text(
+              'Paste a template or scan a QR code to create a new roster.',
+            ),
+            trailing: FilledButton(
+              onPressed: _openTemplateImport,
+              child: const Text('Open'),
+            ),
+          ),
+        ),
         if (lastRosterEntry != null)
           _buildLastRosterCard(lastRosterEntry['rosters']
               as Map<String, dynamic>),
@@ -944,19 +1232,20 @@ class _RosterSharingScreenState extends ConsumerState<RosterSharingScreen> {
                           roster['name'] as String,
                         ),
               ),
-            if (isActive)
+            if (isActive) ...[
               const Chip(
                 label: Text('Active'),
                 backgroundColor: Colors.green,
                 labelStyle: TextStyle(color: Colors.white),
-              )
-            else
-              FilledButton(
-                onPressed: _isLoading
-                    ? null
-                    : () => _openRosterFromList(roster),
-                child: const Text('Open'),
               ),
+              const SizedBox(width: 8),
+            ],
+            FilledButton(
+              onPressed: _isLoading
+                  ? null
+                  : () => _openRosterFromList(roster),
+              child: Text(isActive ? 'Open' : 'Open'),
+            ),
           ],
         ),
       ),
@@ -1095,7 +1384,7 @@ class _RosterSharingScreenState extends ConsumerState<RosterSharingScreen> {
                 controller: _rosterNameController,
                 decoration: const InputDecoration(
                   labelText: 'Roster Name',
-                  hintText: 'Enter roster name',
+                  hintText: 'Enter roster name (auto-filled if left blank)',
                   border: OutlineInputBorder(),
                 ),
               ),
@@ -1309,6 +1598,24 @@ class _RosterSharingScreenState extends ConsumerState<RosterSharingScreen> {
         .map((entry) => entry['rosters'] as Map<String, dynamic>)
         .toList();
     final canGenerate = rosterOptions.isNotEmpty;
+    final planLabel = _sharePlan.isEmpty || _sharePlan == 'none'
+        ? 'No subscription'
+        : _sharePlan[0].toUpperCase() + _sharePlan.substring(1);
+    final maxMonths = _sharePlanMaxMonths;
+    final maxUses = _sharePlanMaxUses;
+    final maxHours = maxMonths > 0 ? maxMonths * 30 * 24 : null;
+    final expiryOptions = <int?>[];
+    if (maxMonths > 0) {
+      expiryOptions.add(null);
+      for (final hours in [24, 168, 720, 2160]) {
+        if (maxHours == null || hours <= maxHours) {
+          expiryOptions.add(hours);
+        }
+      }
+    } else {
+      expiryOptions.add(null);
+      expiryOptions.addAll([24, 168, 720, 2160]);
+    }
 
     return ListView(
       padding: const EdgeInsets.all(16),
@@ -1321,6 +1628,16 @@ class _RosterSharingScreenState extends ConsumerState<RosterSharingScreen> {
             subtitle: const Text(
               'Create a unique code for read-only access. Guests can request leave but cannot edit shifts.',
             ),
+          ),
+        ),
+        Card(
+          margin: const EdgeInsets.only(bottom: 16),
+          child: ListTile(
+            leading: const Icon(Icons.workspace_premium_outlined),
+            title: Text('Plan limits: $planLabel'),
+            subtitle: maxMonths > 0
+                ? Text('Up to $maxUses people for $maxMonths months per code.')
+                : const Text('Upgrade to Starter to enable access codes.'),
           ),
         ),
         Text(
@@ -1342,7 +1659,10 @@ class _RosterSharingScreenState extends ConsumerState<RosterSharingScreen> {
                   ),
                 )
                 .toList(),
-            onChanged: (value) => setState(() => _selectedRosterId = value),
+            onChanged: (value) {
+              setState(() => _selectedRosterId = value);
+              _loadShareCodes(rosterId: value);
+            },
             decoration: const InputDecoration(
               labelText: 'Roster',
               border: OutlineInputBorder(),
@@ -1371,12 +1691,26 @@ class _RosterSharingScreenState extends ConsumerState<RosterSharingScreen> {
         const SizedBox(height: 12),
         DropdownButtonFormField<int?>(
           value: _shareExpiresInHours,
-          items: const [
-            DropdownMenuItem(value: null, child: Text('No expiry')),
-            DropdownMenuItem(value: 24, child: Text('Expires in 24 hours')),
-            DropdownMenuItem(value: 168, child: Text('Expires in 7 days')),
-            DropdownMenuItem(value: 720, child: Text('Expires in 30 days')),
-          ],
+          items: expiryOptions
+              .map(
+                (hours) => DropdownMenuItem(
+                  value: hours,
+                  child: Text(
+                    hours == null
+                        ? (maxMonths > 0
+                            ? 'Plan max ($maxMonths months)'
+                            : 'No expiry')
+                        : (hours == 24
+                            ? 'Expires in 24 hours'
+                            : hours == 168
+                                ? 'Expires in 7 days'
+                                : hours == 720
+                                    ? 'Expires in 30 days'
+                                    : 'Expires in 90 days'),
+                  ),
+                ),
+              )
+              .toList(),
           onChanged: (value) => setState(() => _shareExpiresInHours = value),
           decoration: const InputDecoration(
             labelText: 'Expiry',
@@ -1387,9 +1721,12 @@ class _RosterSharingScreenState extends ConsumerState<RosterSharingScreen> {
         SafeTextField(
           controller: _maxUsesController,
           keyboardType: TextInputType.number,
-          decoration: const InputDecoration(
+          decoration: InputDecoration(
             labelText: 'Max uses (optional)',
-            border: OutlineInputBorder(),
+            helperText: maxUses > 0
+                ? 'Plan max: $maxUses people'
+                : 'Requires Starter or higher',
+            border: const OutlineInputBorder(),
           ),
         ),
         const SizedBox(height: 12),
@@ -1440,9 +1777,89 @@ class _RosterSharingScreenState extends ConsumerState<RosterSharingScreen> {
               leading: const Icon(Icons.key),
               title: Text('Access Code: ${_generatedCode!}'),
               subtitle: const Text('Share this code for roster access'),
+              trailing: Wrap(
+                spacing: 8,
+                children: [
+                  OutlinedButton.icon(
+                    onPressed: _isLoading
+                        ? null
+                        : () => _copyToClipboard(_generatedCode!),
+                    icon: const Icon(Icons.copy_rounded, size: 18),
+                    label: const Text('Copy'),
+                  ),
+                  TextButton(
+                    onPressed:
+                        _isLoading ? null : () => _revokeShareCode(_generatedCode!),
+                    child: const Text('Revoke'),
+                  ),
+                ],
+              ),
             ),
           ),
         ],
+        const SizedBox(height: 16),
+        Text(
+          'Active Codes',
+          style: GoogleFonts.inter(
+            fontSize: 16,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        const SizedBox(height: 8),
+        if (_shareCodesLoading)
+          const Center(child: CircularProgressIndicator())
+        else if (_shareCodes.isEmpty)
+          Text(
+            'No active codes yet.',
+            style: GoogleFonts.inter(color: Colors.grey[600]),
+          )
+        else
+          ..._shareCodes.map((item) {
+            final code = item['code']?.toString() ?? '';
+            final status = item['status']?.toString() ?? 'active';
+            final uses = item['uses'] ?? 0;
+            final maxUses = item['maxUses'];
+            final expiresAt = item['expiresAt']?.toString();
+            final expired = item['expired'] == true;
+            final subtitleParts = <String>[];
+            if (maxUses != null) {
+              subtitleParts.add('Uses: $uses / $maxUses');
+            } else {
+              subtitleParts.add('Uses: $uses');
+            }
+            if (expiresAt != null && expiresAt.isNotEmpty) {
+              subtitleParts.add('Expires: $expiresAt');
+            }
+            if (expired) subtitleParts.add('Expired');
+            if (status == 'revoked') subtitleParts.add('Revoked');
+            final subtitle = subtitleParts.join(' • ');
+            return Card(
+              margin: const EdgeInsets.only(bottom: 8),
+              child: ListTile(
+                leading: const Icon(Icons.vpn_key_outlined),
+                title: Text(code),
+                subtitle: Text(subtitle),
+                trailing: Wrap(
+                  spacing: 8,
+                  children: [
+                    IconButton(
+                      tooltip: 'Copy code',
+                      onPressed: _isLoading ? null : () => _copyToClipboard(code),
+                      icon: const Icon(Icons.copy_rounded),
+                    ),
+                    if (status == 'active')
+                      TextButton(
+                        onPressed:
+                            _isLoading ? null : () => _revokeShareCode(code),
+                        child: const Text('Revoke'),
+                      )
+                    else
+                      const SizedBox.shrink(),
+                  ],
+                ),
+              ),
+            );
+          }).toList(),
         const SizedBox(height: 24),
         Text(
           'Open Shared Roster',

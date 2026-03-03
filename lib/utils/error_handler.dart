@@ -154,6 +154,8 @@ class ErrorHandler {
         return ['Sign in again', 'Refresh your session'];
       case 403:
         return ['Request access from an admin', 'Verify roster membership'];
+      case 402:
+        return ['Upgrade your subscription', 'Open Billing in Settings'];
       case 404:
         return ['Refresh and try again', 'Verify the roster ID'];
       case 409:

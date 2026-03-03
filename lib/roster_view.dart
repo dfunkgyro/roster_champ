@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
@@ -16,7 +17,9 @@ import 'services/observance_service.dart';
 import 'services/sports_service.dart';
 import 'services/weather_service.dart';
 import 'services/time_service.dart';
+import 'services/dst_service.dart';
 import 'services/voice_service.dart';
+import 'services/public_event_service.dart';
 import 'aws_service.dart';
 import 'screens/pattern_editor_screen.dart';
 import 'ai_suggestions_view.dart';
@@ -30,25 +33,36 @@ class _OverlayBundle {
   final Map<String, HolidayItem> holidayMap;
   final Map<String, List<HolidayItem>> observanceMap;
   final Map<String, List<SportsEventItem>> sportsMap;
+  final Map<String, List<models.Event>> publicEventMap;
 
   const _OverlayBundle({
     required this.holidayMap,
     required this.observanceMap,
     required this.sportsMap,
+    required this.publicEventMap,
   });
 }
 
 enum _RosterViewMode { month, week }
 
 class RosterView extends ConsumerStatefulWidget {
-  const RosterView({super.key});
+  const RosterView({
+    super.key,
+    this.onOpenRosterManager,
+    this.onBuildRoster,
+  });
+
+  final VoidCallback? onOpenRosterManager;
+  final VoidCallback? onBuildRoster;
 
   @override
   ConsumerState<RosterView> createState() => RosterViewState();
 }
 
-class RosterViewState extends ConsumerState<RosterView> {
-  final GlobalKey _captureKey = GlobalKey();
+  class RosterViewState extends ConsumerState<RosterView> {
+    final GlobalKey _captureKey = GlobalKey();
+    String? _templateClipboardCode;
+    String? _lastDismissedTemplateCode;
   DateTime _currentWeekStart = _startOfDay(DateTime.now());
   DateTime _currentMonthAnchor =
       DateTime(DateTime.now().year, DateTime.now().month);
@@ -92,6 +106,10 @@ class RosterViewState extends ConsumerState<RosterView> {
   int _monthsForward = 12;
   Future<_OverlayBundle>? _monthOverlayFuture;
   String? _monthOverlayKey;
+  void _invalidateOverlayCache() {
+    _monthOverlayKey = null;
+    _monthOverlayFuture = null;
+  }
   bool get _isMonthView => _viewMode == _RosterViewMode.month;
   bool get _isWeekView => _viewMode == _RosterViewMode.week;
   bool get _isMonthLike => _isMonthView || _isWeekView;
@@ -108,6 +126,22 @@ class RosterViewState extends ConsumerState<RosterView> {
       (48 * _cellScale).clamp(24, 70).toDouble();
   double get _dayCellHeightMonth =>
       (36 * _cellScale).clamp(20, 56).toDouble();
+
+
+  Future<void> _checkTemplateClipboard() async {
+    try {
+      final data = await Clipboard.getData('text/plain');
+      final text = data?.text?.trim() ?? '';
+      if (text.startsWith('RC2-')) {
+        if (text == _lastDismissedTemplateCode) {
+          return;
+        }
+        if (mounted) {
+          setState(() => _templateClipboardCode = text);
+        }
+      }
+    } catch (_) {}
+  }
 
   String _formatLeaveLabel(String? leaveType) {
     if (leaveType == null || leaveType.isEmpty) return 'Leave';
@@ -164,7 +198,7 @@ class RosterViewState extends ConsumerState<RosterView> {
       case 'N12':
         return '12 hour night shift';
       case 'AL':
-        return 'Annual leave';
+        return 'Annual Leave';
       case 'R':
         return 'Rest day';
       case 'C':
@@ -182,9 +216,20 @@ class RosterViewState extends ConsumerState<RosterView> {
     }
   }
 
+  String _normalizeShiftCode(String? shift) {
+    if (shift == null) return '';
+    final raw = shift.trim();
+    if (raw.isEmpty) return '';
+    final upper = raw.toUpperCase();
+    if (upper == 'AL' || upper == 'A/L') return 'AL';
+    if (upper.contains('ANNUAL') || upper.contains('LEAVE')) return 'AL';
+    return upper;
+  }
+
   @override
   void initState() {
     super.initState();
+    _checkTemplateClipboard();
     final settings = ref.read(settingsProvider);
     if (settings.layoutStyle == models.AppLayoutStyle.sophisticated ||
         settings.layoutStyle == models.AppLayoutStyle.ambience) {
@@ -197,6 +242,8 @@ class RosterViewState extends ConsumerState<RosterView> {
     _weekPageController = PageController(initialPage: _weekPageBase);
     _focusedDate = _startOfDay(DateTime.now());
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      final settings = ref.read(settingsProvider);
+      VoiceService.instance.configure(settings);
       _scrollToToday(force: true);
     });
   }
@@ -243,6 +290,9 @@ class RosterViewState extends ConsumerState<RosterView> {
 
   @override
   Widget build(BuildContext context) {
+    ref.listen<models.AppSettings>(settingsProvider, (_, next) {
+      VoiceService.instance.configure(next);
+    });
     final roster = ref.watch(rosterProvider);
     final settings = ref.watch(settingsProvider);
     final isReadOnly = roster.readOnly;
@@ -310,10 +360,23 @@ class RosterViewState extends ConsumerState<RosterView> {
                   ),
             ),
             const SizedBox(height: 24),
-            FilledButton.icon(
-              onPressed: isReadOnly ? null : () => _showInitializeDialog(),
-              icon: const Icon(Icons.add),
-              label: const Text('Initialize Roster'),
+            Wrap(
+              spacing: 12,
+              runSpacing: 12,
+              alignment: WrapAlignment.center,
+              children: [
+                FilledButton.icon(
+                  onPressed: isReadOnly ? null : () => _showInitializeDialog(),
+                  icon: const Icon(Icons.add),
+                  label: const Text('Initialize Roster'),
+                ),
+                OutlinedButton.icon(
+                  onPressed:
+                      isReadOnly ? null : () => _openTemplateImport(context),
+                  icon: const Icon(Icons.qr_code_rounded),
+                  label: const Text('Use Template Code'),
+                ),
+              ],
             ),
           ],
         ),
@@ -328,27 +391,75 @@ class RosterViewState extends ConsumerState<RosterView> {
           Container(
             width: double.infinity,
             margin: const EdgeInsets.all(12),
-                  padding: const EdgeInsets.all(12),
+            padding: const EdgeInsets.all(12),
             decoration: BoxDecoration(
               color: Colors.orange.withOpacity(0.12),
               borderRadius: BorderRadius.circular(12),
               border: Border.all(color: Colors.orange.withOpacity(0.4)),
             ),
-            child: Row(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Icon(Icons.visibility, color: Colors.orange),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Text(
-                    'Read-only shared roster',
-                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                          fontWeight: FontWeight.w600,
-                        ),
-                  ),
+                Row(
+                  children: [
+                    const Icon(Icons.visibility, color: Colors.orange),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Text(
+                        'Read-only shared roster',
+                        style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                              fontWeight: FontWeight.w600,
+                            ),
+                      ),
+                    ),
+                  ],
                 ),
-                FilledButton.tonal(
-                  onPressed: () => _showGuestLeaveRequestDialog(context),
-                  child: const Text('Request Leave'),
+                const SizedBox(height: 8),
+                Text(
+                  roster.sharedRole == 'editor' && roster.readOnly
+                      ? 'Editor access requires an active subscription. You can still submit requests.'
+                      : 'Request leave, training, swap, or shift changes. The roster owner will review.',
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+                const SizedBox(height: 12),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    FilledButton.tonal(
+                      onPressed: () =>
+                          _showGuestRequestDialog(context, models.AvailabilityType.leave),
+                      child: const Text('Request Leave'),
+                    ),
+                    OutlinedButton(
+                      onPressed: () => _showGuestRequestDialog(
+                        context,
+                        models.AvailabilityType.training,
+                      ),
+                      child: const Text('Request Training'),
+                    ),
+                    OutlinedButton(
+                      onPressed: () => _showGuestRequestDialog(
+                        context,
+                        models.AvailabilityType.shiftChange,
+                      ),
+                      child: const Text('Request Shift Change'),
+                    ),
+                    OutlinedButton(
+                      onPressed: () => _showGuestRequestDialog(
+                        context,
+                        models.AvailabilityType.swap,
+                      ),
+                      child: const Text('Request Swap'),
+                    ),
+                    OutlinedButton(
+                      onPressed: () => _showGuestRequestDialog(
+                        context,
+                        models.AvailabilityType.general,
+                      ),
+                      child: const Text('Other Request'),
+                    ),
+                  ],
                 ),
               ],
             ),
@@ -360,6 +471,7 @@ class RosterViewState extends ConsumerState<RosterView> {
             settings.siteLon != null &&
             !_focusMode)
           _buildWeatherStrip(settings),
+        _buildTemplateClipboardBanner(),
         _buildDateRibbon(context),
         const Divider(height: 1),
         Expanded(
@@ -630,6 +742,7 @@ class RosterViewState extends ConsumerState<RosterView> {
   Widget _buildQuickTools(BuildContext context, bool compact) {
     final roster = ref.read(rosterProvider);
     final settings = ref.watch(settingsProvider);
+    final awsStatus = ref.watch(awsStatusProvider);
     final isSignedIn = AwsService.instance.isAuthenticated;
     final accessLabel = roster.readOnly
         ? 'Shared (${roster.sharedRole ?? 'viewer'})'
@@ -660,6 +773,23 @@ class RosterViewState extends ConsumerState<RosterView> {
             runSpacing: 8,
             children: [
               Chip(
+                avatar: Icon(
+                  awsStatus.status == models.ConnectionStatus.connected
+                      ? Icons.cloud_done_rounded
+                      : awsStatus.status == models.ConnectionStatus.connecting
+                          ? Icons.cloud_sync_rounded
+                          : Icons.cloud_off_rounded,
+                  size: 16,
+                ),
+                label: Text(
+                  awsStatus.status == models.ConnectionStatus.connected
+                      ? 'Online'
+                      : awsStatus.status == models.ConnectionStatus.connecting
+                          ? 'Connecting'
+                          : 'Offline',
+                ),
+              ),
+              Chip(
                 avatar: Icon(accessIcon, size: 16),
                 label: Text(accessLabel),
               ),
@@ -672,6 +802,13 @@ class RosterViewState extends ConsumerState<RosterView> {
                   avatar: const Icon(Icons.cloud_upload, size: 16),
                   label: Text('Pending: ${roster.pendingSync.length}'),
                 ),
+              if (roster.pendingConflict != null)
+                Chip(
+                  avatar: const Icon(Icons.report_rounded, size: 16),
+                  label: const Text('Conflict detected'),
+                  backgroundColor:
+                      Theme.of(context).colorScheme.errorContainer,
+                ),
             ],
           ),
           const SizedBox(height: 12),
@@ -679,6 +816,70 @@ class RosterViewState extends ConsumerState<RosterView> {
             spacing: 8,
             runSpacing: 8,
             children: [
+              if (widget.onOpenRosterManager != null)
+                OutlinedButton.icon(
+                  onPressed: widget.onOpenRosterManager,
+                  icon: const Icon(Icons.folder_open_rounded),
+                  label: const Text('Roster Manager'),
+                ),
+              if (widget.onBuildRoster != null)
+                OutlinedButton.icon(
+                  onPressed: (isSignedIn && !roster.readOnly)
+                      ? widget.onBuildRoster
+                      : null,
+                  icon: const Icon(Icons.add_circle_outline),
+                  label: const Text('Build Roster'),
+                ),
+              OutlinedButton.icon(
+                onPressed:
+                    roster.readOnly ? null : () => _openTemplateImport(context),
+                icon: const Icon(Icons.qr_code_rounded),
+                label: const Text('Use Template Code'),
+              ),
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                decoration: BoxDecoration(
+                  color: Theme.of(context)
+                      .colorScheme
+                      .primaryContainer
+                      .withOpacity(0.35),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(Icons.align_horizontal_left, size: 16),
+                    const SizedBox(width: 6),
+                    Text(
+                      'Snap offset',
+                      style: Theme.of(context).textTheme.labelMedium,
+                    ),
+                    const SizedBox(width: 8),
+                    SizedBox(
+                      width: 140,
+                      child: Slider(
+                        value: settings.monthSnapOffsetPx,
+                        min: -2000,
+                        max: 2000,
+                        divisions: 400,
+                        label:
+                            '${settings.monthSnapOffsetPx.toStringAsFixed(0)} px',
+                        onChanged: (value) {
+                          ref.read(settingsProvider.notifier).updateSettings(
+                                settings.copyWith(monthSnapOffsetPx: value),
+                              );
+                        },
+                      ),
+                    ),
+                    const SizedBox(width: 4),
+                    Text(
+                      '${settings.monthSnapOffsetPx.toStringAsFixed(0)}',
+                      style: Theme.of(context).textTheme.labelSmall,
+                    ),
+                  ],
+                ),
+              ),
               FilledButton.icon(
                 onPressed: () => _openPatternEditor(context),
                 icon: const Icon(Icons.pattern_rounded),
@@ -696,6 +897,7 @@ class RosterViewState extends ConsumerState<RosterView> {
                           showHolidayOverlay: !settings.showHolidayOverlay,
                         ),
                       );
+                  setState(_invalidateOverlayCache);
                 },
                 icon: Icon(
                   Icons.celebration_rounded,
@@ -708,6 +910,11 @@ class RosterViewState extends ConsumerState<RosterView> {
                       ? 'Hide holidays'
                       : 'Show holidays',
                 ),
+              ),
+              OutlinedButton.icon(
+                onPressed: () => _openRosterHistory(context),
+                icon: const Icon(Icons.history),
+                label: const Text('History'),
               ),
               OutlinedButton.icon(
                 onPressed: () {
@@ -877,6 +1084,179 @@ class RosterViewState extends ConsumerState<RosterView> {
     );
   }
 
+  Future<void> _openRosterHistory(BuildContext context) async {
+    final rosterId = AwsService.instance.currentRosterId;
+    if (rosterId == null || rosterId.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No roster selected.')),
+      );
+      return;
+    }
+    final roster = ref.read(rosterProvider);
+    await showDialog<void>(
+      context: context,
+      builder: (context) {
+        bool loading = true;
+        String? error;
+        List<Map<String, dynamic>> versions = [];
+        bool initialized = false;
+
+        Future<void> loadVersions(StateSetter setStateDialog) async {
+          setStateDialog(() {
+            loading = true;
+            error = null;
+          });
+          try {
+            versions =
+                await AwsService.instance.getRosterVersions(rosterId, limit: 50);
+          } catch (e) {
+            error = e.toString();
+          } finally {
+            setStateDialog(() {
+              loading = false;
+            });
+          }
+        }
+
+        Future<void> rollbackToVersion(
+          StateSetter setStateDialog,
+          int targetVersion,
+        ) async {
+          final reasonController = TextEditingController();
+          final confirm = await showDialog<bool>(
+            context: context,
+            builder: (context) => AlertDialog(
+              title: Text('Rollback to v$targetVersion'),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Text(
+                    'This creates a new version based on the selected snapshot.',
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: reasonController,
+                    decoration: const InputDecoration(
+                      labelText: 'Reason (optional)',
+                    ),
+                  ),
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context, false),
+                  child: const Text('Cancel'),
+                ),
+                FilledButton(
+                  onPressed: () => Navigator.pop(context, true),
+                  child: const Text('Rollback'),
+                ),
+              ],
+            ),
+          );
+          if (confirm != true) return;
+          setStateDialog(() => loading = true);
+          try {
+            await AwsService.instance.rollbackRoster(
+              rosterId: rosterId,
+              targetVersion: targetVersion,
+              reason: reasonController.text,
+            );
+            await roster.loadFromAWS();
+            await loadVersions(setStateDialog);
+            if (mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(content: Text('Rolled back to v$targetVersion.')),
+              );
+            }
+          } catch (e) {
+            setStateDialog(() {
+              loading = false;
+              error = e.toString();
+            });
+          } finally {
+            reasonController.dispose();
+          }
+        }
+
+        return StatefulBuilder(
+          builder: (context, setStateDialog) {
+            if (!initialized) {
+              initialized = true;
+              Future.microtask(() => loadVersions(setStateDialog));
+            }
+            return AlertDialog(
+              title: const Text('Roster History'),
+              content: SizedBox(
+                width: 520,
+                child: loading
+                    ? const Center(child: CircularProgressIndicator())
+                    : error != null
+                        ? Text('Error: $error')
+                        : versions.isEmpty
+                            ? const Text('No versions recorded yet.')
+                            : ListView.separated(
+                                shrinkWrap: true,
+                                itemCount: versions.length,
+                                separatorBuilder: (_, __) =>
+                                    const Divider(height: 1),
+                                itemBuilder: (context, index) {
+                                  final item = versions[index];
+                                  final version =
+                                      item['version']?.toString() ?? '?';
+                                  final timestamp =
+                                      item['timestamp']?.toString() ?? '';
+                                  final reason =
+                                      item['reason']?.toString() ?? '';
+                                  final changedSections =
+                                      (item['changedSections'] as List?)
+                                          ?.join(', ');
+                                  final diffCount =
+                                      item['diffCount']?.toString() ?? '0';
+                                  final subtitleBits = <String>[
+                                    if (reason.isNotEmpty) reason,
+                                    if ((changedSections ?? '').isNotEmpty)
+                                      'Changed: $changedSections',
+                                    'Diffs: $diffCount',
+                                  ];
+                                  return ListTile(
+                                    title: Text('v$version'),
+                                    subtitle: Text(
+                                      [
+                                        if (timestamp.isNotEmpty) timestamp,
+                                        if (subtitleBits.isNotEmpty)
+                                          subtitleBits.join(' · '),
+                                      ].join('\n'),
+                                    ),
+                                    trailing: roster.readOnly
+                                        ? null
+                                        : TextButton(
+                                            onPressed: loading
+                                                ? null
+                                                : () => rollbackToVersion(
+                                                      setStateDialog,
+                                                      int.tryParse(version) ??
+                                                          0,
+                                                    ),
+                                            child: const Text('Rollback'),
+                                          ),
+                                  );
+                                },
+                              ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text('Close'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
   Future<void> _openShareCodes(BuildContext context) async {
     await Navigator.of(context).push(
       MaterialPageRoute(
@@ -888,6 +1268,261 @@ class RosterViewState extends ConsumerState<RosterView> {
   Future<void> _openImportRoster(BuildContext context) async {
     await Navigator.of(context).push(
       MaterialPageRoute(builder: (_) => const ImportRosterScreen()),
+    );
+  }
+
+  Future<void> _showQuickTemplateCodeDialog(BuildContext context) async {
+    final roster = ref.read(rosterProvider);
+    bool includeStaff = true;
+    bool includeOverrides = true;
+    bool compress = true;
+    String password = '';
+    String code = roster.generateTemplateCode(
+      includeStaffNames: includeStaff,
+      includeOverrides: includeOverrides,
+      compress: compress,
+      password: null,
+    );
+    final passwordController = TextEditingController();
+    await showDialog<void>(
+      context: context,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setStateDialog) {
+            return AlertDialog(
+              title: const Text('Template Code'),
+              content: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Text(
+                      'Share this code to recreate the roster pattern in another account.',
+                    ),
+                    const SizedBox(height: 12),
+                    CheckboxListTile(
+                      value: includeStaff,
+                      onChanged: (value) {
+                        includeStaff = value ?? true;
+                        code = roster.generateTemplateCode(
+                          includeStaffNames: includeStaff,
+                          includeOverrides: includeOverrides,
+                          compress: compress,
+                          password: password.isEmpty ? null : password,
+                        );
+                        setStateDialog(() {});
+                      },
+                      title: const Text('Include staff names'),
+                      dense: true,
+                      controlAffinity: ListTileControlAffinity.leading,
+                    ),
+                    CheckboxListTile(
+                      value: includeOverrides,
+                      onChanged: (value) {
+                        includeOverrides = value ?? true;
+                        code = roster.generateTemplateCode(
+                          includeStaffNames: includeStaff,
+                          includeOverrides: includeOverrides,
+                          compress: compress,
+                          password: password.isEmpty ? null : password,
+                        );
+                        setStateDialog(() {});
+                      },
+                      title: const Text('Include overrides'),
+                      dense: true,
+                      controlAffinity: ListTileControlAffinity.leading,
+                    ),
+                    CheckboxListTile(
+                      value: compress,
+                      onChanged: (value) {
+                        compress = value ?? true;
+                        code = roster.generateTemplateCode(
+                          includeStaffNames: includeStaff,
+                          includeOverrides: includeOverrides,
+                          compress: compress,
+                          password: password.isEmpty ? null : password,
+                        );
+                        setStateDialog(() {});
+                      },
+                      title: const Text('Compress code'),
+                      dense: true,
+                      controlAffinity: ListTileControlAffinity.leading,
+                    ),
+                    const SizedBox(height: 8),
+                    SafeTextField(
+                      controller: passwordController,
+                      decoration: const InputDecoration(
+                        labelText: 'Password (optional)',
+                        border: OutlineInputBorder(),
+                      ),
+                      obscureText: true,
+                      onChanged: (value) {
+                        password = value.trim();
+                        code = roster.generateTemplateCode(
+                          includeStaffNames: includeStaff,
+                          includeOverrides: includeOverrides,
+                          compress: compress,
+                          password: password.isEmpty ? null : password,
+                        );
+                        setStateDialog(() {});
+                      },
+                    ),
+                    const SizedBox(height: 12),
+                    SelectableText(code),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text('Close'),
+                ),
+                FilledButton.icon(
+                  onPressed: () async {
+                    await Clipboard.setData(ClipboardData(text: code));
+                    if (context.mounted) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(content: Text('Template code copied')),
+                      );
+                    }
+                  },
+                  icon: const Icon(Icons.copy_rounded),
+                  label: const Text('Copy'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Future<void> _showQuickAccessCodeDialog(BuildContext context) async {
+    final rosterId = AwsService.instance.currentRosterId;
+    if (rosterId == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Create or open a roster first.')),
+      );
+      return;
+    }
+    if (!AwsService.instance.isAuthenticated) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Sign in to create an access code.')),
+      );
+      return;
+    }
+    final customController = TextEditingController();
+    final hoursController = TextEditingController(text: '168');
+    final maxUsesController = TextEditingController(text: '50');
+    bool isBusy = false;
+    await showDialog<void>(
+      context: context,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setStateDialog) {
+            return AlertDialog(
+              title: const Text('Create Access Code'),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Text('Creates a read-only access code for this roster.'),
+                  const SizedBox(height: 12),
+                  SafeTextField(
+                    controller: customController,
+                    decoration: const InputDecoration(
+                      labelText: 'Custom code (optional)',
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  SafeTextField(
+                    controller: hoursController,
+                    decoration: const InputDecoration(
+                      labelText: 'Expires in hours',
+                      border: OutlineInputBorder(),
+                    ),
+                    keyboardType: TextInputType.number,
+                  ),
+                  const SizedBox(height: 8),
+                  SafeTextField(
+                    controller: maxUsesController,
+                    decoration: const InputDecoration(
+                      labelText: 'Max uses',
+                      border: OutlineInputBorder(),
+                    ),
+                    keyboardType: TextInputType.number,
+                  ),
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: isBusy ? null : () => Navigator.pop(context),
+                  child: const Text('Cancel'),
+                ),
+                FilledButton.icon(
+                  onPressed: isBusy
+                      ? null
+                      : () async {
+                          setStateDialog(() => isBusy = true);
+                          try {
+                            final hours =
+                                int.tryParse(hoursController.text.trim());
+                            final maxUses =
+                                int.tryParse(maxUsesController.text.trim());
+                            final response =
+                                await AwsService.instance.createShareCode(
+                              rosterId: rosterId,
+                              role: 'viewer',
+                              expiresInHours: hours,
+                              maxUses: maxUses,
+                              customCode: customController.text.trim().isEmpty
+                                  ? null
+                                  : customController.text.trim(),
+                            );
+                            final code =
+                                response['code']?.toString() ?? '';
+                            if (code.isNotEmpty) {
+                              await Clipboard.setData(
+                                ClipboardData(text: code),
+                              );
+                            }
+                            if (context.mounted) {
+                              Navigator.pop(context);
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(
+                                  content: Text(
+                                    code.isEmpty
+                                        ? 'Access code created'
+                                        : 'Access code copied: $code',
+                                  ),
+                                ),
+                              );
+                            }
+                          } catch (e) {
+                            if (context.mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(content: Text('Error: $e')),
+                              );
+                            }
+                          } finally {
+                            if (context.mounted) {
+                              setStateDialog(() => isBusy = false);
+                            }
+                          }
+                        },
+                  icon: isBusy
+                      ? const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.key_rounded),
+                  label: const Text('Create'),
+                ),
+              ],
+            );
+          },
+        );
+      },
     );
   }
 
@@ -1359,7 +1994,7 @@ class RosterViewState extends ConsumerState<RosterView> {
     final controller = _monthHorizontalControllers[key];
     if (controller == null || !controller.hasClients) return;
     final settings = ref.read(settingsProvider);
-    final offset = settings.monthSnapOffsetPx;
+    final offset = settings.monthSnapOffsetPx + 700;
     final target = (today.day - 1) * _dayCellWidthMonth + offset;
     final maxExtent = controller.position.maxScrollExtent;
     controller.animateTo(
@@ -1427,6 +2062,8 @@ class RosterViewState extends ConsumerState<RosterView> {
       final countries = <String>{
         settings.holidayCountryCode,
         ...settings.additionalHolidayCountries,
+        if (settings.autoHolidaySyncEnabled)
+          ...settings.autoHolidayCountries,
       };
       for (final country in countries) {
         if (country.trim().isEmpty) continue;
@@ -1464,6 +2101,8 @@ class RosterViewState extends ConsumerState<RosterView> {
     RosterNotifier roster,
     DateTime start,
     DateTime end,
+    models.AppSettings settings,
+    Map<String, List<models.Event>> publicEventMap,
   ) {
     final map = <String, List<models.Event>>{};
     for (final event in roster.events) {
@@ -1471,6 +2110,34 @@ class RosterViewState extends ConsumerState<RosterView> {
         continue;
       }
       map.putIfAbsent(_dateKey(event.date), () => []).add(event);
+    }
+    for (final entry in publicEventMap.entries) {
+      map.putIfAbsent(entry.key, () => []).addAll(entry.value);
+    }
+    if (settings.dstAdjustmentsEnabled) {
+      var cursor = DateTime(start.year, start.month, start.day);
+      final last = DateTime(end.year, end.month, end.day);
+      while (!cursor.isAfter(last)) {
+        final dstLabel = DstService.deltaLabel(cursor);
+        if (dstLabel != null) {
+          final key = _dateKey(cursor);
+          final events = map.putIfAbsent(key, () => []);
+          final id = 'dst-$key';
+          final exists = events.any((e) => e.id == id);
+          if (!exists) {
+            events.add(
+              models.Event(
+                id: id,
+                title: dstLabel,
+                description: 'Daylight saving time adjustment.',
+                date: cursor,
+                eventType: models.EventType.custom,
+              ),
+            );
+          }
+        }
+        cursor = cursor.add(const Duration(days: 1));
+      }
     }
     return map;
   }
@@ -1491,16 +2158,24 @@ class RosterViewState extends ConsumerState<RosterView> {
     final sportsMap = settings.showSportsOverlay
         ? await _loadSportsMapForRange(settings, start, end)
         : <String, List<SportsEventItem>>{};
+    final publicEventMap =
+        await PublicEventService.instance.getPublicEvents(
+      settings: settings,
+      start: start,
+      end: end,
+    );
     final hidden = settings.hiddenOverlayDates.toSet();
     if (hidden.isNotEmpty) {
       holidayMap.removeWhere((key, _) => hidden.contains(key));
       observanceMap.removeWhere((key, _) => hidden.contains(key));
       sportsMap.removeWhere((key, _) => hidden.contains(key));
+      publicEventMap.removeWhere((key, _) => hidden.contains(key));
     }
     return _OverlayBundle(
       holidayMap: holidayMap,
       observanceMap: observanceMap,
       sportsMap: sportsMap,
+      publicEventMap: publicEventMap,
     );
   }
 
@@ -1733,7 +2408,7 @@ class RosterViewState extends ConsumerState<RosterView> {
     }
     final start = months.first;
     final end = DateTime(months.last.year, months.last.month + 1, 0);
-    final staffMembers = roster.getStaffForRange(start, end);
+    final staffMembers = roster.getVisibleStaffForRange(start, end);
     final staff = staffMembers.map((s) => s.name).toList();
     final monthKey =
         '${_monthKey(start)}-${_monthKey(end)}-${settings.showHolidayOverlay}-${settings.showObservanceOverlay}-${settings.showSportsOverlay}-${settings.holidayCountryCode}-${settings.holidayTypes.join(',')}-${settings.observanceTypes.join(',')}-${settings.sportsLeagueIds.join(',')}-${settings.calendarificApiKey.isNotEmpty}-${settings.sportsApiKey.isNotEmpty}';
@@ -1749,11 +2424,18 @@ class RosterViewState extends ConsumerState<RosterView> {
               holidayMap: {},
               observanceMap: {},
               sportsMap: {},
+              publicEventMap: {},
             );
         final holidayMap = bundle.holidayMap;
         final observanceMap = bundle.observanceMap;
         final sportsMap = bundle.sportsMap;
-        final eventMap = _buildEventMap(roster, start, end);
+        final eventMap = _buildEventMap(
+          roster,
+          start,
+          end,
+          settings,
+          bundle.publicEventMap,
+        );
         // Keep rendering while overlays load to avoid snapping to the wrong month.
         return GestureDetector(
           onScaleStart: (details) {
@@ -1852,16 +2534,20 @@ class RosterViewState extends ConsumerState<RosterView> {
                                             dayEvents.isNotEmpty ||
                                             observances.isNotEmpty ||
                                             sportsEvents.isNotEmpty;
+                                        final dstLabel = settings.dstAdjustmentsEnabled
+                                            ? DstService.deltaLabel(day)
+                                            : null;
                                         return DataColumn(
                                           label: InkWell(
-                                            onTap: hasOverlay
-                                                ? () => _showOverlaySummary(
-                                                      day,
-                                                      holiday: holiday,
-                                                      observances: observances,
-                                                      sportsEvents: sportsEvents,
-                                                    )
-                                                : null,
+                                                onTap: hasOverlay
+                                                    ? () => _showOverlaySummary(
+                                                          day,
+                                                          holiday: holiday,
+                                                          observances: observances,
+                                                          sportsEvents: sportsEvents,
+                                                          events: dayEvents,
+                                                        )
+                                                    : null,
                                             child: SizedBox(
                                               width: _dayCellWidthMonth,
                                               child: Column(
@@ -1886,6 +2572,18 @@ class RosterViewState extends ConsumerState<RosterView> {
                                                           : Theme.of(context).colorScheme.onSurfaceVariant,
                                                     ),
                                                   ),
+                                                  if (dstLabel != null) ...[
+                                                    const SizedBox(height: 2),
+                                                    Text(
+                                                      dstLabel,
+                                                      style: GoogleFonts.inter(
+                                                        fontSize: 9,
+                                                        color: Theme.of(context)
+                                                            .colorScheme
+                                                            .tertiary,
+                                                      ),
+                                                    ),
+                                                  ],
                                                   if (hasOverlay) ...[
                                                     const SizedBox(height: 2),
                                                     _buildEventLine(
@@ -1943,9 +2641,10 @@ class RosterViewState extends ConsumerState<RosterView> {
                                                     roster, personName, day)
                                                 : null;
                                             final overrideShift =
-                                                override != null ? shift : null;
+                                                _normalizeShiftCode(override?.shift);
+                                            final hasOverride = overrideShift.isNotEmpty;
                                             final shiftColor =
-                                                _shiftColors[(overrideShift ?? shift)
+                                                _shiftColors[(hasOverride ? overrideShift : shift)
                                                         .toUpperCase()] ??
                                                     Colors.grey;
                                             final baseShiftColor =
@@ -1976,7 +2675,7 @@ class RosterViewState extends ConsumerState<RosterView> {
                                                   }
                                                 },
                                                 child: Tooltip(
-                                                  message: overrideShift != null
+                                                  message: hasOverride
                                                       ? '${_shiftFullName(overrideShift)} (amended)'
                                                       : _shiftFullName(shift),
                                                   child: Container(
@@ -1989,12 +2688,12 @@ class RosterViewState extends ConsumerState<RosterView> {
                                                                   unavailable ||
                                                                   preStart)
                                                               ? 0.08
-                                                              : overrideShift != null
+                                                              : hasOverride
                                                                   ? 0.22
                                                                   : 0.15),
                                                       border: Border.all(
                                                         color: shiftColor,
-                                                        width: overrideShift != null ? 2 : 1.5,
+                                                        width: hasOverride ? 2 : 1.5,
                                                       ),
                                                       borderRadius:
                                                           BorderRadius.circular(6),
@@ -2019,8 +2718,7 @@ class RosterViewState extends ConsumerState<RosterView> {
                                                             mainAxisAlignment:
                                                                 MainAxisAlignment.center,
                                                             children: [
-                                                              if (overrideShift !=
-                                                                  null) ...[
+                                                              if (hasOverride) ...[
                                                                 Text(
                                                                   overrideShift,
                                                                   style: TextStyle(
@@ -2138,10 +2836,10 @@ class RosterViewState extends ConsumerState<RosterView> {
     }
     final start = months.first;
     final end = DateTime(months.last.year, months.last.month + 1, 0);
-    final staffMembers = roster.getStaffForRange(start, end);
+    final staffMembers = roster.getVisibleStaffForRange(start, end);
     final staff = staffMembers.map((s) => s.name).toList();
     final monthKey =
-        '${_monthKey(start)}-${_monthKey(end)}-${settings.showHolidayOverlay}-${settings.showObservanceOverlay}-${settings.showSportsOverlay}-${settings.holidayCountryCode}-${settings.additionalHolidayCountries.join(',')}-${settings.holidayTypes.join(',')}-${settings.observanceTypes.join(',')}-${settings.sportsLeagueIds.join(',')}-${settings.calendarificApiKey.isNotEmpty}-${settings.sportsApiKey.isNotEmpty}';
+        '${_monthKey(start)}-${_monthKey(end)}-${settings.showHolidayOverlay}-${settings.showObservanceOverlay}-${settings.showSportsOverlay}-${settings.holidayCountryCode}-${settings.additionalHolidayCountries.join(',')}-${settings.autoHolidaySyncEnabled}-${settings.autoHolidayCountries.join(',')}-${settings.holidayTypes.join(',')}-${settings.observanceTypes.join(',')}-${settings.sportsLeagueIds.join(',')}-${settings.calendarificApiKey.isNotEmpty}-${settings.sportsApiKey.isNotEmpty}';
     if (_monthOverlayKey != monthKey) {
       _monthOverlayKey = monthKey;
       _monthOverlayFuture = _loadOverlayBundleForRange(settings, start, end);
@@ -2154,11 +2852,18 @@ class RosterViewState extends ConsumerState<RosterView> {
               holidayMap: {},
               observanceMap: {},
               sportsMap: {},
+              publicEventMap: {},
             );
         final holidayMap = bundle.holidayMap;
         final observanceMap = bundle.observanceMap;
         final sportsMap = bundle.sportsMap;
-        final eventMap = _buildEventMap(roster, start, end);
+        final eventMap = _buildEventMap(
+          roster,
+          start,
+          end,
+          settings,
+          bundle.publicEventMap,
+        );
         // Keep rendering while overlays load to avoid snapping to the wrong month.
         return GestureDetector(
           onScaleStart: (details) {
@@ -2286,6 +2991,7 @@ class RosterViewState extends ConsumerState<RosterView> {
                                                         holiday: holiday,
                                                         observances: obs,
                                                         sportsEvents: sports,
+                                                        events: dayEvents,
                                                       )
                                                   : null,
                                               child: SizedBox(
@@ -2388,9 +3094,10 @@ class RosterViewState extends ConsumerState<RosterView> {
                                                       roster, personName, day)
                                                   : null;
                                               final overrideShift =
-                                                  override != null ? shift : null;
+                                                  _normalizeShiftCode(override?.shift);
+                                              final hasOverride = overrideShift.isNotEmpty;
                                               final shiftColor =
-                                                  _shiftColors[(overrideShift ?? shift)
+                                                  _shiftColors[(hasOverride ? overrideShift : shift)
                                                           .toUpperCase()] ??
                                                       Colors.grey;
                                               final baseShiftColor =
@@ -2412,7 +3119,7 @@ class RosterViewState extends ConsumerState<RosterView> {
                                                     }
                                                   },
                                                   child: Tooltip(
-                                                    message: overrideShift != null
+                                                    message: hasOverride
                                                         ? '${_shiftFullName(overrideShift)} (amended)'
                                                         : _shiftFullName(shift),
                                                     child: Container(
@@ -2425,12 +3132,12 @@ class RosterViewState extends ConsumerState<RosterView> {
                                                                     unavailable ||
                                                                     preStart)
                                                                 ? 0.08
-                                                                : overrideShift != null
+                                                                : hasOverride
                                                                     ? 0.22
                                                                     : 0.15),
                                                         border: Border.all(
                                                           color: shiftColor,
-                                                          width: overrideShift != null
+                                                          width: hasOverride
                                                               ? 2
                                                               : 1.5,
                                                         ),
@@ -2455,7 +3162,7 @@ class RosterViewState extends ConsumerState<RosterView> {
                                                         mainAxisAlignment:
                                                             MainAxisAlignment.center,
                                                         children: [
-                                                          if (overrideShift != null)
+                                                          if (hasOverride)
                                                             ...[
                                                               Text(
                                                                 overrideShift,
@@ -2814,9 +3521,11 @@ class RosterViewState extends ConsumerState<RosterView> {
     final shift = roster.getShiftForDate(personName, date);
     final baseShift = roster.getBaseShiftForDate(personName, date);
     final override = _findOverrideForDate(roster, personName, date);
-    final overrideShift = override != null ? shift : null;
+    final overrideShift = _normalizeShiftCode(override?.shift);
+    final hasOverride = overrideShift.isNotEmpty;
     final shiftColor =
-        _shiftColors[(overrideShift ?? shift).toUpperCase()] ?? Colors.grey;
+        _shiftColors[(hasOverride ? overrideShift : shift).toUpperCase()] ??
+            Colors.grey;
     final baseShiftColor =
         _shiftColors[baseShift.toUpperCase()] ?? Colors.grey;
     return InkWell(
@@ -2829,7 +3538,7 @@ class RosterViewState extends ConsumerState<RosterView> {
         }
       },
       child: Tooltip(
-        message: overrideShift != null
+        message: hasOverride
             ? '${_shiftFullName(overrideShift)} (amended)'
             : _shiftFullName(shift),
         child: Container(
@@ -2837,7 +3546,7 @@ class RosterViewState extends ConsumerState<RosterView> {
           height: _rowHeight,
           alignment: Alignment.center,
           decoration: BoxDecoration(
-            color: shiftColor.withOpacity(overrideShift != null ? 0.22 : 0.15),
+            color: shiftColor.withOpacity(hasOverride ? 0.22 : 0.15),
             border: Border(
               left: BorderSide(
                 color: _isSameDay(date, DateTime.now())
@@ -2852,7 +3561,7 @@ class RosterViewState extends ConsumerState<RosterView> {
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              if (overrideShift != null) ...[
+              if (hasOverride) ...[
                 Text(
                   overrideShift,
                   style: TextStyle(
@@ -2899,62 +3608,24 @@ class RosterViewState extends ConsumerState<RosterView> {
     final nowTime = TimeOfDay.now();
     final subtitle = DateFormat('EEEE, MMM d, yyyy').format(focus);
 
-    return AnimatedContainer(
-      duration: const Duration(milliseconds: 250),
-      margin: const EdgeInsets.fromLTRB(12, 8, 12, 6),
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-      decoration: BoxDecoration(
-        color: Theme.of(context).colorScheme.primaryContainer.withOpacity(0.35),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(
-          color: Theme.of(context).colorScheme.primary.withOpacity(0.25),
-        ),
-      ),
-      child: Row(
-        children: [
-          Icon(
-            Icons.calendar_today_rounded,
-            size: 18,
-            color: Theme.of(context).colorScheme.primary,
-          ),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  isToday ? 'Today' : 'Focused date',
-                  style: GoogleFonts.inter(
-                    fontWeight: FontWeight.w600,
-                    color: Theme.of(context).colorScheme.primary,
-                  ),
-                ),
-                Text(
-                  DateFormat('MMM d, yyyy').format(focus),
-                  style: GoogleFonts.inter(
-                    fontSize: 13,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-                Text(
-                  subtitle,
-                  style: GoogleFonts.inter(
-                    fontSize: 11,
-                    color: Theme.of(context).colorScheme.onSurfaceVariant,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(width: 8),
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final compact = constraints.maxWidth < 420;
+        final ultraCompact = constraints.maxWidth < 360;
+        final iconSize = compact ? 18.0 : 20.0;
+        final buttonConstraints =
+            const BoxConstraints(minWidth: 36, minHeight: 36);
+
+        final controls = [
           IconButton(
             tooltip: 'Jump to year',
             onPressed: () => _showYearPicker(context),
             icon: const Icon(Icons.event),
+            iconSize: iconSize,
+            constraints: buttonConstraints,
+            padding: EdgeInsets.zero,
           ),
-          const SizedBox(width: 6),
           _buildViewModeToggle(context),
-          const SizedBox(width: 6),
           IconButton(
             tooltip: _focusMode ? 'Exit focus mode' : 'Focus mode',
             onPressed: () {
@@ -2965,6 +3636,9 @@ class RosterViewState extends ConsumerState<RosterView> {
                   ? Icons.fullscreen_exit_rounded
                   : Icons.fullscreen_rounded,
             ),
+            iconSize: iconSize,
+            constraints: buttonConstraints,
+            padding: EdgeInsets.zero,
           ),
           PopupMenuButton<double>(
             tooltip: 'Roster size',
@@ -2978,7 +3652,9 @@ class RosterViewState extends ConsumerState<RosterView> {
               PopupMenuItem(value: 0.6, child: Text('X-Small')),
               PopupMenuItem(value: 0.5, child: Text('XX-Small')),
             ],
-            icon: const Icon(Icons.text_fields_rounded),
+            icon: Icon(Icons.text_fields_rounded, size: iconSize),
+            constraints: buttonConstraints,
+            padding: EdgeInsets.zero,
           ),
           IconButton(
             tooltip: _showFloatingAi ? 'Hide RC mini' : 'Show RC mini',
@@ -2990,6 +3666,25 @@ class RosterViewState extends ConsumerState<RosterView> {
                   ? Icons.smart_toy_rounded
                   : Icons.smart_toy_outlined,
             ),
+            iconSize: iconSize,
+            constraints: buttonConstraints,
+            padding: EdgeInsets.zero,
+          ),
+          IconButton(
+            tooltip: 'Copy template code',
+            onPressed: () => _showQuickTemplateCodeDialog(context),
+            icon: const Icon(Icons.copy_all_rounded),
+            iconSize: iconSize,
+            constraints: buttonConstraints,
+            padding: EdgeInsets.zero,
+          ),
+          IconButton(
+            tooltip: 'Create access code',
+            onPressed: () => _showQuickAccessCodeDialog(context),
+            icon: const Icon(Icons.key_rounded),
+            iconSize: iconSize,
+            constraints: buttonConstraints,
+            padding: EdgeInsets.zero,
           ),
           Column(
             mainAxisSize: MainAxisSize.min,
@@ -2998,27 +3693,168 @@ class RosterViewState extends ConsumerState<RosterView> {
                 nowTime.format(context),
                 style: GoogleFonts.inter(
                   fontWeight: FontWeight.w700,
-                  fontSize: 12,
+                  fontSize: compact ? 11 : 12,
                 ),
               ),
-              Text(
-                settings.timeZone,
-                style: GoogleFonts.inter(
-                  fontSize: 10,
-                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+              if (!ultraCompact)
+                Text(
+                  settings.timeZone,
+                  style: GoogleFonts.inter(
+                    fontSize: 10,
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
                 ),
-              ),
             ],
           ),
-          const SizedBox(width: 8),
-          FilledButton.tonalIcon(
-            onPressed: _smartHome,
-            icon: const Icon(Icons.home_rounded, size: 16),
-            label: const Text('Today'),
+        ];
+
+        return AnimatedContainer(
+          duration: const Duration(milliseconds: 250),
+          margin: const EdgeInsets.fromLTRB(12, 8, 12, 6),
+          padding: EdgeInsets.symmetric(
+            horizontal: 12,
+            vertical: compact ? 8 : 10,
           ),
-        ],
+          decoration: BoxDecoration(
+            color:
+                Theme.of(context).colorScheme.primaryContainer.withOpacity(0.35),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(
+              color: Theme.of(context).colorScheme.primary.withOpacity(0.25),
+            ),
+          ),
+          child: compact
+              ? Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Row(
+                      children: [
+                        Icon(
+                          Icons.calendar_today_rounded,
+                          size: 18,
+                          color: Theme.of(context).colorScheme.primary,
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                isToday ? 'Today' : 'Focused date',
+                                style: GoogleFonts.inter(
+                                  fontWeight: FontWeight.w600,
+                                  fontSize: 12,
+                                  color:
+                                      Theme.of(context).colorScheme.primary,
+                                ),
+                              ),
+                              Text(
+                                DateFormat('MMM d, yyyy').format(focus),
+                                style: GoogleFonts.inter(
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        FilledButton.tonalIcon(
+                          onPressed: _smartHome,
+                          icon: const Icon(Icons.home_rounded, size: 16),
+                          label: const Text('Today'),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 6),
+                    SizedBox(
+                      height: 40,
+                      child: SingleChildScrollView(
+                        scrollDirection: Axis.horizontal,
+                        child: Row(
+                          children: [
+                            ...controls
+                                .expand((widget) => [
+                                      widget,
+                                      const SizedBox(width: 6),
+                                    ])
+                                .toList(),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ],
+                )
+              : Row(
+                  children: [
+                    Icon(
+                      Icons.calendar_today_rounded,
+                      size: 18,
+                      color: Theme.of(context).colorScheme.primary,
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            isToday ? 'Today' : 'Focused date',
+                            style: GoogleFonts.inter(
+                              fontWeight: FontWeight.w600,
+                              color: Theme.of(context).colorScheme.primary,
+                            ),
+                          ),
+                          Text(
+                            DateFormat('MMM d, yyyy').format(focus),
+                            style: GoogleFonts.inter(
+                              fontSize: 13,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                          Text(
+                            subtitle,
+                            style: GoogleFonts.inter(
+                              fontSize: 11,
+                              color: Theme.of(context)
+                                  .colorScheme
+                                  .onSurfaceVariant,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    ...controls
+                        .expand((widget) => [
+                              widget,
+                              const SizedBox(width: 6),
+                            ])
+                        .toList(),
+                    FilledButton.tonalIcon(
+                      onPressed: _smartHome,
+                      icon: const Icon(Icons.home_rounded, size: 16),
+                      label: const Text('Today'),
+                    ),
+                  ],
+                ),
+        );
+      },
+    );
+  }
+
+  Future<void> _openTemplateImport(BuildContext context) async {
+    await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => ImportRosterScreen(
+          initialTemplateCode: _templateClipboardCode,
+          openTemplateOnStart: true,
+        ),
       ),
     );
+  }
+
+  Widget _buildTemplateClipboardBanner() {
+    return const SizedBox.shrink();
   }
 
   Widget _buildRosterCards(
@@ -3081,8 +3917,11 @@ class RosterViewState extends ConsumerState<RosterView> {
                       itemBuilder: (context, dayIndex) {
                       final day = days[dayIndex];
                       final shift = roster.getShiftForDate(personName, day);
+                      final displayShift = _normalizeShiftCode(shift);
                       final shiftColor =
-                          _shiftColors[shift.toUpperCase()] ?? Colors.grey;
+                          _shiftColors[(displayShift.isEmpty ? shift : displayShift)
+                                  .toUpperCase()] ??
+                              Colors.grey;
                         final holiday = holidayMap[_dateKey(day)];
                         final events = eventMap[_dateKey(day)] ?? [];
                         final observances =
@@ -3131,7 +3970,7 @@ class RosterViewState extends ConsumerState<RosterView> {
                                       Theme.of(context).textTheme.labelSmall,
                                 ),
                                 Text(
-                                  shift,
+                                  displayShift.isEmpty ? shift : displayShift,
                                   style: TextStyle(
                                     fontWeight: FontWeight.bold,
                                     color: shiftColor,
@@ -3208,124 +4047,135 @@ class RosterViewState extends ConsumerState<RosterView> {
         override != null && override.shift.toUpperCase() == 'AL';
     showModalBottomSheet(
       context: context,
+      isScrollControlled: true,
       builder: (context) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Padding(
-              padding: const EdgeInsets.all(16.0),
-              child: Text(
-                    '${DateFormat('EEE, MMM d').format(date)} - $personName',
-                    style: GoogleFonts.inter(
-                      fontSize: 18,
-                      fontWeight: FontWeight.bold,
-                    ),
-              ),
-            ),
-            ListTile(
-              leading: const Icon(Icons.edit_rounded),
-              title: const Text('Add Change'),
-              subtitle: const Text('Set custom shift for this day'),
-              onTap: () {
-                    Navigator.pop(context);
-                    _showAddOverrideDialog(personName, date);
-              },
-            ),
-            ListTile(
-              leading: const Icon(Icons.date_range_rounded),
-              title: const Text('Bulk Change'),
-              subtitle: const Text('Set changes for multiple days'),
-              onTap: () {
-                    Navigator.pop(context);
-                    _showBulkOverrideDialog(personName);
-              },
-            ),
-            if (hasLeaveOverride)
-              ListTile(
-                leading: const Icon(Icons.event_busy_rounded),
-                title: const Text('Cancel Leave'),
-                subtitle: const Text('Remove annual leave for this date'),
-                onTap: () {
-                  Navigator.pop(context);
-                  roster.cancelAnnualLeaveForDates(
-                    people: [personName],
-                    dates: [date],
-                  );
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('Leave removed')),
-                  );
-                },
-              ),
-            ListTile(
-              leading: const Icon(Icons.delete_sweep_rounded),
-              title: const Text('Clear Changes'),
-              subtitle: const Text('Clear changes for a date range'),
-              onTap: () {
-                Navigator.pop(context);
-                _showRemoveOverrideDialog(personName, date);
-              },
-            ),
-            ListTile(
-              leading: const Icon(Icons.event_rounded),
-              title: const Text('Add Event'),
-              subtitle: const Text('Create an event for this date'),
-              onTap: () {
-                    Navigator.pop(context);
-                    _showAddEventForDate(date);
-              },
-            ),
-            ListTile(
-              leading: const Icon(Icons.swap_horiz_rounded),
-              title: const Text('Quick Swap'),
-              subtitle: const Text('Swap this shift with another staff member'),
-              onTap: () {
-                Navigator.pop(context);
-                _showQuickSwapDialog(context, personName, date);
-              },
-            ),
-              ListTile(
-                leading: const Icon(Icons.event_available_rounded),
-                title: const Text('View Events on this date'),
-                subtitle: const Text('Edit or delete events for this date'),
-                onTap: () {
+        child: DraggableScrollableSheet(
+          expand: false,
+          initialChildSize: 0.7,
+          minChildSize: 0.4,
+          maxChildSize: 0.95,
+          builder: (context, scrollController) => SingleChildScrollView(
+            controller: scrollController,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.all(16.0),
+                  child: Text(
+                        '${DateFormat('EEE, MMM d').format(date)} - $personName',
+                        style: GoogleFonts.inter(
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold,
+                        ),
+                  ),
+                ),
+                ListTile(
+                  leading: const Icon(Icons.edit_rounded),
+                  title: const Text('Add Change'),
+                  subtitle: const Text('Set custom shift for this day'),
+                  onTap: () {
+                        Navigator.pop(context);
+                        _showAddOverrideDialog(personName, date);
+                  },
+                ),
+                ListTile(
+                  leading: const Icon(Icons.date_range_rounded),
+                  title: const Text('Bulk Change'),
+                  subtitle: const Text('Set changes for multiple days'),
+                  onTap: () {
+                        Navigator.pop(context);
+                        _showBulkOverrideDialog(personName);
+                  },
+                ),
+                if (hasLeaveOverride)
+                  ListTile(
+                    leading: const Icon(Icons.event_busy_rounded),
+                    title: const Text('Cancel Leave'),
+                    subtitle: const Text('Remove annual leave for this date'),
+                    onTap: () {
                       Navigator.pop(context);
-                      _showEventsForDate(date);
-                },
-              ),
-              ListTile(
-                leading: Icon(
-                  isHidden ? Icons.visibility_rounded : Icons.visibility_off_rounded,
-                ),
-                title: Text(
-                  isHidden
-                      ? 'Show overlays for this date'
-                      : 'Hide overlays for this date',
-                ),
-                subtitle: const Text('Hide holiday, observance, and sports badges'),
-                onTap: () {
-                  final updated =
-                      List<String>.from(settings.hiddenOverlayDates);
-                  if (isHidden) {
-                    updated.remove(dateKey);
-                  } else {
-                    updated.add(dateKey);
-                  }
-                  ref.read(settingsProvider.notifier).updateSettings(
-                        settings.copyWith(hiddenOverlayDates: updated),
+                      roster.cancelAnnualLeaveForDates(
+                        people: [personName],
+                        dates: [date],
                       );
-                  Navigator.pop(context);
-                },
-              ),
-              ListTile(
-                leading: const Icon(Icons.info_outline_rounded),
-                title: const Text('View Details'),
-                subtitle: const Text('See shift information and history'),
-                onTap: () {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(content: Text('Leave removed')),
+                      );
+                    },
+                  ),
+                ListTile(
+                  leading: const Icon(Icons.delete_sweep_rounded),
+                  title: const Text('Clear Changes'),
+                  subtitle: const Text('Clear changes for a date range'),
+                  onTap: () {
                     Navigator.pop(context);
-                    _showDayDetails(personName, date);
-              },
+                    _showRemoveOverrideDialog(personName, date);
+                  },
+                ),
+                ListTile(
+                  leading: const Icon(Icons.event_rounded),
+                  title: const Text('Add Event'),
+                  subtitle: const Text('Create an event for this date'),
+                  onTap: () {
+                        Navigator.pop(context);
+                        _showAddEventForDate(date);
+                  },
+                ),
+                ListTile(
+                  leading: const Icon(Icons.swap_horiz_rounded),
+                  title: const Text('Quick Swap'),
+                  subtitle: const Text('Swap this shift with another staff member'),
+                  onTap: () {
+                    Navigator.pop(context);
+                    _showQuickSwapDialog(context, personName, date);
+                  },
+                ),
+                  ListTile(
+                    leading: const Icon(Icons.event_available_rounded),
+                    title: const Text('View Events on this date'),
+                    subtitle: const Text('Edit or delete events for this date'),
+                    onTap: () {
+                          Navigator.pop(context);
+                          _showEventsForDate(date);
+                    },
+                  ),
+                  ListTile(
+                    leading: Icon(
+                      isHidden ? Icons.visibility_rounded : Icons.visibility_off_rounded,
+                    ),
+                    title: Text(
+                      isHidden
+                          ? 'Show overlays for this date'
+                          : 'Hide overlays for this date',
+                    ),
+                    subtitle: const Text('Hide holiday, observance, and sports badges'),
+                    onTap: () {
+                      final updated =
+                          List<String>.from(settings.hiddenOverlayDates);
+                      if (isHidden) {
+                        updated.remove(dateKey);
+                      } else {
+                        updated.add(dateKey);
+                      }
+                      ref.read(settingsProvider.notifier).updateSettings(
+                            settings.copyWith(hiddenOverlayDates: updated),
+                          );
+                      Navigator.pop(context);
+                    },
+                  ),
+                  ListTile(
+                    leading: const Icon(Icons.info_outline_rounded),
+                    title: const Text('View Details'),
+                    subtitle: const Text('See shift information and history'),
+                    onTap: () {
+                        Navigator.pop(context);
+                        _showDayDetails(personName, date);
+                  },
+                ),
+                const SizedBox(height: 12),
+              ],
             ),
-          ],
+          ),
         ),
       ),
     );
@@ -3489,19 +4339,66 @@ class RosterViewState extends ConsumerState<RosterView> {
 
   Future<void> _showEventsForDate(DateTime date) async {
     final roster = ref.read(rosterProvider);
-    final dayEvents = roster.events.where((event) {
-      return event.date.year == date.year &&
-          event.date.month == date.month &&
-          event.date.day == date.day;
-    }).toList();
+    final settings = ref.read(settingsProvider);
+    final start = DateTime(date.year, date.month, date.day);
+    final end = start;
+    final bundle = await _loadOverlayBundleForRange(settings, start, end);
+    final merged = _buildEventMap(
+      roster,
+      start,
+      end,
+      settings,
+      bundle.publicEventMap,
+    );
+    final dayEvents = merged[_dateKey(date)] ?? [];
+    final holiday = bundle.holidayMap[_dateKey(date)];
+    final observances = bundle.observanceMap[_dateKey(date)] ?? [];
+    final sportsEvents = bundle.sportsMap[_dateKey(date)] ?? [];
 
-    if (dayEvents.isEmpty) {
+    if (dayEvents.isEmpty &&
+        holiday == null &&
+        observances.isEmpty &&
+        sportsEvents.isEmpty) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('No events on this date.')),
         );
       }
       return;
+    }
+
+    final items = <Map<String, dynamic>>[];
+    if (holiday != null) {
+      items.add({
+        'title': holiday.localName.isNotEmpty ? holiday.localName : holiday.name,
+        'subtitle': 'Holiday',
+        'color': _eventLineColor(context, models.EventType.holiday),
+      });
+    }
+    for (final obs in observances) {
+      final type = _inferObservanceType(obs.localName);
+      items.add({
+        'title': obs.localName,
+        'subtitle': _eventTypeLabel(type),
+        'color': _eventLineColor(context, type),
+      });
+    }
+    for (final sport in sportsEvents) {
+      items.add({
+        'title': sport.name,
+        'subtitle': sport.league,
+        'color': _eventLineColor(context, models.EventType.sports),
+      });
+    }
+    for (final event in dayEvents) {
+      items.add({
+        'title': event.title,
+        'subtitle': event.description?.isNotEmpty == true
+            ? '${_eventTypeLabel(event.eventType)} - ${event.description}'
+            : _eventTypeLabel(event.eventType),
+        'color': _eventLineColor(context, event.eventType),
+        'canEdit': event,
+      });
     }
 
     await showDialog(
@@ -3512,41 +4409,50 @@ class RosterViewState extends ConsumerState<RosterView> {
           width: double.maxFinite,
           child: ListView.separated(
             shrinkWrap: true,
-            itemCount: dayEvents.length,
+            itemCount: items.length,
             separatorBuilder: (_, __) => const Divider(),
             itemBuilder: (context, index) {
-              final event = dayEvents[index];
+              final event = items[index];
+              final color = event['color'] as Color?;
               return ListTile(
-                title: Text(event.title),
-                subtitle: event.description != null
-                    ? Text(event.description!)
+                title: Text(event['title'] as String),
+                subtitle: event['subtitle'] != null
+                    ? Text(event['subtitle'] as String)
                     : null,
-                leading: const Icon(Icons.event),
-                trailing: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    IconButton(
-                      icon: const Icon(Icons.edit),
-                      onPressed: () async {
-                        Navigator.pop(context);
-                        await _showEditEventDialog(event);
-                      },
-                    ),
-                    IconButton(
-                      icon: const Icon(Icons.delete_outline, color: Colors.red),
-                      onPressed: () async {
-                        final confirmed = await _confirmDeleteEvent(
-                          context,
-                          event.title,
-                        );
-                        if (confirmed && mounted) {
-                          ref.read(rosterProvider).deleteEvent(event.id);
-                          Navigator.pop(context);
-                        }
-                      },
-                    ),
-                  ],
-                ),
+                leading: Icon(Icons.event, color: color),
+                trailing: event.containsKey('canEdit')
+                    ? Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          IconButton(
+                            icon: const Icon(Icons.edit),
+                            onPressed: () async {
+                              Navigator.pop(context);
+                              await _showEditEventDialog(
+                                event['canEdit'] as models.Event,
+                              );
+                            },
+                          ),
+                          IconButton(
+                            icon: const Icon(Icons.delete_outline, color: Colors.red),
+                            onPressed: () async {
+                              final confirmed = await _confirmDeleteEvent(
+                                context,
+                                (event['canEdit'] as models.Event).title,
+                              );
+                              if (confirmed && mounted) {
+                                ref
+                                    .read(rosterProvider)
+                                    .deleteEvent(
+                                      (event['canEdit'] as models.Event).id,
+                                    );
+                                Navigator.pop(context);
+                              }
+                            },
+                          ),
+                        ],
+                      )
+                    : null,
               );
             },
           ),
@@ -4118,8 +5024,10 @@ class RosterViewState extends ConsumerState<RosterView> {
                       itemCount: overrides.length,
                       itemBuilder: (context, index) {
                         final override = overrides[index];
+                        final normalizedShift =
+                            _normalizeShiftCode(override.shift);
                         final shiftColor =
-                            _shiftColors[override.shift.toUpperCase()] ??
+                            _shiftColors[normalizedShift.toUpperCase()] ??
                                 Colors.grey;
 
                         return ListTile(
@@ -4133,7 +5041,7 @@ class RosterViewState extends ConsumerState<RosterView> {
                             ),
                             child: Center(
                               child: Text(
-                                override.shift,
+                                normalizedShift,
                                 style: TextStyle(
                                   fontWeight: FontWeight.bold,
                                   color: shiftColor,
@@ -4196,7 +5104,10 @@ class RosterViewState extends ConsumerState<RosterView> {
     );
   }
 
-  Future<void> _showGuestLeaveRequestDialog(BuildContext context) async {
+  Future<void> _showGuestRequestDialog(
+    BuildContext context,
+    models.AvailabilityType type,
+  ) async {
     final nameController = TextEditingController();
     final notesController = TextEditingController();
     DateTime? startDate;
@@ -4214,7 +5125,7 @@ class RosterViewState extends ConsumerState<RosterView> {
               : DateFormat('MMM d, yyyy').format(endDate!);
 
           return AlertDialog(
-            title: const Text('Leave Request'),
+            title: Text(_guestRequestTitle(type)),
             content: SingleChildScrollView(
               child: Column(
                     mainAxisSize: MainAxisSize.min,
@@ -4304,7 +5215,8 @@ class RosterViewState extends ConsumerState<RosterView> {
                     return;
                   }
                   try {
-                    await ref.read(rosterProvider).submitSharedLeaveRequest(
+                    await ref.read(rosterProvider).submitSharedRosterRequest(
+                          type: type,
                           guestName: nameController.text.trim(),
                           startDate: startDate!,
                           endDate: endDate,
@@ -4313,8 +5225,8 @@ class RosterViewState extends ConsumerState<RosterView> {
                     if (context.mounted) {
                       Navigator.pop(context);
                       ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(
-                          content: Text('Leave request submitted'),
+                        SnackBar(
+                          content: Text('${_guestRequestLabel(type)} submitted'),
                         ),
                       );
                     }
@@ -4377,6 +5289,42 @@ class RosterViewState extends ConsumerState<RosterView> {
     });
   }
 
+  String _guestRequestTitle(models.AvailabilityType type) {
+    switch (type) {
+      case models.AvailabilityType.training:
+        return 'Request training';
+      case models.AvailabilityType.shiftChange:
+        return 'Request shift change';
+      case models.AvailabilityType.swap:
+        return 'Request swap';
+      case models.AvailabilityType.general:
+        return 'Request roster change';
+      case models.AvailabilityType.leave:
+        return 'Request leave';
+      case models.AvailabilityType.preference:
+      case models.AvailabilityType.availability:
+        return 'Request change';
+    }
+  }
+
+  String _guestRequestLabel(models.AvailabilityType type) {
+    switch (type) {
+      case models.AvailabilityType.training:
+        return 'Training request';
+      case models.AvailabilityType.shiftChange:
+        return 'Shift change request';
+      case models.AvailabilityType.swap:
+        return 'Swap request';
+      case models.AvailabilityType.general:
+        return 'Change request';
+      case models.AvailabilityType.leave:
+        return 'Leave request';
+      case models.AvailabilityType.preference:
+      case models.AvailabilityType.availability:
+        return 'Request';
+    }
+  }
+
   Widget _buildRosterTable(
     BuildContext context,
     RosterNotifier roster,
@@ -4389,7 +5337,7 @@ class RosterViewState extends ConsumerState<RosterView> {
     bool timelineMode,
   ) {
     final isReadOnly = roster.readOnly;
-    final staffMembers = roster.getStaffForRange(
+    final staffMembers = roster.getVisibleStaffForRange(
       weekStart,
       weekStart.add(const Duration(days: 6)),
     );
@@ -4430,15 +5378,16 @@ class RosterViewState extends ConsumerState<RosterView> {
                       observances.isNotEmpty ||
                       sportsEvents.isNotEmpty;
                   return DataColumn(
-                    label: InkWell(
-                      onTap: hasOverlay
-                          ? () => _showOverlaySummary(
-                                day,
-                                holiday: holiday,
-                                observances: observances,
-                                sportsEvents: sportsEvents,
-                              )
-                          : null,
+                      label: InkWell(
+                        onTap: hasOverlay
+                            ? () => _showOverlaySummary(
+                                  day,
+                                  holiday: holiday,
+                                  observances: observances,
+                                  sportsEvents: sportsEvents,
+                                  events: events,
+                                )
+                            : null,
                       child: SizedBox(
                         width: _dayCellWidthWeek,
                         child: Column(
@@ -4517,9 +5466,14 @@ class RosterViewState extends ConsumerState<RosterView> {
                       final override = (!vacant && !preStart)
                           ? _findOverrideForDate(roster, personName, day)
                           : null;
-                      final overrideShift = override != null ? shift : null;
+                      final overrideShift = _normalizeShiftCode(override?.shift);
+                      final hasOverride = overrideShift.isNotEmpty;
+                      final displayShift = _normalizeShiftCode(
+                        hasOverride ? overrideShift : shift,
+                      );
                       final shiftColor =
-                          _shiftColors[(overrideShift ?? shift).toUpperCase()] ??
+                          _shiftColors[(hasOverride ? overrideShift : shift)
+                                  .toUpperCase()] ??
                               Colors.grey;
                       final baseShiftColor =
                           _shiftColors[baseShift.toUpperCase()] ?? Colors.grey;
@@ -4546,7 +5500,7 @@ class RosterViewState extends ConsumerState<RosterView> {
                             }
                           },
                           child: Tooltip(
-                            message: overrideShift != null
+                            message: hasOverride
                                 ? '${_shiftFullName(overrideShift)} (amended)'
                                 : _shiftFullName(shift),
                             child: Container(
@@ -4557,12 +5511,12 @@ class RosterViewState extends ConsumerState<RosterView> {
                                 color: shiftColor.withOpacity(
                                     (vacant || unavailable || preStart)
                                         ? 0.08
-                                        : overrideShift != null
+                                        : hasOverride
                                             ? 0.22
                                             : 0.15),
                                 border: Border.all(
                                   color: shiftColor,
-                                  width: overrideShift != null ? 2.5 : 2,
+                                  width: hasOverride ? 2.5 : 2,
                                 ),
                                 borderRadius: BorderRadius.circular(8),
                               ),
@@ -4572,7 +5526,7 @@ class RosterViewState extends ConsumerState<RosterView> {
                                     child: Column(
                                       mainAxisAlignment: MainAxisAlignment.center,
                                       children: [
-                                        if (overrideShift != null) ...[
+                                        if (hasOverride) ...[
                                           Text(
                                             overrideShift,
                                             style: TextStyle(
@@ -4602,8 +5556,9 @@ class RosterViewState extends ConsumerState<RosterView> {
                                               fontSize: 14,
                                             ),
                                           ),
-                                          if (shift == 'AL')
-                                            Icon(
+                                        if ((displayShift.isEmpty ? shift : displayShift) ==
+                                            'AL')
+                                          Icon(
                                               Icons.beach_access_rounded,
                                               size: 12,
                                               color: shiftColor,
@@ -4660,13 +5615,11 @@ class RosterViewState extends ConsumerState<RosterView> {
     HolidayItem? holiday,
     List<HolidayItem> observances = const [],
     List<SportsEventItem> sportsEvents = const [],
+    List<models.Event> events = const [],
   }) async {
     final roster = ref.read(rosterProvider);
-    final dayEvents = roster.events.where((event) {
-      return event.date.year == date.year &&
-          event.date.month == date.month &&
-          event.date.day == date.day;
-    }).toList();
+    final editableIds = roster.events.map((event) => event.id).toSet();
+    final dayEvents = events;
 
     final items = <Map<String, dynamic>>[];
     if (holiday != null) {
@@ -4698,6 +5651,7 @@ class RosterViewState extends ConsumerState<RosterView> {
             ? '${_eventTypeLabel(event.eventType)} - ${event.description}'
             : _eventTypeLabel(event.eventType),
         'color': _eventLineColor(context, event.eventType),
+        if (editableIds.contains(event.id)) 'canEdit': event,
       });
     }
 
@@ -4747,4 +5701,3 @@ class RosterViewState extends ConsumerState<RosterView> {
     );
   }
 }
-

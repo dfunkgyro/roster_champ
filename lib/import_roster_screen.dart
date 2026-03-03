@@ -1,5 +1,6 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:intl/intl.dart';
@@ -14,7 +15,16 @@ import 'package:roster_champ/safe_text_field.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 
 class ImportRosterScreen extends ConsumerStatefulWidget {
-  const ImportRosterScreen({super.key});
+  final String? initialTemplateCode;
+  final String? initialTemplatePassword;
+  final bool openTemplateOnStart;
+
+  const ImportRosterScreen({
+    super.key,
+    this.initialTemplateCode,
+    this.initialTemplatePassword,
+    this.openTemplateOnStart = false,
+  });
 
   @override
   ConsumerState<ImportRosterScreen> createState() =>
@@ -57,6 +67,28 @@ class _ImportRosterScreenState extends ConsumerState<ImportRosterScreen> {
   void initState() {
     super.initState();
     _loadImportPrefs();
+    if (widget.initialTemplateCode != null &&
+        widget.initialTemplateCode!.trim().isNotEmpty) {
+      _pendingTemplateCode = widget.initialTemplateCode!.trim();
+      _pendingTemplatePassword = widget.initialTemplatePassword?.trim();
+      _templateCodeController.text = _pendingTemplateCode!;
+      if (_pendingTemplatePassword != null &&
+          _pendingTemplatePassword!.isNotEmpty) {
+        _templatePasswordController.text = _pendingTemplatePassword!;
+      }
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Template code loaded.')),
+        );
+      });
+    }
+    if (widget.openTemplateOnStart) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        _showTemplateImportDialog();
+      });
+    }
   }
 
   Future<void> _loadImportPrefs() async {
@@ -433,7 +465,7 @@ class _ImportRosterScreenState extends ConsumerState<ImportRosterScreen> {
               const SizedBox(height: 16),
               if (_selectedFile != null)
                 Text(
-                  'Selected: ${_selectedFile!.path.split(Platform.pathSeparator).last} (${_sourceLabel ?? ''})',
+                  'Selected: ${_selectedFile!.path.split(kIsWeb ? '/' : Platform.pathSeparator).last} (${_sourceLabel ?? ''})',
                 ),
               if (_loading)
                 Padding(

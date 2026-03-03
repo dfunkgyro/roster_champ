@@ -15,7 +15,7 @@ flutter run \
   --dart-define=COGNITO_USER_POOL_ID=us-east-1_TrwHCKjHA \
   --dart-define=COGNITO_APP_CLIENT_ID=412n6o2tfbd0uiv80i4733n0l0 \
   --dart-define=COGNITO_DOMAIN=https://roster-dev-dhjw6acs.auth.us-east-1.amazoncognito.com \
-  --dart-define=COGNITO_REDIRECT_URI=rosterchamp://auth
+  --dart-define=COGNITO_REDIRECT_URI=rosterchamp://auth-prod
 ```
 
 Build (release APK):
@@ -27,7 +27,7 @@ flutter build apk --release \
   --dart-define=COGNITO_USER_POOL_ID=us-east-1_TrwHCKjHA \
   --dart-define=COGNITO_APP_CLIENT_ID=412n6o2tfbd0uiv80i4733n0l0 \
   --dart-define=COGNITO_DOMAIN=https://roster-dev-dhjw6acs.auth.us-east-1.amazoncognito.com \
-  --dart-define=COGNITO_REDIRECT_URI=rosterchamp://auth
+  --dart-define=COGNITO_REDIRECT_URI=rosterchamp://auth-prod
 ```
 
 ## Getting Started

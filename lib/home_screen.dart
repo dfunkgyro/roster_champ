@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:pdf/pdf.dart';
 import 'package:image/image.dart' as img;
@@ -18,10 +19,12 @@ import 'roster_generator_view.dart';
 import 'activity_log_view.dart';
 import 'system_view.dart';
 import 'analytics_view.dart';
+import 'admin_dashboard_view.dart';
 import 'screens/staff_management_screen.dart';
 import 'screens/pattern_editor_screen.dart';
 import 'screens/login_screen.dart';
 import 'screens/roster_sharing_screen.dart';
+import 'screens/paywall_screen.dart';
 import 'import_roster_screen.dart';
 import 'providers.dart';
 import 'models.dart' as models;
@@ -76,6 +79,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
     _configureAutoSync(ref.read(settingsProvider));
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _maybeShowOnboarding();
+      _maybeShowTemplatePrompt();
       _requestMicPermissionOnce();
       if (!_didInitialRosterSnap) {
         _rosterViewKey.currentState?.snapToTodayOnFocus();
@@ -116,6 +120,12 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
     });
     final roster = ref.watch(rosterProvider);
     final settings = ref.watch(settingsProvider);
+    final isAdmin = AwsService.instance.isAdmin;
+    final isSharedAccess = roster.sharedAccessCode != null;
+    final tabConfig = _buildTabs(isAdmin, isSharedAccess);
+    _ensureTabController(tabConfig.length);
+    final useRail = isAdmin && MediaQuery.of(context).size.width >= 1000;
+    final useBottomNav = !isAdmin;
 
     if (_lastLayoutStyle != settings.layoutStyle) {
       final shouldHide = settings.layoutStyle ==
@@ -136,9 +146,15 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
         title: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(
-              Icons.calendar_today_rounded,
-              color: Theme.of(context).colorScheme.primary,
+            IconButton(
+              tooltip: 'Open roster manager',
+              onPressed: widget.isGuestMode ? null : _openRosterSwitcher,
+              icon: Image.asset(
+                'assets/images/rc1gold1a.gif',
+                width: 28,
+                height: 28,
+                fit: BoxFit.contain,
+              ),
             ),
             const SizedBox(width: 8),
             const Text(
@@ -160,6 +176,25 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
                     fontSize: 10,
                     fontWeight: FontWeight.bold,
                     color: Colors.orange[700],
+                  ),
+                ),
+              ),
+            ],
+            if (AwsService.instance.isAdmin) ...[
+              const SizedBox(width: 8),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                decoration: BoxDecoration(
+                  color: Colors.red.withOpacity(0.15),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: Colors.redAccent),
+                ),
+                child: const Text(
+                  'Admin',
+                  style: TextStyle(
+                    fontSize: 10,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.redAccent,
                   ),
                 ),
               ),
@@ -193,40 +228,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
               icon: const Icon(Icons.arrow_back),
               label: const Text('Back'),
             ),
-          Stack(
-            children: [
-              IconButton(
-                icon: const Icon(Icons.groups),
-                onPressed: _showPresenceList,
-                tooltip: 'Live Presence',
-              ),
-              if (roster.presenceEntries.isNotEmpty)
-                Positioned(
-                  right: 8,
-                  top: 8,
-                  child: Container(
-                    padding: const EdgeInsets.all(4),
-                    decoration: const BoxDecoration(
-                      color: Colors.green,
-                      shape: BoxShape.circle,
-                    ),
-                    constraints: const BoxConstraints(
-                      minWidth: 16,
-                      minHeight: 16,
-                    ),
-                    child: Text(
-                      '${roster.presenceEntries.length}',
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 10,
-                        fontWeight: FontWeight.bold,
-                      ),
-                      textAlign: TextAlign.center,
-                    ),
-                  ),
-                ),
-            ],
-          ),
           if (roster.pendingSync.isNotEmpty)
             Stack(
               children: [
@@ -266,13 +267,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
             onPressed: _showAccountActions,
             tooltip: 'Account',
           ),
-          // Sync button (only show if not guest mode)
-          if (!widget.isGuestMode && !roster.readOnly)
-            IconButton(
-              icon: const Icon(Icons.sync_rounded),
-              onPressed: _syncData,
-              tooltip: 'Sync Data',
-            ),
           // More menu
           PopupMenuButton<String>(
             icon: const Icon(Icons.more_vert_rounded),
@@ -294,8 +288,14 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
                 case 'bulk_edit':
                   await _showBulkEditDialog();
                   break;
+                case 'presence':
+                  _showPresenceList();
+                  break;
                 case 'switch_roster':
                   await _openRosterSwitcher();
+                  break;
+                case 'sync':
+                  await _syncData();
                   break;
                 case 'initialize':
                   await _showInitializeDialog();
@@ -323,6 +323,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
                   break;
                 case 'import':
                   await _importData();
+                  break;
+                case 'admin_debug':
+                  _showAdminDebugPopup();
                   break;
                 case 'clear':
                   await _clearData();
@@ -368,14 +371,15 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
                     contentPadding: EdgeInsets.zero,
                   ),
                 ),
-              const PopupMenuItem(
-                value: 'activity_log',
-                child: ListTile(
-                  leading: Icon(Icons.history_rounded),
-                  title: Text('Activity Log'),
-                  contentPadding: EdgeInsets.zero,
+              if (isAdmin)
+                const PopupMenuItem(
+                  value: 'activity_log',
+                  child: ListTile(
+                    leading: Icon(Icons.history_rounded),
+                    title: Text('Activity Log'),
+                    contentPadding: EdgeInsets.zero,
+                  ),
                 ),
-              ),
               if (!roster.readOnly)
                 const PopupMenuItem(
                   value: 'bulk_edit',
@@ -385,25 +389,52 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
                     contentPadding: EdgeInsets.zero,
                   ),
                 ),
+              const PopupMenuItem(
+                value: 'presence',
+                child: ListTile(
+                  leading: Icon(Icons.groups),
+                  title: Text('Active Collaborators'),
+                  contentPadding: EdgeInsets.zero,
+                ),
+              ),
               const PopupMenuDivider(),
               if (!widget.isGuestMode) ...[
                 const PopupMenuItem(
                   value: 'switch_roster',
                   child: ListTile(
                     leading: Icon(Icons.folder_open_rounded),
-                    title: Text('Switch Roster'),
+                    title: Text('Roster Manager'),
                     contentPadding: EdgeInsets.zero,
                   ),
                 ),
               ],
-              const PopupMenuItem(
-                value: 'account',
-                child: ListTile(
-                  leading: Icon(Icons.manage_accounts),
-                  title: Text('Account'),
-                  contentPadding: EdgeInsets.zero,
+              if (!widget.isGuestMode && !roster.readOnly)
+                const PopupMenuItem(
+                  value: 'sync',
+                  child: ListTile(
+                    leading: Icon(Icons.sync_rounded),
+                    title: Text('Sync Data'),
+                    contentPadding: EdgeInsets.zero,
+                  ),
                 ),
-              ),
+              if (isAdmin)
+                const PopupMenuItem(
+                  value: 'account',
+                  child: ListTile(
+                    leading: Icon(Icons.manage_accounts),
+                    title: Text('Account'),
+                    contentPadding: EdgeInsets.zero,
+                  ),
+                ),
+              if (AwsService.instance.isAdmin)
+                const PopupMenuItem(
+                  value: 'admin_debug',
+                  child: ListTile(
+                    leading: Icon(Icons.bug_report_outlined),
+                    title: Text('Admin Debug'),
+                    contentPadding: EdgeInsets.zero,
+                  ),
+                ),
               if (!roster.readOnly)
                 const PopupMenuItem(
                   value: 'initialize',
@@ -413,63 +444,65 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
                     contentPadding: EdgeInsets.zero,
                   ),
                 ),
-              const PopupMenuItem(
-                value: 'export',
-                child: ListTile(
-                  leading: Icon(Icons.upload_rounded),
-                  title: Text('Export Data'),
-                  contentPadding: EdgeInsets.zero,
-                ),
-              ),
-              if (!widget.isGuestMode && !roster.readOnly)
+              if (isAdmin) ...[
                 const PopupMenuItem(
-                  value: 'export_cloud',
+                  value: 'export',
                   child: ListTile(
-                    leading: Icon(Icons.cloud_upload_rounded),
-                    title: Text('Export to Cloud'),
+                    leading: Icon(Icons.upload_rounded),
+                    title: Text('Export Data'),
                     contentPadding: EdgeInsets.zero,
                   ),
                 ),
-              const PopupMenuItem(
-                value: 'export_csv',
-                child: ListTile(
-                  leading: Icon(Icons.table_view_rounded),
-                  title: Text('Export Roster CSV'),
-                  contentPadding: EdgeInsets.zero,
+                if (!widget.isGuestMode && !roster.readOnly)
+                  const PopupMenuItem(
+                    value: 'export_cloud',
+                    child: ListTile(
+                      leading: Icon(Icons.cloud_upload_rounded),
+                      title: Text('Export to Cloud'),
+                      contentPadding: EdgeInsets.zero,
+                    ),
+                  ),
+                const PopupMenuItem(
+                  value: 'export_csv',
+                  child: ListTile(
+                    leading: Icon(Icons.table_view_rounded),
+                    title: Text('Export Roster CSV'),
+                    contentPadding: EdgeInsets.zero,
+                  ),
                 ),
-              ),
-              const PopupMenuItem(
-                value: 'export_pdf',
-                child: ListTile(
-                  leading: Icon(Icons.picture_as_pdf_outlined),
-                  title: Text('Export Roster PDF'),
-                  contentPadding: EdgeInsets.zero,
+                const PopupMenuItem(
+                  value: 'export_pdf',
+                  child: ListTile(
+                    leading: Icon(Icons.picture_as_pdf_outlined),
+                    title: Text('Export Roster PDF'),
+                    contentPadding: EdgeInsets.zero,
+                  ),
                 ),
-              ),
-              const PopupMenuItem(
-                value: 'export_png',
-                child: ListTile(
-                  leading: Icon(Icons.image_outlined),
-                  title: Text('Export Roster PNG'),
-                  contentPadding: EdgeInsets.zero,
+                const PopupMenuItem(
+                  value: 'export_png',
+                  child: ListTile(
+                    leading: Icon(Icons.image_outlined),
+                    title: Text('Export Roster PNG'),
+                    contentPadding: EdgeInsets.zero,
+                  ),
                 ),
-              ),
-              const PopupMenuItem(
-                value: 'export_jpg',
-                child: ListTile(
-                  leading: Icon(Icons.image_rounded),
-                  title: Text('Export Roster JPG'),
-                  contentPadding: EdgeInsets.zero,
+                const PopupMenuItem(
+                  value: 'export_jpg',
+                  child: ListTile(
+                    leading: Icon(Icons.image_rounded),
+                    title: Text('Export Roster JPG'),
+                    contentPadding: EdgeInsets.zero,
+                  ),
                 ),
-              ),
-              const PopupMenuItem(
-                value: 'export_ics',
-                child: ListTile(
-                  leading: Icon(Icons.calendar_month_rounded),
-                  title: Text('Export Calendar (ICS)'),
-                  contentPadding: EdgeInsets.zero,
+                const PopupMenuItem(
+                  value: 'export_ics',
+                  child: ListTile(
+                    leading: Icon(Icons.calendar_month_rounded),
+                    title: Text('Export Calendar (ICS)'),
+                    contentPadding: EdgeInsets.zero,
+                  ),
                 ),
-              ),
+              ],
               if (!roster.readOnly)
                 const PopupMenuItem(
                   value: 'import',
@@ -521,43 +554,44 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
             ],
           ),
         ],
-          bottom: TabBar(
-            controller: _tabController,
-            isScrollable: true,
-            tabs: const [
-              Tab(icon: Icon(Icons.calendar_view_month_rounded), text: 'Roster'),
-              Tab(icon: Icon(Icons.psychology_rounded), text: 'AI Insights'),
-              Tab(icon: Icon(Icons.workspaces_rounded), text: 'Operations'),
-              Tab(icon: Icon(Icons.bar_chart_rounded), text: 'Stats'),
-              Tab(icon: Icon(Icons.people_alt_rounded), text: 'Staff'),
-              Tab(icon: Icon(Icons.event_rounded), text: 'Events'),
-              Tab(icon: Icon(Icons.settings_rounded), text: 'Settings'),
-              Tab(icon: Icon(Icons.analytics_rounded), text: 'Analytics'),
-              Tab(icon: Icon(Icons.memory_rounded), text: 'System'),
-              Tab(icon: Icon(Icons.search_rounded), text: 'Commands'),
-            ],
-          ),
+          bottom: (!useRail && !useBottomNav)
+              ? TabBar(
+                  controller: _tabController,
+                  isScrollable: true,
+                  tabs: tabConfig.tabs,
+                )
+              : null,
         ),
+      drawer: (!useRail && isAdmin)
+          ? _buildAdminDrawer(tabConfig)
+          : null,
       body: Stack(
         children: [
-          TabBarView(
-            controller: _tabController,
-            children: [
-              RosterView(key: _rosterViewKey),
-              const AiSuggestionsView(),
-              const OperationsView(),
-              const StatsView(),
-              const StaffManagementScreen(),
-              const EventsView(),
-              const SettingsView(),
-              const AnalyticsView(),
-              const SystemView(),
-              _CommandCenterView(
-                actions: _buildCommandActions(roster.readOnly),
-                onOpenPalette: _showCommandPalette,
-              ),
-            ],
-          ),
+          useRail
+              ? Row(
+                  children: [
+                    NavigationRail(
+                      selectedIndex: _currentIndex,
+                      onDestinationSelected: (index) {
+                        _tabController.animateTo(index);
+                      },
+                      labelType: NavigationRailLabelType.all,
+                      destinations:
+                          _buildRailDestinations(tabConfig.tabs),
+                    ),
+                    const VerticalDivider(width: 1),
+                    Expanded(
+                      child: TabBarView(
+                        controller: _tabController,
+                        children: tabConfig.views,
+                      ),
+                    ),
+                  ],
+                )
+              : TabBarView(
+                  controller: _tabController,
+                  children: tabConfig.views,
+                ),
           if (settings.layoutStyle == models.AppLayoutStyle.sophisticated ||
               settings.layoutStyle == models.AppLayoutStyle.ambience)
             Positioned(
@@ -577,12 +611,199 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
             ),
         ],
       ),
+      bottomNavigationBar: useBottomNav
+          ? BottomNavigationBar(
+              currentIndex: _currentIndex,
+              onTap: (index) {
+                _tabController.animateTo(index);
+              },
+              type: BottomNavigationBarType.fixed,
+              items: _buildBottomNavItems(tabConfig.tabs),
+            )
+          : null,
       floatingActionButton: null,
     );
   }
 
   Widget? _buildFAB(BuildContext context) {
     return null;
+  }
+
+  void _ensureTabController(int length) {
+    if (_tabController.length == length) return;
+    final currentIndex = _currentIndex.clamp(0, length - 1);
+    _tabController.dispose();
+    _tabController = TabController(
+      length: length,
+      vsync: this,
+      initialIndex: currentIndex,
+    );
+    _tabController.addListener(() {
+      if (_tabController.indexIsChanging) {
+        setState(() {
+          _currentIndex = _tabController.index;
+        });
+        if (_tabController.index == 0) {
+          _rosterViewKey.currentState?.snapToTodayOnFocus();
+        }
+      }
+    });
+  }
+
+  _TabConfig _buildTabs(bool isAdmin, bool isSharedAccess) {
+    if (isSharedAccess) {
+      return _TabConfig(
+        tabs: const [
+          Tab(icon: Icon(Icons.calendar_view_month_rounded), text: 'Roster'),
+          Tab(icon: Icon(Icons.workspace_premium_outlined), text: 'Upgrade'),
+        ],
+        views: [
+          Column(
+            children: [
+              Expanded(
+                child: RosterView(
+                  key: _rosterViewKey,
+                  onOpenRosterManager: _openRosterSwitcher,
+                  onBuildRoster: _showInitializeDialog,
+                ),
+              ),
+            ],
+          ),
+          _GuestUpgradeView(onExitGuestMode: widget.onExitGuestMode),
+        ],
+      );
+    }
+    if (isAdmin) {
+      return _TabConfig(
+        tabs: const [
+          Tab(icon: Icon(Icons.dashboard_rounded), text: 'Dashboard'),
+          Tab(icon: Icon(Icons.calendar_view_month_rounded), text: 'Roster'),
+          Tab(icon: Icon(Icons.psychology_rounded), text: 'AI Insights'),
+          Tab(icon: Icon(Icons.workspaces_rounded), text: 'Operations'),
+          Tab(icon: Icon(Icons.bar_chart_rounded), text: 'Stats'),
+          Tab(icon: Icon(Icons.people_alt_rounded), text: 'Staff'),
+          Tab(icon: Icon(Icons.event_rounded), text: 'Events'),
+          Tab(icon: Icon(Icons.settings_rounded), text: 'Settings'),
+          Tab(icon: Icon(Icons.tune_rounded), text: 'Advance Settings'),
+          Tab(icon: Icon(Icons.analytics_rounded), text: 'Analytics'),
+          Tab(icon: Icon(Icons.memory_rounded), text: 'System'),
+          Tab(icon: Icon(Icons.search_rounded), text: 'Commands'),
+        ],
+        views: [
+          const AdminDashboardView(),
+          Column(
+            children: [
+              Expanded(
+                child: RosterView(
+                  key: _rosterViewKey,
+                  onOpenRosterManager: _openRosterSwitcher,
+                  onBuildRoster: _showInitializeDialog,
+                ),
+              ),
+            ],
+          ),
+          const AiSuggestionsView(),
+          const OperationsView(),
+          const StatsView(),
+          const StaffManagementScreen(),
+          const EventsView(),
+          const SettingsView(mode: SettingsMode.basic),
+          const SettingsView(mode: SettingsMode.advanced),
+          const AnalyticsView(),
+          const SystemView(),
+          _CommandCenterView(
+            actions: _buildCommandActions(ref.read(rosterProvider).readOnly),
+            onOpenPalette: _showCommandPalette,
+          ),
+        ],
+      );
+    }
+    return _TabConfig(
+      tabs: const [
+        Tab(icon: Icon(Icons.calendar_view_month_rounded), text: 'Roster'),
+        Tab(icon: Icon(Icons.psychology_rounded), text: 'AI Insights'),
+        Tab(icon: Icon(Icons.bar_chart_rounded), text: 'Stats'),
+        Tab(icon: Icon(Icons.people_alt_rounded), text: 'Staff'),
+        Tab(icon: Icon(Icons.event_rounded), text: 'Events'),
+        Tab(icon: Icon(Icons.settings_rounded), text: 'Settings'),
+      ],
+      views: [
+        Column(
+          children: [
+            Expanded(
+              child: RosterView(
+                key: _rosterViewKey,
+                onOpenRosterManager: _openRosterSwitcher,
+                onBuildRoster: _showInitializeDialog,
+              ),
+            ),
+          ],
+        ),
+        const AiSuggestionsView(),
+        const StatsView(),
+        const StaffManagementScreen(),
+        const EventsView(),
+        const SettingsView(mode: SettingsMode.basic),
+      ],
+    );
+  }
+
+  List<NavigationRailDestination> _buildRailDestinations(List<Tab> tabs) {
+    return tabs
+        .map(
+          (tab) => NavigationRailDestination(
+            icon: tab.icon ?? const Icon(Icons.circle_outlined),
+            selectedIcon: tab.icon ?? const Icon(Icons.circle),
+            label: Text(tab.text ?? ''),
+          ),
+        )
+        .toList();
+  }
+
+  List<BottomNavigationBarItem> _buildBottomNavItems(List<Tab> tabs) {
+    return tabs
+        .map(
+          (tab) => BottomNavigationBarItem(
+            icon: tab.icon ?? const Icon(Icons.circle_outlined),
+            label: tab.text ?? '',
+          ),
+        )
+        .toList();
+  }
+
+  Drawer _buildAdminDrawer(_TabConfig tabConfig) {
+    return Drawer(
+      child: SafeArea(
+        child: ListView(
+          padding: EdgeInsets.zero,
+          children: [
+            const DrawerHeader(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Icon(Icons.admin_panel_settings_rounded, size: 36),
+                  SizedBox(height: 8),
+                  Text(
+                    'Admin Controls',
+                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                  ),
+                ],
+              ),
+            ),
+            for (var i = 0; i < tabConfig.tabs.length; i++)
+              ListTile(
+                leading: tabConfig.tabs[i].icon,
+                title: Text(tabConfig.tabs[i].text ?? ''),
+                selected: _currentIndex == i,
+                onTap: () {
+                  Navigator.pop(context);
+                  _tabController.animateTo(i);
+                },
+              ),
+          ],
+        ),
+      ),
+    );
   }
 
   Future<void> _syncData() async {
@@ -676,6 +897,13 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
             onPressed: () => Navigator.pop(context),
             child: const Text('Later'),
           ),
+          TextButton(
+            onPressed: () async {
+              Navigator.pop(context);
+              await _openTemplateImport();
+            },
+            child: const Text('Use Template Code'),
+          ),
           FilledButton(
             onPressed: () async {
               await prefs.setBool('onboarding_complete', true);
@@ -709,6 +937,17 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
       context,
       MaterialPageRoute(
         builder: (context) => const RosterSharingScreen(initialTabIndex: 0),
+      ),
+    );
+  }
+
+  Future<void> _openTemplateImport() async {
+    await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => const ImportRosterScreen(
+          openTemplateOnStart: true,
+        ),
       ),
     );
   }
@@ -810,49 +1049,70 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
   }
 
   List<_CommandAction> _buildCommandActions(bool readOnly) {
+    final isAdmin = AwsService.instance.isAdmin;
+    final rosterIndex = isAdmin ? 1 : 0;
+    final aiIndex = isAdmin ? 2 : 1;
+    final operationsIndex = isAdmin ? 3 : null;
+    final statsIndex = isAdmin ? 4 : 2;
+    final staffIndex = isAdmin ? 5 : 3;
+    final eventsIndex = isAdmin ? 6 : 4;
+    final settingsIndex = isAdmin ? 7 : 5;
+    final advancedSettingsIndex = isAdmin ? 8 : null;
+    final analyticsIndex = isAdmin ? 9 : null;
+    final systemIndex = isAdmin ? 10 : null;
+    final commandsIndex = isAdmin ? 11 : null;
+
     return [
       _CommandAction(
         label: 'Open Roster',
         icon: Icons.calendar_view_month_rounded,
         keywords: const ['roster', 'calendar', 'schedule'],
-        onExecute: () => _tabController.animateTo(0),
+        onExecute: () => _tabController.animateTo(rosterIndex),
       ),
       _CommandAction(
         label: 'AI Insights',
         icon: Icons.psychology_rounded,
         keywords: const ['ai', 'insights', 'suggestions'],
-        onExecute: () => _tabController.animateTo(1),
+        onExecute: () => _tabController.animateTo(aiIndex),
       ),
-      _CommandAction(
-        label: 'Open Operations',
-        icon: Icons.workspaces_rounded,
-        keywords: const ['operations', 'approvals', 'conflicts'],
-        onExecute: () => _tabController.animateTo(2),
-      ),
+      if (operationsIndex != null)
+        _CommandAction(
+          label: 'Open Operations',
+          icon: Icons.workspaces_rounded,
+          keywords: const ['operations', 'approvals', 'conflicts'],
+          onExecute: () => _tabController.animateTo(operationsIndex),
+        ),
       _CommandAction(
         label: 'Open Stats',
         icon: Icons.bar_chart_rounded,
         keywords: const ['stats', 'kpi', 'metrics'],
-        onExecute: () => _tabController.animateTo(3),
+        onExecute: () => _tabController.animateTo(statsIndex),
       ),
       _CommandAction(
         label: 'Open Staff',
         icon: Icons.people_alt_rounded,
         keywords: const ['staff', 'team', 'people'],
-        onExecute: () => _tabController.animateTo(4),
+        onExecute: () => _tabController.animateTo(staffIndex),
       ),
       _CommandAction(
         label: 'Open Events',
         icon: Icons.event_rounded,
         keywords: const ['events', 'holiday', 'calendar'],
-        onExecute: () => _tabController.animateTo(5),
+        onExecute: () => _tabController.animateTo(eventsIndex),
       ),
       _CommandAction(
         label: 'Open Settings',
         icon: Icons.settings_rounded,
         keywords: const ['settings', 'preferences'],
-        onExecute: () => _tabController.animateTo(6),
+        onExecute: () => _tabController.animateTo(settingsIndex),
       ),
+      if (advancedSettingsIndex != null)
+        _CommandAction(
+          label: 'Open Advanced Settings',
+          icon: Icons.tune_rounded,
+          keywords: const ['advanced', 'settings', 'admin'],
+          onExecute: () => _tabController.animateTo(advancedSettingsIndex),
+        ),
       _CommandAction(
         label: 'Manage Staff',
         icon: Icons.people_alt_rounded,
@@ -899,30 +1159,27 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
         keywords: const ['offline', 'queue', 'pending'],
         onExecute: _showOfflineQueue,
       ),
-      _CommandAction(
-        label: 'Analytics',
-        icon: Icons.analytics_rounded,
-        keywords: const ['analytics', 'metrics', 'insights'],
-        onExecute: () => _tabController.animateTo(7),
-      ),
-      _CommandAction(
-        label: 'System Status',
-        icon: Icons.memory_rounded,
-        keywords: const ['system', 'status', 'aws'],
-        onExecute: () => _tabController.animateTo(8),
-      ),
-      _CommandAction(
-        label: 'Auto Roster Generator',
-        icon: Icons.auto_awesome,
-        keywords: const ['auto', 'generator', 'pattern'],
-        onExecute: () {
-          Navigator.of(context).push(
-            MaterialPageRoute(
-              builder: (_) => const RosterGeneratorView(),
-            ),
-          );
-        },
-      ),
+      if (analyticsIndex != null)
+        _CommandAction(
+          label: 'Analytics',
+          icon: Icons.analytics_rounded,
+          keywords: const ['analytics', 'metrics', 'insights'],
+          onExecute: () => _tabController.animateTo(analyticsIndex),
+        ),
+      if (systemIndex != null)
+        _CommandAction(
+          label: 'System Status',
+          icon: Icons.memory_rounded,
+          keywords: const ['system', 'status', 'aws'],
+          onExecute: () => _tabController.animateTo(systemIndex),
+        ),
+      if (commandsIndex != null)
+        _CommandAction(
+          label: 'Command Center',
+          icon: Icons.search_rounded,
+          keywords: const ['commands', 'palette', 'shortcuts'],
+          onExecute: () => _tabController.animateTo(commandsIndex),
+        ),
       _CommandAction(
         label: 'Add Event',
         icon: Icons.event_rounded,
@@ -938,6 +1195,13 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
             MaterialPageRoute(builder: (_) => const ImportRosterScreen()),
           );
         },
+      ),
+      _CommandAction(
+        label: 'Use Template Code',
+        icon: Icons.qr_code_rounded,
+        keywords: const ['template', 'qr', 'code', 'import'],
+        onExecute: _openTemplateImport,
+        enabled: !readOnly,
       ),
       _CommandAction(
         label: 'Initialize Roster',
@@ -960,62 +1224,65 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
         onExecute: _syncData,
         enabled: !widget.isGuestMode && !readOnly,
       ),
-      _CommandAction(
-        label: 'Export Roster CSV',
-        icon: Icons.table_view_rounded,
-        keywords: const ['export', 'csv'],
-        onExecute: _exportRosterCsv,
-      ),
-      _CommandAction(
-        label: 'Export Roster PDF',
-        icon: Icons.picture_as_pdf_outlined,
-        keywords: const ['export', 'pdf'],
-        onExecute: _exportRosterPdf,
-      ),
-      _CommandAction(
-        label: 'Export Roster PNG',
-        icon: Icons.image_outlined,
-        keywords: const ['export', 'png', 'image'],
-        onExecute: _exportRosterPng,
-      ),
-      _CommandAction(
-        label: 'Export Roster JPG',
-        icon: Icons.image_rounded,
-        keywords: const ['export', 'jpg', 'jpeg', 'image'],
-        onExecute: _exportRosterJpg,
-      ),
-      _CommandAction(
-        label: 'Export Calendar (ICS)',
-        icon: Icons.calendar_month_rounded,
-        keywords: const ['export', 'ics', 'calendar'],
-        onExecute: _exportCalendarIcs,
-      ),
-      _CommandAction(
-        label: 'Export to Cloud',
-        icon: Icons.cloud_upload_rounded,
-        keywords: const ['export', 'cloud'],
-        onExecute: _exportToCloud,
-        enabled: !widget.isGuestMode && !readOnly,
-      ),
-      _CommandAction(
-        label: 'Export Data',
-        icon: Icons.upload_rounded,
-        keywords: const ['export', 'backup'],
-        onExecute: _exportData,
-      ),
+      if (isAdmin) ...[
+        _CommandAction(
+          label: 'Export Roster CSV',
+          icon: Icons.table_view_rounded,
+          keywords: const ['export', 'csv'],
+          onExecute: _exportRosterCsv,
+        ),
+        _CommandAction(
+          label: 'Export Roster PDF',
+          icon: Icons.picture_as_pdf_outlined,
+          keywords: const ['export', 'pdf'],
+          onExecute: _exportRosterPdf,
+        ),
+        _CommandAction(
+          label: 'Export Roster PNG',
+          icon: Icons.image_outlined,
+          keywords: const ['export', 'png', 'image'],
+          onExecute: _exportRosterPng,
+        ),
+        _CommandAction(
+          label: 'Export Roster JPG',
+          icon: Icons.image_rounded,
+          keywords: const ['export', 'jpg', 'jpeg', 'image'],
+          onExecute: _exportRosterJpg,
+        ),
+        _CommandAction(
+          label: 'Export Calendar (ICS)',
+          icon: Icons.calendar_month_rounded,
+          keywords: const ['export', 'ics', 'calendar'],
+          onExecute: _exportCalendarIcs,
+        ),
+        _CommandAction(
+          label: 'Export to Cloud',
+          icon: Icons.cloud_upload_rounded,
+          keywords: const ['export', 'cloud'],
+          onExecute: _exportToCloud,
+          enabled: !widget.isGuestMode && !readOnly,
+        ),
+        _CommandAction(
+          label: 'Export Data',
+          icon: Icons.upload_rounded,
+          keywords: const ['export', 'backup'],
+          onExecute: _exportData,
+        ),
+      ],
       _CommandAction(
         label: 'Import Data',
         icon: Icons.download_rounded,
         keywords: const ['import', 'restore'],
         onExecute: _importData,
       ),
-      _CommandAction(
-        label: 'Account Settings',
-        icon: Icons.manage_accounts,
-        keywords: const ['account', 'profile'],
-        onExecute: () => _tabController.animateTo(6),
-        enabled: !widget.isGuestMode,
-      ),
+      if (isAdmin)
+        _CommandAction(
+          label: 'Account Settings',
+          icon: Icons.manage_accounts,
+          keywords: const ['account', 'profile'],
+          onExecute: () => _tabController.animateTo(settingsIndex),
+          enabled: !widget.isGuestMode,
+        ),
       _CommandAction(
         label: 'Logout',
         icon: Icons.logout_rounded,
@@ -2021,12 +2288,17 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
     if (confirmed == true) {
       try {
         await AwsService.instance.signOut();
+        ref.read(rosterProvider).clearAllData();
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
               content: Text('Logged out successfully'),
               backgroundColor: Colors.green,
             ),
+          );
+          Navigator.of(context).pushAndRemoveUntil(
+            MaterialPageRoute(builder: (_) => const LoginScreen()),
+            (route) => false,
           );
         }
       } catch (e) {
@@ -2054,13 +2326,22 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
               subtitle:
                   Text(isGuest ? 'Sign in to sync across devices' : 'Account'),
             ),
-            if (!isGuest)
+            if (!isGuest && AwsService.instance.isAdmin)
               ListTile(
                 leading: const Icon(Icons.manage_accounts_outlined),
                 title: const Text('Account Settings'),
                 onTap: () {
                   Navigator.pop(context);
                   _tabController.animateTo(6);
+                },
+              ),
+            if (!isGuest && AwsService.instance.isAdmin)
+              ListTile(
+                leading: const Icon(Icons.workspace_premium_rounded),
+                title: const Text('Subscription'),
+                onTap: () async {
+                  Navigator.pop(context);
+                  await _openSubscriptionPortal();
                 },
               ),
             if (!isGuest)
@@ -2127,6 +2408,160 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
         MaterialPageRoute(builder: (context) => const LoginScreen()),
       );
     }
+  }
+
+  Future<void> _openSubscriptionPortal() async {
+    try {
+      final url = await AwsService.instance.createBillingPortal();
+      if (url == null || url.isEmpty) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Billing portal unavailable.')),
+        );
+        return;
+      }
+      final uri = Uri.parse(url);
+      final launched = await launchUrl(
+        uri,
+        mode: LaunchMode.externalApplication,
+      );
+      if (!launched && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Unable to open billing portal.')),
+        );
+      }
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Billing portal unavailable.')),
+      );
+    }
+  }
+
+  void _showAdminDebugPopup() {
+    if (!AwsService.instance.isAdmin) return;
+    final groups = AwsService.instance.cognitoGroups.join(', ');
+    final userId = AwsService.instance.userId ?? 'unknown';
+    final email = AwsService.instance.userEmail ?? 'unknown';
+    final provider = AwsService.instance.authProvider ?? 'unknown';
+    final apiUrl = AwsService.instance.apiUrl ?? 'unknown';
+
+    showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Admin Debug'),
+        content: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _debugRow('User', email),
+              _debugRow('User ID', userId),
+              _debugRow('Provider', provider),
+              _debugRow('Groups', groups.isEmpty ? 'none' : groups),
+              _debugRow('API URL', apiUrl),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Close'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _maybeShowTemplatePrompt() async {
+    final prefs = await SharedPreferences.getInstance();
+    final showPrompt = prefs.getBool('show_template_prompt') ?? false;
+    if (!showPrompt || !mounted) return;
+    await prefs.remove('show_template_prompt');
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: const Text('Have a template or QR code?'),
+        action: SnackBarAction(
+          label: 'Use Template',
+          onPressed: () {
+            _openTemplateImport();
+          },
+        ),
+      ),
+    );
+  }
+
+  Widget _debugRow(String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(label, style: const TextStyle(fontWeight: FontWeight.bold)),
+          const SizedBox(height: 2),
+          SelectableText(value),
+        ],
+      ),
+    );
+  }
+}
+
+class _TabConfig {
+  const _TabConfig({
+    required this.tabs,
+    required this.views,
+  });
+
+  final List<Tab> tabs;
+  final List<Widget> views;
+
+  int get length => tabs.length;
+}
+
+class _GuestUpgradeView extends StatelessWidget {
+  final VoidCallback? onExitGuestMode;
+
+  const _GuestUpgradeView({this.onExitGuestMode});
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.workspace_premium_outlined, size: 64),
+            const SizedBox(height: 12),
+            Text(
+              'Upgrade to unlock full access',
+              style: Theme.of(context).textTheme.titleLarge,
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              'Shared access is view-only. Upgrade to use AI insights, stats, staff management, and settings.',
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 16),
+            FilledButton(
+              onPressed: () async {
+                await showModalBottomSheet(
+                  context: context,
+                  builder: (_) => const PaywallScreen.loading(),
+                );
+              },
+              child: const Text('Upgrade Subscription'),
+            ),
+            const SizedBox(height: 8),
+            TextButton(
+              onPressed: onExitGuestMode,
+              child: const Text('Sign in / Create Account'),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 }
 

@@ -27,30 +27,32 @@ class DiagnosticService {
     buffer.writeln('  Target: ${defaultTargetPlatform.name}');
     buffer.writeln('  IsWeb: $kIsWeb');
     final deviceInfo = DeviceInfoPlugin();
-    try {
-      if (Platform.isAndroid) {
-        final info = await deviceInfo.androidInfo;
-        buffer.writeln('  Android: ${info.manufacturer} ${info.model}');
-        buffer.writeln('  SDK: ${info.version.sdkInt}');
-      } else if (Platform.isWindows) {
-        final info = await deviceInfo.windowsInfo;
-        buffer.writeln('  Windows: ${info.productName}');
-        buffer.writeln('  Build: ${info.buildNumber}');
-      } else if (Platform.isIOS) {
-        final info = await deviceInfo.iosInfo;
-        buffer.writeln('  iOS: ${info.utsname.machine}');
-        buffer.writeln('  Version: ${info.systemVersion}');
-      } else if (Platform.isMacOS) {
-        final info = await deviceInfo.macOsInfo;
-        buffer.writeln('  macOS: ${info.model}');
-        buffer.writeln('  Version: ${info.osRelease}');
-      } else if (Platform.isLinux) {
-        final info = await deviceInfo.linuxInfo;
-        buffer.writeln('  Linux: ${info.name}');
-        buffer.writeln('  Version: ${info.version}');
+    if (!kIsWeb) {
+      try {
+        if (Platform.isAndroid) {
+          final info = await deviceInfo.androidInfo;
+          buffer.writeln('  Android: ${info.manufacturer} ${info.model}');
+          buffer.writeln('  SDK: ${info.version.sdkInt}');
+        } else if (Platform.isWindows) {
+          final info = await deviceInfo.windowsInfo;
+          buffer.writeln('  Windows: ${info.productName}');
+          buffer.writeln('  Build: ${info.buildNumber}');
+        } else if (Platform.isIOS) {
+          final info = await deviceInfo.iosInfo;
+          buffer.writeln('  iOS: ${info.utsname.machine}');
+          buffer.writeln('  Version: ${info.systemVersion}');
+        } else if (Platform.isMacOS) {
+          final info = await deviceInfo.macOsInfo;
+          buffer.writeln('  macOS: ${info.model}');
+          buffer.writeln('  Version: ${info.osRelease}');
+        } else if (Platform.isLinux) {
+          final info = await deviceInfo.linuxInfo;
+          buffer.writeln('  Linux: ${info.name}');
+          buffer.writeln('  Version: ${info.version}');
+        }
+      } catch (e) {
+        buffer.writeln('  Device info error: $e');
       }
-    } catch (e) {
-      buffer.writeln('  Device info error: $e');
     }
     buffer.writeln('');
 

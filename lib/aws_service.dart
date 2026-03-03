@@ -25,6 +25,7 @@ class AwsService {
   String? _cognitoDomain;
   String? _redirectUri;
   String? _desktopRedirectUri;
+  String? _webRedirectUri;
   String? _identityPoolId;
   String? _providerName;
 
@@ -40,6 +41,7 @@ class AwsService {
   int? _awsExpireTime;
 
   String? _currentRosterId;
+  String? _sharedAccessCode;
   Timer? _updatesTimer;
   String? _lastUpdateTimestamp;
   bool _offlineAuthenticated = false;
@@ -60,8 +62,15 @@ class AwsService {
   Uri? _lastOAuthRedirect;
   Uri? _lastOAuthAuthorizeUrl;
   Timer? _oauthTimeoutTimer;
+  bool _oauthInAppWebView = false;
   bool _usedOAuthSignIn = false;
   String? _authProvider;
+  List<String> _cognitoGroups = [];
+
+  static const String _subStatusKey = 'subscription_status';
+  static const String _subPlanKey = 'subscription_plan';
+  static const String _subCheckedAtKey = 'subscription_checked_at';
+  static const String _subPeriodEndKey = 'subscription_period_end';
 
   set onAuthStateChanged(Function(bool isAuthenticated)? callback) {
     _onAuthStateChanged = callback;
@@ -73,6 +82,9 @@ class AwsService {
   Uri? get lastOAuthAuthorizeUrl => _lastOAuthAuthorizeUrl;
   bool get usedOAuthSignIn => _usedOAuthSignIn;
   String? get authProvider => _authProvider;
+  List<String> get cognitoGroups => List.unmodifiable(_cognitoGroups);
+  bool get isAdmin => _cognitoGroups.any((g) => g == 'Admins');
+  bool get isStandardUser => !isAdmin;
 
   Future<void> initialize() async {
     try {
@@ -83,17 +95,49 @@ class AwsService {
         while (_apiUrl!.endsWith('/')) {
           _apiUrl = _apiUrl!.substring(0, _apiUrl!.length - 1);
         }
+        if (_apiUrl!.isEmpty) _apiUrl = null;
       }
-      _userPoolId = EnvLoader.instance.get('COGNITO_USER_POOL_ID');
-      _userPoolClientId = EnvLoader.instance.get('COGNITO_APP_CLIENT_ID');
+      _userPoolId = EnvLoader.instance.get('COGNITO_USER_POOL_ID').trim();
+      if (_userPoolId?.isEmpty ?? true) _userPoolId = null;
+      _userPoolClientId = EnvLoader.instance.get('COGNITO_APP_CLIENT_ID').trim();
+      if (_userPoolClientId?.isEmpty ?? true) _userPoolClientId = null;
       _region = EnvLoader.instance.get('AWS_REGION');
-      _cognitoDomain = EnvLoader.instance.get('COGNITO_DOMAIN');
+      if (_region?.trim().isEmpty ?? false) _region = null;
+      _cognitoDomain = EnvLoader.instance.get('COGNITO_DOMAIN').trim();
+      if (_cognitoDomain?.isEmpty ?? true) _cognitoDomain = null;
       _redirectUri = EnvLoader.instance.get('COGNITO_REDIRECT_URI');
+      if (_redirectUri?.trim().isEmpty ?? true) _redirectUri = null;
       _desktopRedirectUri =
           EnvLoader.instance.get('COGNITO_DESKTOP_REDIRECT_URI');
+      if (_desktopRedirectUri?.trim().isEmpty ?? true) _desktopRedirectUri = null;
+      _webRedirectUri = EnvLoader.instance.get('COGNITO_WEB_REDIRECT_URI');
+      if (_webRedirectUri?.trim().isEmpty ?? true) _webRedirectUri = null;
       _identityPoolId = EnvLoader.instance.get('COGNITO_IDENTITY_POOL_ID');
+      if (_identityPoolId?.trim().isEmpty ?? true) _identityPoolId = null;
       if (_region != null && _userPoolId != null) {
         _providerName = 'cognito-idp.$_region.amazonaws.com/$_userPoolId';
+      }
+
+      if (_cognitoDomain != null && _cognitoDomain!.isNotEmpty) {
+        if (!_cognitoDomain!.startsWith('http')) {
+          _cognitoDomain = 'https://${_cognitoDomain!}';
+        }
+        if (_cognitoDomain!.startsWith('https://auth-live.rosterchampion') &&
+            !_cognitoDomain!.contains('.com')) {
+          _cognitoDomain = 'https://auth-live.rosterchampion.com';
+        }
+        if (_userPoolId == 'us-east-1_gHpSfvS24' &&
+            _cognitoDomain!.contains('auth-live.rosterchampion.com')) {
+          _cognitoDomain =
+              'https://roster-desktop-6ti720ldfunk-dhjw6acs.auth.us-east-1.amazoncognito.com';
+          if (_webRedirectUri == 'https://app.rosterchampion.com') {
+            _webRedirectUri = 'https://d2g6yyojxigah2.cloudfront.net';
+          }
+        }
+        while (_cognitoDomain!.endsWith('/')) {
+          _cognitoDomain =
+              _cognitoDomain!.substring(0, _cognitoDomain!.length - 1);
+        }
       }
 
       if (_apiUrl == null ||
@@ -140,7 +184,10 @@ class AwsService {
   }
 
   Future<void> signInWithGoogle({bool forceAccountPicker = false}) async {
-    if (!_initialized || _cognitoDomain == null || _userPoolClientId == null) {
+    if (!_initialized ||
+        _cognitoDomain == null ||
+        _userPoolClientId == null ||
+        _userPoolClientId!.isEmpty) {
       throw Exception('OAuth not configured');
     }
 
@@ -148,15 +195,18 @@ class AwsService {
         (Platform.isWindows || Platform.isLinux || Platform.isMacOS);
     final isMobile =
         !kIsWeb && (Platform.isAndroid || Platform.isIOS);
-    final redirectUri = isDesktop
-        ? (_desktopRedirectUri ?? _redirectUri)
-        : (isMobile ? _redirectUri : (_redirectUri ?? _desktopRedirectUri));
+    final redirectUri = kIsWeb
+        ? (_webRedirectUri ?? _redirectUri ?? _desktopRedirectUri)
+        : isDesktop
+            ? (_desktopRedirectUri ?? _redirectUri)
+            : (isMobile ? _redirectUri : (_redirectUri ?? _desktopRedirectUri));
     if (redirectUri == null || redirectUri.isEmpty) {
       throw Exception('Redirect URI not configured');
     }
 
     _oauthState = _randomString(24);
     _oauthCodeVerifier = _randomString(64);
+    await _persistOAuthState();
     final codeChallenge = _pkceChallenge(_oauthCodeVerifier!);
 
     final authorizeUri = Uri.parse('$_cognitoDomain/oauth2/authorize').replace(
@@ -175,6 +225,7 @@ class AwsService {
     );
     _lastOAuthAuthorizeUrl = authorizeUri;
     _usedOAuthSignIn = true;
+    _oauthInAppWebView = false;
 
     _oauthCompleter = Completer<void>();
 
@@ -182,7 +233,15 @@ class AwsService {
       await _startLoopbackServer(redirectUri);
     }
 
-    if (!await launchUrl(authorizeUri, mode: LaunchMode.externalApplication)) {
+    final launchMode = kIsWeb
+        ? LaunchMode.platformDefault
+        : LaunchMode.externalApplication;
+    _oauthInAppWebView = false;
+    if (!await launchUrl(
+      authorizeUri,
+      mode: launchMode,
+      webOnlyWindowName: kIsWeb ? '_self' : null,
+    )) {
       throw Exception('Unable to launch browser for Google sign-in');
     }
 
@@ -209,7 +268,12 @@ class AwsService {
       request.response.statusCode = 200;
       request.response.headers.set('Content-Type', 'text/html');
       request.response.write(
-        '<html><body>You can close this window.</body></html>',
+        '<html><head><meta charset="utf-8"><meta http-equiv="refresh" content="2;url=about:blank"></head>'
+        '<body style="font-family:Arial,sans-serif;text-align:center;padding:28px;">'
+        '<h3>Sign-in complete</h3>'
+        '<p>You can close this window.</p>'
+        '<script>setTimeout(function(){ window.close(); }, 1200);</script>'
+        '</body></html>',
       );
       await request.response.close();
       if (query.containsKey('code') || query.containsKey('error')) {
@@ -230,11 +294,28 @@ class AwsService {
     if (error != null) {
       _oauthTimeoutTimer?.cancel();
       _oauthCompleter?.completeError(Exception(error));
+      if (_oauthInAppWebView) {
+        closeInAppWebView();
+        _oauthInAppWebView = false;
+      }
       cancelGoogleSignIn();
       return;
     }
 
-    if (code == null || state == null || state != _oauthState) {
+    if (code == null) {
+      return;
+    }
+    if (_oauthState == null) {
+      await _loadOAuthState();
+    }
+    if (state == null || state != _oauthState) {
+      _oauthTimeoutTimer?.cancel();
+      _oauthCompleter?.completeError(Exception('OAuth state mismatch'));
+      if (_oauthInAppWebView) {
+        closeInAppWebView();
+        _oauthInAppWebView = false;
+      }
+      cancelGoogleSignIn();
       return;
     }
 
@@ -242,9 +323,11 @@ class AwsService {
         (Platform.isWindows || Platform.isLinux || Platform.isMacOS);
     final isMobile =
         !kIsWeb && (Platform.isAndroid || Platform.isIOS);
-    final redirectUri = isDesktop
-        ? (_desktopRedirectUri ?? _redirectUri)
-        : (isMobile ? _redirectUri : (_redirectUri ?? _desktopRedirectUri));
+    final redirectUri = kIsWeb
+        ? (_webRedirectUri ?? _redirectUri ?? _desktopRedirectUri)
+        : isDesktop
+            ? (_desktopRedirectUri ?? _redirectUri)
+            : (isMobile ? _redirectUri : (_redirectUri ?? _desktopRedirectUri));
     if (redirectUri == null) {
       _oauthCompleter?.completeError(Exception('Missing redirect URI'));
       return;
@@ -254,9 +337,18 @@ class AwsService {
       await _exchangeAuthCode(code, redirectUri);
       _oauthTimeoutTimer?.cancel();
       _oauthCompleter?.complete();
+      if (_oauthInAppWebView) {
+        closeInAppWebView();
+        _oauthInAppWebView = false;
+      }
+      await _clearOAuthState();
     } catch (e) {
       _oauthTimeoutTimer?.cancel();
       _oauthCompleter?.completeError(e);
+      if (_oauthInAppWebView) {
+        closeInAppWebView();
+        _oauthInAppWebView = false;
+      }
     }
   }
 
@@ -265,6 +357,11 @@ class AwsService {
     _oauthTimeoutTimer = null;
     _oauthState = null;
     _oauthCodeVerifier = null;
+    _clearOAuthState();
+    if (_oauthInAppWebView) {
+      closeInAppWebView();
+      _oauthInAppWebView = false;
+    }
     if (_oauthCompleter != null && !_oauthCompleter!.isCompleted) {
       _oauthCompleter!.completeError(Exception('Google sign-in cancelled'));
     }
@@ -306,6 +403,28 @@ class AwsService {
     await _loadAwsCredentials(_idToken!);
     await _saveSession();
     _onAuthStateChanged?.call(true);
+  }
+
+  Future<void> _persistOAuthState() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (_oauthState != null) {
+      await prefs.setString('oauth_state', _oauthState!);
+    }
+    if (_oauthCodeVerifier != null) {
+      await prefs.setString('oauth_verifier', _oauthCodeVerifier!);
+    }
+  }
+
+  Future<void> _loadOAuthState() async {
+    final prefs = await SharedPreferences.getInstance();
+    _oauthState ??= prefs.getString('oauth_state');
+    _oauthCodeVerifier ??= prefs.getString('oauth_verifier');
+  }
+
+  Future<void> _clearOAuthState() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('oauth_state');
+    await prefs.remove('oauth_verifier');
   }
 
   Future<void> _loadSession() async {
@@ -358,6 +477,83 @@ class AwsService {
     }
   }
 
+  Future<void> cacheSubscriptionStatus({
+    required String status,
+    required String plan,
+    String? periodEnd,
+  }) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_subStatusKey, status);
+    await prefs.setString(_subPlanKey, plan);
+    await prefs.setInt(
+      _subCheckedAtKey,
+      DateTime.now().millisecondsSinceEpoch,
+    );
+    if (periodEnd != null && periodEnd.isNotEmpty) {
+      final parsed = DateTime.tryParse(periodEnd);
+      if (parsed != null) {
+        await prefs.setInt(
+          _subPeriodEndKey,
+          parsed.millisecondsSinceEpoch,
+        );
+      }
+    }
+  }
+
+  Future<Map<String, dynamic>> getCachedSubscription() async {
+    final prefs = await SharedPreferences.getInstance();
+    return {
+      'status': prefs.getString(_subStatusKey) ?? 'inactive',
+      'plan': prefs.getString(_subPlanKey) ?? 'none',
+      'checkedAt': prefs.getInt(_subCheckedAtKey),
+      'periodEnd': prefs.getInt(_subPeriodEndKey),
+    };
+  }
+
+  Future<bool> isCachedSubscriptionActive({int graceDays = 7}) async {
+    final cached = await getCachedSubscription();
+    final status = cached['status']?.toString() ?? 'inactive';
+    final plan = cached['plan']?.toString().toLowerCase() ?? 'none';
+    final hasPaidPlan =
+        plan == 'starter' || plan == 'operations' || plan == 'enterprise';
+    final isTrial = plan == 'trial';
+    if (status != 'active' && status != 'trialing') return false;
+    if (status == 'active' && !hasPaidPlan) return false;
+    if (status == 'trialing' && !(hasPaidPlan || isTrial)) return false;
+    final checkedAt = cached['checkedAt'] as int?;
+    final periodEnd = cached['periodEnd'] as int?;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final graceMs = graceDays * 24 * 60 * 60 * 1000;
+    if (periodEnd != null && periodEnd > 0) {
+      return now <= periodEnd + graceMs;
+    }
+    if (checkedAt != null) {
+      return now - checkedAt <= graceMs;
+    }
+    return false;
+  }
+
+  Future<bool> isCachedSubscriptionPaidActive({int graceDays = 7}) async {
+    final cached = await getCachedSubscription();
+    final status = cached['status']?.toString() ?? 'inactive';
+    final plan = cached['plan']?.toString().toLowerCase() ?? 'none';
+    final hasPaidPlan =
+        plan == 'starter' || plan == 'operations' || plan == 'enterprise';
+    if (!hasPaidPlan) return false;
+    if (status != 'active' && status != 'trialing') return false;
+    final checkedAt = cached['checkedAt'] as int?;
+    final periodEnd = cached['periodEnd'] as int?;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final graceMs = graceDays * 24 * 60 * 60 * 1000;
+    if (periodEnd != null && periodEnd > 0) {
+      return now <= periodEnd + graceMs;
+    }
+    if (checkedAt != null) {
+      return now - checkedAt <= graceMs;
+    }
+    return false;
+  }
+
   Future<void> _clearSession() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove('aws_id_token');
@@ -378,6 +574,14 @@ class AwsService {
     _userEmail = payload['email'] as String?;
     _displayName =
         payload['name'] as String? ?? payload['given_name'] as String?;
+    final groupsRaw = payload['cognito:groups'];
+    if (groupsRaw is List) {
+      _cognitoGroups = groupsRaw.map((e) => e.toString()).toList();
+    } else if (groupsRaw is String) {
+      _cognitoGroups = groupsRaw.split(',').map((e) => e.trim()).toList();
+    } else {
+      _cognitoGroups = [];
+    }
   }
 
   Map<String, dynamic> _decodeJwt(String token) {
@@ -473,6 +677,26 @@ class AwsService {
     }
   }
 
+  Future<bool> ensureSessionFresh() async {
+    if (!_initialized) return false;
+    try {
+      await _refreshSessionIfNeeded();
+      return _idToken != null;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<List<String>> refreshPermissions() async {
+    await _refreshSessionIfNeeded();
+    if (_idToken == null) {
+      throw Exception('Not signed in or session expired. Please sign in again.');
+    }
+    _hydrateFromToken();
+    await _saveSession();
+    return cognitoGroups;
+  }
+
   Future<bool> checkConnection() async {
     if (!_initialized || _apiUrl == null) return false;
     try {
@@ -499,6 +723,10 @@ class AwsService {
   bool get isAuthenticated =>
       _offlineAuthenticated || _accessToken != null || _idToken != null;
   bool get isOfflineAuthenticated => _offlineAuthenticated;
+  bool get hasOfflineCredentials =>
+      _offlineEmail != null &&
+      _offlinePasswordHash != null &&
+      _offlineSalt != null;
   String? get apiUrl => _apiUrl;
   String? get region => _region;
   String? get userId => _userId;
@@ -509,6 +737,11 @@ class AwsService {
   set currentRosterId(String? rosterId) {
     _currentRosterId = rosterId;
     _saveSession();
+  }
+
+  String? get sharedAccessCode => _sharedAccessCode;
+  set sharedAccessCode(String? code) {
+    _sharedAccessCode = code;
   }
 
   Future<bool> signUp(String email, String password, String displayName) async {
@@ -561,11 +794,16 @@ class AwsService {
       _refreshToken = session.getRefreshToken()?.getToken();
     } catch (e) {
       final message = e.toString();
-      if (message.contains('UserNotConfirmedException')) {
+      if (message.contains('UserNotConfirmedException') ||
+          message.contains('User Confirmation Necessary')) {
         throw Exception('Account not confirmed. Check your email for the code.');
       }
-      if (message.contains('NotAuthorizedException') ||
-          message.contains('UserNotFoundException')) {
+      if (message.contains('UserNotFoundException')) {
+        throw Exception(
+          'No account found for this email. Please sign up to create one.',
+        );
+      }
+      if (message.contains('NotAuthorizedException')) {
         throw Exception('Email or password is incorrect.');
       }
       rethrow;
@@ -595,15 +833,27 @@ class AwsService {
   }
 
   Future<void> signOut() async {
-    if (_usedOAuthSignIn && _cognitoDomain != null && _userPoolClientId != null) {
+    if (_usedOAuthSignIn &&
+        _cognitoDomain != null &&
+        _cognitoDomain!.isNotEmpty &&
+        _userPoolClientId != null &&
+        _userPoolClientId!.isNotEmpty) {
       final isDesktop = !kIsWeb &&
           (Platform.isWindows || Platform.isLinux || Platform.isMacOS);
       final isMobile =
           !kIsWeb && (Platform.isAndroid || Platform.isIOS);
-      final logoutUri = isDesktop
-          ? (_desktopRedirectUri ?? _redirectUri)
-          : (isMobile ? _redirectUri : (_redirectUri ?? _desktopRedirectUri));
-      if (logoutUri != null && logoutUri.isNotEmpty) {
+      final logoutUri = kIsWeb
+          ? (_webRedirectUri ??
+              (Uri.base.origin.isNotEmpty ? Uri.base.origin : null))
+          : (isDesktop
+              ? (_desktopRedirectUri ?? _redirectUri)
+              : (isMobile
+                  ? _redirectUri
+                  : (_redirectUri ?? _desktopRedirectUri)));
+      if (logoutUri != null &&
+          logoutUri.isNotEmpty &&
+          _userPoolClientId != null &&
+          _userPoolClientId!.isNotEmpty) {
         final uri = Uri.parse('$_cognitoDomain/oauth2/logout').replace(
           queryParameters: {
             'client_id': _userPoolClientId!,
@@ -626,6 +876,32 @@ class AwsService {
     _userEmail = null;
     _displayName = null;
     _currentRosterId = null;
+    _sharedAccessCode = null;
+    _offlineAuthenticated = false;
+    _updatesTimer?.cancel();
+    _usedOAuthSignIn = false;
+    _authProvider = null;
+    _lastOAuthError = null;
+    _lastOAuthErrorDescription = null;
+    _lastOAuthRedirect = null;
+    _lastOAuthAuthorizeUrl = null;
+    await _clearSession();
+    _onAuthStateChanged?.call(false);
+  }
+
+  Future<void> signOutLocal() async {
+    _idToken = null;
+    _accessToken = null;
+    _refreshToken = null;
+    _awsAccessKeyId = null;
+    _awsSecretAccessKey = null;
+    _awsSessionToken = null;
+    _awsExpireTime = null;
+    _userId = null;
+    _userEmail = null;
+    _displayName = null;
+    _currentRosterId = null;
+    _sharedAccessCode = null;
     _offlineAuthenticated = false;
     _updatesTimer?.cancel();
     _usedOAuthSignIn = false;
@@ -678,6 +954,16 @@ class AwsService {
     return true;
   }
 
+  Future<bool> signInOfflineWithBiometrics() async {
+    if (!hasOfflineCredentials) return false;
+    _offlineAuthenticated = true;
+    _userEmail = _offlineEmail;
+    _userId = _offlineUserId;
+    _displayName = _offlineDisplayName;
+    _onAuthStateChanged?.call(true);
+    return true;
+  }
+
 
   Future<void> deleteAccount() async {
     await _post('/account/delete', {});
@@ -698,6 +984,157 @@ class AwsService {
       'displayName': displayName,
       'email': _userEmail,
     });
+  }
+
+  Future<Map<String, dynamic>> getProfile() async {
+    final response = await _get('/profile/get');
+    if (response is Map) {
+      return Map<String, dynamic>.from(response as Map);
+    }
+    return {};
+  }
+
+  Future<Map<String, dynamic>> getAdminMetrics() async {
+    final response = await _get('/admin/metrics', preferIdToken: true);
+    if (response is Map) {
+      return Map<String, dynamic>.from(response as Map);
+    }
+    return {};
+  }
+
+  Future<Map<String, dynamic>> getAdminUsageUser({
+    String? email,
+    String? userId,
+  }) async {
+    final params = <String, String>{};
+    if (email != null && email.trim().isNotEmpty) {
+      params['email'] = email.trim();
+    }
+    if (userId != null && userId.trim().isNotEmpty) {
+      params['userId'] = userId.trim();
+    }
+    final query = params.isEmpty
+        ? ''
+        : '?${params.entries.map((e) => '${e.key}=${Uri.encodeComponent(e.value)}').join('&')}';
+    final response =
+        await _get('/admin/usage/user$query', preferIdToken: true);
+    if (response is Map) {
+      return Map<String, dynamic>.from(response as Map);
+    }
+    return {};
+  }
+
+  Future<Map<String, dynamic>> setAdminUsageLimits({
+    String? email,
+    String? userId,
+    required Map<String, dynamic> limits,
+  }) async {
+    final payload = <String, dynamic>{
+      'limits': limits,
+    };
+    if (email != null && email.trim().isNotEmpty) {
+      payload['email'] = email.trim();
+    }
+    if (userId != null && userId.trim().isNotEmpty) {
+      payload['userId'] = userId.trim();
+    }
+    final response =
+        await _post('/admin/usage/limits', payload, preferIdToken: true);
+    if (response is Map) {
+      return Map<String, dynamic>.from(response as Map);
+    }
+    return {};
+  }
+
+  Future<Map<String, dynamic>> getAdminTrialHistory(String email) async {
+    final query = email.trim().isEmpty
+        ? ''
+        : '?email=${Uri.encodeComponent(email.trim())}';
+    final response =
+        await _get('/admin/trial-history$query', preferIdToken: true);
+    if (response is Map) {
+      return Map<String, dynamic>.from(response as Map);
+    }
+    return {};
+  }
+
+  Future<Map<String, dynamic>> resetAdminTrialHistory(String email) async {
+    final payload = {'email': email.trim()};
+    final response =
+        await _post('/admin/trial-history/reset', payload, preferIdToken: true);
+    if (response is Map) {
+      return Map<String, dynamic>.from(response as Map);
+    }
+    return {};
+  }
+
+  Future<Map<String, dynamic>> revokeAllShareCodes() async {
+    final response =
+        await _post('/admin/share/revoke-all', {}, preferIdToken: true);
+    if (response is Map) {
+      return Map<String, dynamic>.from(response as Map);
+    }
+    return {};
+  }
+
+  Future<Map<String, dynamic>> getFxRates() async {
+    final response = await _get('/billing/fx');
+    if (response is Map) {
+      return Map<String, dynamic>.from(response as Map);
+    }
+    return {};
+  }
+
+  Future<String?> createCheckoutSession({required String plan}) async {
+    final response = await _post('/billing/checkout', {'plan': plan});
+    return response['url'] as String?;
+  }
+
+  Future<Map<String, dynamic>> createPaymentSheet({required String plan}) async {
+    final response = await _post('/billing/payment-sheet', {'plan': plan});
+    if (response is Map) {
+      return Map<String, dynamic>.from(response as Map);
+    }
+    return {};
+  }
+
+  Future<String?> createBillingPortal() async {
+    final response = await _post('/billing/portal', {});
+    return response['url'] as String?;
+  }
+
+  Future<Map<String, dynamic>> refreshBillingStatus() async {
+    final response = await _post('/billing/reconcile', {});
+    if (response is Map) {
+      return Map<String, dynamic>.from(response as Map);
+    }
+    return {};
+  }
+
+  Future<Map<String, dynamic>> reconcileBillingAll() async {
+    final response = await _post('/billing/reconcile-all', {});
+    if (response is Map) {
+      return Map<String, dynamic>.from(response as Map);
+    }
+    return {};
+  }
+
+  Future<Map<String, dynamic>> reconcileBillingUser({
+    String? userId,
+    String? email,
+  }) async {
+    final payload = <String, dynamic>{};
+    if (userId != null && userId.trim().isNotEmpty) {
+      payload['userId'] = userId.trim();
+    }
+    if (email != null && email.trim().isNotEmpty) {
+      payload['email'] = email.trim();
+    }
+    final response = await _post('/billing/reconcile', payload);
+    if (response is Map) {
+      return Map<String, dynamic>.from(response as Map);
+    }
+    return {};
   }
 
   Future<Map<String, dynamic>> getAppVersionInfo({String? platform}) async {
@@ -843,6 +1280,18 @@ class AwsService {
     return Map<String, dynamic>.from(response as Map);
   }
 
+  Future<Map<String, dynamic>> listShareCodes({String? rosterId}) async {
+    final response = await _post('/share/list', {
+      if (rosterId != null && rosterId.isNotEmpty) 'rosterId': rosterId,
+    });
+    return Map<String, dynamic>.from(response as Map);
+  }
+
+  Future<Map<String, dynamic>> revokeShareCode(String code) async {
+    final response = await _post('/share/revoke', {'code': code});
+    return Map<String, dynamic>.from(response as Map);
+  }
+
   Future<Map<String, dynamic>> accessRosterByCode(String code) async {
     final response = await _postNoAuth('/share/access', {'code': code});
     return Map<String, dynamic>.from(response as Map);
@@ -875,6 +1324,25 @@ class AwsService {
     return response['requestId'] as String;
   }
 
+  Future<String> submitSharedRequestWithCode({
+    required String code,
+    required String type,
+    required DateTime startDate,
+    DateTime? endDate,
+    String? notes,
+    String? guestName,
+  }) async {
+    final response = await _postNoAuth('/share/request', {
+      'code': code,
+      'type': type,
+      'startDate': startDate.toIso8601String(),
+      'endDate': (endDate ?? startDate).toIso8601String(),
+      'notes': notes ?? '',
+      'guestName': guestName ?? '',
+    });
+    return response['requestId'] as String;
+  }
+
   Future<bool> joinRoster(String rosterId, String? password) async {
     await _post('/rosters/join', {
       'rosterId': rosterId,
@@ -887,6 +1355,37 @@ class AwsService {
   Future<List<Map<String, dynamic>>> getUserRosters() async {
     final response = await _get('/rosters');
     return (response as List<dynamic>).cast<Map<String, dynamic>>();
+  }
+
+  Future<bool> ensureCurrentRosterSelected() async {
+    if (!isAuthenticated) return false;
+    if (_currentRosterId != null) return true;
+    try {
+      await ensureSessionFresh();
+    } catch (_) {}
+    final rosters = await getUserRosters();
+    if (rosters.isEmpty) return false;
+    String? candidate = await getLastRosterId();
+    if (candidate != null) {
+      final match = rosters.any((item) {
+        final roster = item['rosters'] as Map?;
+        return roster != null && roster['id'] == candidate;
+      });
+      if (!match) {
+        candidate = null;
+      }
+    }
+    if (candidate == null) {
+      final roster = rosters.first['rosters'] as Map?;
+      candidate = roster?['id']?.toString() ?? rosters.first['roster_id']?.toString();
+    }
+    if (candidate != null && candidate.isNotEmpty) {
+      currentRosterId = candidate;
+      await setLastRosterId(candidate);
+      await _saveSession();
+      return true;
+    }
+    return false;
   }
 
   Future<void> deleteRoster(String rosterId) async {
@@ -1169,11 +1668,19 @@ class AwsService {
     });
   }
 
-  Future<int> saveRosterData(String rosterId, Map<String, dynamic> data) async {
-    final response = await _post('/roster/save', {
+  Future<int> saveRosterData(
+    String rosterId,
+    Map<String, dynamic> data, {
+    String? reason,
+  }) async {
+    final payload = {
       'rosterId': rosterId,
       'data': data,
-    });
+    };
+    if (reason != null && reason.trim().isNotEmpty) {
+      payload['reason'] = reason.trim();
+    }
+    final response = await _post('/roster/save', payload);
     return response['version'] as int? ?? 0;
   }
 
@@ -1181,6 +1688,39 @@ class AwsService {
     final response = await _get('/roster/load?rosterId=$rosterId');
     if (response == null) return null;
     return Map<String, dynamic>.from(response as Map);
+  }
+
+  Future<List<Map<String, dynamic>>> getRosterVersions(
+    String rosterId, {
+    int limit = 25,
+  }) async {
+    final response = await _get(
+      '/roster/versions?rosterId=$rosterId&limit=$limit',
+    );
+    if (response is List) {
+      return response
+          .map((item) => Map<String, dynamic>.from(item as Map))
+          .toList();
+    }
+    return [];
+  }
+
+  Future<Map<String, dynamic>> rollbackRoster({
+    required String rosterId,
+    required int targetVersion,
+    String? reason,
+  }) async {
+    final payload = {
+      'rosterId': rosterId,
+      'targetVersion': targetVersion,
+      if (reason != null && reason.trim().isNotEmpty)
+        'reason': reason.trim(),
+    };
+    final response = await _post('/roster/rollback', payload);
+    if (response is Map) {
+      return Map<String, dynamic>.from(response as Map);
+    }
+    return {};
   }
 
   Future<bool> resolveConflict(
@@ -1194,9 +1734,10 @@ class AwsService {
     return localVersion >= remoteVersion;
   }
 
-  Future<dynamic> _get(String path) async {
+  Future<dynamic> _get(String path, {bool preferIdToken = true}) async {
     final url = Uri.parse('$_apiUrl$path');
-    final headers = await _authHeaders('GET', url, '');
+    final headers =
+        await _authHeaders('GET', url, '', preferIdToken: preferIdToken);
     final response = await http.get(url, headers: headers);
     if (response.statusCode >= 200 && response.statusCode < 300) {
       return response.body.isEmpty ? {} : jsonDecode(response.body);
@@ -1204,10 +1745,15 @@ class AwsService {
     throw Exception('AWS API GET error: ${response.statusCode}');
   }
 
-  Future<dynamic> _post(String path, Map<String, dynamic> body) async {
+  Future<dynamic> _post(
+    String path,
+    Map<String, dynamic> body, {
+    bool preferIdToken = true,
+  }) async {
     final url = Uri.parse('$_apiUrl$path');
     final payload = jsonEncode(body);
-    final headers = await _authHeaders('POST', url, payload);
+    final headers =
+        await _authHeaders('POST', url, payload, preferIdToken: preferIdToken);
     final response = await http.post(
       url,
       headers: headers,
@@ -1329,17 +1875,22 @@ Future<dynamic> _postNoAuth(String path, Map<String, dynamic> body) async {
   Future<Map<String, String>> _authHeaders(
     String method,
     Uri uri,
-    String body,
-  ) async {
+    String body, {
+    bool preferIdToken = false,
+  }) async {
     await _refreshSessionIfNeeded();
-    final token = _accessToken ?? _idToken;
+    final token = preferIdToken ? (_idToken ?? _accessToken) : (_accessToken ?? _idToken);
     if (token == null) {
       throw Exception('Not signed in or session expired. Please sign in again.');
     }
-    return {
+    final headers = <String, String>{
       ..._headers(),
-      'Authorization': 'Bearer $token',
+      'Authorization': token,
     };
+    if (_sharedAccessCode != null && _sharedAccessCode!.isNotEmpty) {
+      headers['x-share-code'] = _sharedAccessCode!;
+    }
+    return headers;
   }
 
   String _formatAmzDate(DateTime date) {

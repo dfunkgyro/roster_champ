@@ -9,10 +9,12 @@ import 'services/time_service.dart';
 import 'services/weather_service.dart';
 import 'services/holiday_service.dart';
 import 'services/observance_service.dart';
+import 'services/dst_service.dart';
 import 'services/voice_service.dart';
 import 'services/activity_log_service.dart';
 import 'aws_service.dart';
 import 'dialogs.dart';
+import 'import_roster_screen.dart';
 import 'package:roster_champ/safe_text_field.dart';
 
 class AiSuggestionsView extends ConsumerStatefulWidget {
@@ -59,6 +61,28 @@ class _ParsedDate {
   final double confidence;
 
   const _ParsedDate(this.date, this.confidence);
+}
+
+class _RosterQuerySummary {
+  final DateTime date;
+  final String shiftLabel;
+  final int count;
+  final List<String> names;
+  final int restCount;
+  final List<String> restNames;
+  final int leaveCount;
+  final List<String> leaveNames;
+
+  const _RosterQuerySummary({
+    required this.date,
+    required this.shiftLabel,
+    required this.count,
+    required this.names,
+    required this.restCount,
+    required this.restNames,
+    required this.leaveCount,
+    required this.leaveNames,
+  });
 }
 
 _ParsedDate? _parseDateLoose(
@@ -134,39 +158,57 @@ class _AiContextState {
     if (staff != null && staff.isNotEmpty) lastStaff = staff;
     if (date != null) lastDate = date;
     if (shift != null && shift.isNotEmpty) lastShift = shift;
-    if (action != null && action.isNotEmpty) lastAction = action;
-    if (pendingRaw != null && pendingRaw.isNotEmpty) {
-      lastPendingRaw = pendingRaw;
+    if (action != null) {
+      lastAction = action.isEmpty ? null : action;
+    }
+    if (pendingRaw != null) {
+      lastPendingRaw = pendingRaw.isEmpty ? null : pendingRaw;
     }
     if (staffList != null && staffList.isNotEmpty) {
       lastStaffList = staffList;
     }
-    if (pendingStaff != null && pendingStaff.isNotEmpty) {
-      this.pendingStaff = pendingStaff;
+    if (pendingStaff != null) {
+      this.pendingStaff = pendingStaff.isEmpty ? null : pendingStaff;
     }
-    if (pendingShift != null && pendingShift.isNotEmpty) {
-      this.pendingShift = pendingShift;
+    if (pendingShift != null) {
+      this.pendingShift = pendingShift.isEmpty ? null : pendingShift;
     }
-    if (pendingDates != null && pendingDates.isNotEmpty) {
-      this.pendingDates = pendingDates;
+    if (pendingDates != null) {
+      this.pendingDates = pendingDates.isEmpty ? null : pendingDates;
     }
     if (pendingCreatedAt != null) {
       this.pendingCreatedAt = pendingCreatedAt;
     }
   }
+
+  void clearPending() {
+    lastAction = null;
+    lastPendingRaw = null;
+    pendingStaff = null;
+    pendingShift = null;
+    pendingDates = null;
+    pendingCreatedAt = null;
+  }
 }
 
-class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
+class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView>
+    with SingleTickerProviderStateMixin {
   final TextEditingController _commandController = TextEditingController();
   final VoiceService _voiceService = VoiceService.instance;
+  late final AnimationController _mascotController;
+  late final Animation<double> _mascotFloat;
+  late final Animation<double> _mascotWobble;
   bool _didAutoRefresh = false;
   final _AiContextState _contextState = _AiContextState();
   bool _canSend = false;
   bool _lastCommandFromVoice = false;
   String? _lastVoiceTranscript;
+  List<_RosterQuerySummary> _lastQuerySummaries = [];
+  bool _showQueryDetails = false;
 
   @override
   void dispose() {
+    _mascotController.dispose();
     _commandController.removeListener(_updateSendState);
     _commandController.dispose();
     super.dispose();
@@ -175,6 +217,16 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
   @override
   void initState() {
     super.initState();
+    _mascotController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 4200),
+    )..repeat(reverse: true);
+    _mascotFloat = Tween<double>(begin: -4, end: 4).animate(
+      CurvedAnimation(parent: _mascotController, curve: Curves.easeInOut),
+    );
+    _mascotWobble = Tween<double>(begin: -0.04, end: 0.04).animate(
+      CurvedAnimation(parent: _mascotController, curve: Curves.easeInOutCubic),
+    );
     _commandController.addListener(_updateSendState);
     _voiceService.onCommand = (text) {
       if (!mounted) return;
@@ -232,19 +284,51 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
 
     return ListView.builder(
       padding: const EdgeInsets.all(16),
-      itemCount: sortedSuggestions.length + 2,
+      itemCount: sortedSuggestions.length + 3,
       itemBuilder: (context, index) {
         if (index == 0) {
           return _buildAiCommandPanel(context);
         }
         if (index == 1) {
+          return _buildAiSummaryStats(context, sortedSuggestions);
+        }
+        if (index == 2) {
           return _ScenarioImpactCard(
             suggestions: sortedSuggestions,
           );
         }
-        final suggestion = sortedSuggestions[index - 2];
+        final suggestion = sortedSuggestions[index - 3];
         return _SuggestionCard(suggestion: suggestion);
       },
+    );
+  }
+
+  Widget _buildMascot() {
+    return AnimatedBuilder(
+      animation: _mascotController,
+      builder: (context, child) {
+        return Transform.translate(
+          offset: Offset(0, _mascotFloat.value),
+          child: Transform.rotate(
+            angle: _mascotWobble.value,
+            child: child,
+          ),
+        );
+      },
+      child: Container(
+        width: 44,
+        height: 44,
+        decoration: BoxDecoration(
+          color: Colors.black.withOpacity(0.06),
+          shape: BoxShape.circle,
+        ),
+        padding: const EdgeInsets.all(6),
+        child: Image.asset(
+          'assets/images/rcgoldl49.gif',
+          fit: BoxFit.contain,
+          semanticLabel: 'Roster Champion mascot',
+        ),
+      ),
     );
   }
 
@@ -277,15 +361,43 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
-              'RC Assistant',
-              style: Theme.of(context).textTheme.titleMedium,
+            Row(
+              children: [
+                _buildMascot(),
+                const SizedBox(width: 12),
+                Text(
+                  'RC Assistant',
+                  style: Theme.of(context).textTheme.titleMedium,
+                ),
+                const Spacer(),
+                IconButton(
+                  tooltip: settings.voiceOutputMuted
+                      ? 'Unmute RC voice'
+                      : 'Mute RC voice',
+                  onPressed: () {
+                    ref.read(settingsProvider.notifier).updateSettings(
+                          settings.copyWith(
+                            voiceOutputMuted: !settings.voiceOutputMuted,
+                          ),
+                        );
+                  },
+                  icon: Icon(
+                    settings.voiceOutputMuted
+                        ? Icons.volume_off
+                        : Icons.volume_up,
+                  ),
+                ),
+              ],
             ),
             const SizedBox(height: 6),
             Text(
               'Roster: $rosterLabel | Staff: ${roster.staffMembers.length} | Week start: ${roster.weekStartDay}',
               style: Theme.of(context).textTheme.bodySmall,
             ),
+            if (_lastQuerySummaries.isNotEmpty) ...[
+              const SizedBox(height: 10),
+              _buildQuerySummaryCard(context),
+            ],
             if (_contextState.lastAction != null &&
                 _contextState.lastAction!.isNotEmpty &&
                 _contextState.lastAction!.startsWith('await_')) ...[
@@ -318,7 +430,7 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
                       icon: const Icon(Icons.close, size: 18),
                       onPressed: () {
                         setState(() {
-                          _contextState.remember(action: '');
+                          _contextState.clearPending();
                         });
                       },
                     ),
@@ -395,6 +507,176 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
             ),
           ],
         ),
+      ),
+    );
+  }
+
+  Widget _buildAiSummaryStats(
+    BuildContext context,
+    List<models.AiSuggestion> suggestions,
+  ) {
+    final unread = suggestions.where((s) => !s.isRead).length;
+    final critical = suggestions
+        .where((s) => s.priority == models.SuggestionPriority.critical)
+        .length;
+    final high = suggestions
+        .where((s) => s.priority == models.SuggestionPriority.high)
+        .length;
+    final medium = suggestions
+        .where((s) => s.priority == models.SuggestionPriority.medium)
+        .length;
+    final low = suggestions
+        .where((s) => s.priority == models.SuggestionPriority.low)
+        .length;
+
+    return Card(
+      margin: const EdgeInsets.only(bottom: 12),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            _buildMetaChipInline(context, 'Unread $unread', Icons.markunread),
+            _buildMetaChipInline(context, 'Critical $critical', Icons.warning),
+            _buildMetaChipInline(context, 'High $high', Icons.priority_high),
+            _buildMetaChipInline(context, 'Medium $medium', Icons.trending_up),
+            _buildMetaChipInline(context, 'Low $low', Icons.trending_down),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildMetaChipInline(
+    BuildContext context,
+    String label,
+    IconData icon,
+  ) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: Theme.of(context).colorScheme.surfaceVariant,
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 12),
+          const SizedBox(width: 4),
+          Text(label, style: const TextStyle(fontSize: 12)),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildQuerySummaryCard(BuildContext context) {
+    final summaries = _lastQuerySummaries;
+    if (summaries.isEmpty) {
+      return const SizedBox.shrink();
+    }
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Theme.of(context).colorScheme.surfaceVariant.withOpacity(0.6),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: Theme.of(context).colorScheme.outline.withOpacity(0.2),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.query_stats, size: 18),
+              const SizedBox(width: 6),
+              Text(
+                'Query summary',
+                style: Theme.of(context).textTheme.bodyMedium,
+              ),
+              const Spacer(),
+              TextButton(
+                onPressed: () {
+                  setState(() {
+                    _showQueryDetails = !_showQueryDetails;
+                  });
+                },
+                child: Text(_showQueryDetails ? 'Hide details' : 'Show details'),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          ...summaries.map((summary) {
+            final dateLabel = DateFormat('MMM d').format(summary.date);
+            final base = '$dateLabel · ${summary.shiftLabel}';
+            final count = summary.count;
+            final restCount = summary.restCount;
+            final leaveCount = summary.leaveCount;
+            return Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '$base — $count | Rest $restCount | Leave $leaveCount',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                  const SizedBox(height: 6),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 6,
+                    children: [
+                      TextButton.icon(
+                        onPressed: () {
+                          ref
+                              .read(rosterProvider)
+                              .requestFocusDate(summary.date);
+                        },
+                        icon: const Icon(Icons.my_location, size: 16),
+                        label: const Text('Jump to date'),
+                      ),
+                      if (summary.names.isNotEmpty)
+                        TextButton.icon(
+                          onPressed: () {
+                            Clipboard.setData(
+                              ClipboardData(text: summary.names.join(', ')),
+                            );
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                content: Text('Copied staff list'),
+                              ),
+                            );
+                          },
+                          icon: const Icon(Icons.copy, size: 16),
+                          label: const Text('Copy names'),
+                        ),
+                    ],
+                  ),
+                  if (_showQueryDetails) ...[
+                    if (summary.names.isNotEmpty)
+                      Text(
+                        'On shift: ${summary.names.join(', ')}',
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    Text(
+                      restCount == 0
+                          ? 'Rest day: none'
+                          : 'Rest day ($restCount): ${summary.restNames.join(', ')}',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                    Text(
+                      leaveCount == 0
+                          ? 'Leave: none'
+                          : 'Leave ($leaveCount): ${summary.leaveNames.join(', ')}',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ],
+                ],
+              ),
+            );
+          }),
+        ],
       ),
     );
   }
@@ -552,14 +834,36 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
       return true;
     }
 
-    if (_isTemplateApplyIntent(text)) {
-      final codeMatch = RegExp(r'(RC[12]-[A-Za-z0-9_-]+)')
-          .firstMatch(raw);
+    if (_isTemplateApplyIntent(text) || _isTemplateImportIntent(text, tokens)) {
+      final codeMatch =
+          RegExp(r'(RC[12]-[A-Za-z0-9_-]+)').firstMatch(raw);
       if (codeMatch == null) {
-        _respondWithRC(
-          context,
-          'Paste the template code (starts with RC2-).',
-        );
+        Future(() async {
+          final clip = await Clipboard.getData('text/plain');
+          final clipText = clip?.text ?? '';
+          final clipMatch =
+              RegExp(r'(RC[12]-[A-Za-z0-9_-]+)').firstMatch(clipText);
+          if (clipMatch != null) {
+            final applied = roster.applyTemplateCode(clipMatch.group(1)!);
+            if (applied) {
+              _respondWithRC(
+                context,
+                'Template code applied from your clipboard. Want me to save it as a new roster name?',
+              );
+            } else {
+              _respondWithRC(
+                context,
+                'I found a template code on your clipboard but it did not apply. Please double-check it.',
+              );
+            }
+            return;
+          }
+          await _openTemplateImport(context);
+          _respondWithRC(
+            context,
+            'Opening the template importer. You can paste a code or scan a QR.',
+          );
+        });
         return true;
       }
       final applied = roster.applyTemplateCode(codeMatch.group(1)!);
@@ -574,6 +878,10 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
           'I could not apply that template code. Check the code and try again.',
         );
       }
+      return true;
+    }
+    if (_isStaffNamesIntent(text)) {
+      _handleStaffNamesCommand(context, raw);
       return true;
     }
     final staffMatch = _matchStaffName(text, roster);
@@ -690,6 +998,24 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
         return true;
       }
       _respondWithRC(context, 'Which staff member should I check?');
+      return true;
+    }
+    if (_contextState.lastAction == 'await_shift_for_query') {
+      final shift = _extractShiftCode(text);
+      final pendingDates = _contextState.pendingDates;
+      if (shift != null && pendingDates != null && pendingDates.isNotEmpty) {
+        final base = _contextState.lastPendingRaw ?? '';
+        final merged = base.isEmpty ? raw : '$base $raw';
+        _handleShiftQuery(
+          context,
+          merged,
+          fallbackDate: pendingDates.first,
+          fallbackShift: shift,
+        );
+        _contextState.remember(action: '');
+        return true;
+      }
+      _respondWithRC(context, 'Which shift should I check?');
       return true;
     }
     if (_contextState.lastAction == 'await_staff_for_change') {
@@ -1570,6 +1896,14 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
     if (matches.isEmpty && fallbackStaff != null) {
       matches.add(fallbackStaff);
     }
+    if (matches.isEmpty &&
+        (normalized.contains('who') ||
+            normalized.contains('how many') ||
+            normalized.contains('count') ||
+            normalized.contains('number of') ||
+            normalized.startsWith('who '))) {
+      return roster.staffMembers.map((s) => s.name).toList();
+    }
     if (matches.isEmpty) {
       _contextState.remember(
         action: 'await_staff_for_query',
@@ -1682,7 +2016,20 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
     if (text.contains('use template') ||
         text.contains('apply template') ||
         text.contains('import template') ||
+        text.contains('paste template') ||
         text.contains('template code')) {
+      return true;
+    }
+    return false;
+  }
+
+  bool _isTemplateImportIntent(String text, List<String> tokens) {
+    if (_containsAnyFuzzy(tokens, ['qr', 'scan', 'camera'])) {
+      return true;
+    }
+    if (text.contains('template code') ||
+        text.contains('use template') ||
+        text.contains('paste template')) {
       return true;
     }
     return false;
@@ -1776,6 +2123,16 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
         );
       }
     });
+  }
+
+  Future<void> _openTemplateImport(BuildContext context) async {
+    await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) =>
+            const ImportRosterScreen(openTemplateOnStart: true),
+      ),
+    );
   }
 
   void _handleRosterCommand(BuildContext context, String raw) {
@@ -1886,6 +2243,7 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
     String raw, {
     String? fallbackStaff,
     DateTime? fallbackDate,
+    String? fallbackShift,
   }) {
     final roster = ref.read(rosterProvider);
     final normalized = _normalizeCommand(raw);
@@ -1952,16 +2310,35 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
     final usedFallbackStaff = !hadStaffHint && fallbackStaff != null;
     final staff = staffList;
 
-    final shiftHint = _extractShiftCode(text);
+    final shiftHint = _extractShiftCode(text) ?? fallbackShift;
     final wantsLeave = text.contains('leave') ||
         text.contains('sick') ||
         text.contains('secondment');
+    final wantsRest = text.contains('rest') || text.contains('off');
     final wantsCoverage =
         text.contains('coverage') || text.contains('gap') || text.contains('missing');
     final wantsCount = text.contains('how many') ||
         text.contains('count') ||
         text.contains('number of');
     final isWhoQuery = text.contains('who') || text.startsWith('who');
+    final wantsBoth = wantsCount && isWhoQuery;
+    if (wantsCount &&
+        shiftHint == null &&
+        !wantsLeave &&
+        !wantsRest &&
+        !wantsCoverage) {
+      _contextState.remember(
+        action: 'await_shift_for_query',
+        pendingDates: dates,
+        pendingRaw: raw,
+        pendingCreatedAt: DateTime.now(),
+      );
+      _respondWithRC(
+        context,
+        'Which shift should I check? (early, day, late, night)',
+      );
+      return;
+    }
     if ((wantsCount || wantsCoverage) && !isWhoQuery) {
       if (dates.length > 7) {
         _respondWithRC(
@@ -1971,14 +2348,27 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
         return;
       }
       final responses = <String>[];
+      final summaries = <_RosterQuerySummary>[];
+      String formatNames(List<String> items) {
+        if (items.isEmpty) return '';
+        if (items.length <= 10) return items.join(', ');
+        final shown = items.take(10).join(', ');
+        return '$shown, and ${items.length - 10} more';
+      }
       for (final date in dates) {
         int count = 0;
         int missing = 0;
+        final names = <String>[];
+        final rest = <String>[];
+        final leave = <String>[];
         for (final name in staff) {
           final staffMember = roster.staffMembers
               .where((s) => s.name == name)
               .firstOrNull;
           if (staffMember == null) continue;
+          if (roster.isStaffUnavailableOnDate(staffMember, date)) {
+            leave.add(name);
+          }
           if (wantsLeave) {
             final unavailable =
                 roster.isStaffUnavailableOnDate(staffMember, date);
@@ -1989,16 +2379,32 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
               continue;
             }
             count++;
+            names.add(name);
             continue;
           }
           final shift = roster.getShiftForDate(name, date);
+          if (shift == 'R' || shift == 'OFF') {
+            rest.add(name);
+          }
           final normalizedShift = _normalizeShiftForCoverage(shift);
           final normalizedHint = _normalizeShiftForCoverage(shiftHint);
           if (shiftHint != null) {
-            if (normalizedShift == normalizedHint) count++;
+            if (normalizedShift == normalizedHint) {
+              count++;
+              names.add(name);
+            }
           } else {
-            if (shift != 'OFF' && shift != 'AL') count++;
+            if (shift != 'OFF' && shift != 'AL' && shift != 'TOIL') count++;
+            if (shift != 'OFF' && shift != 'AL' && shift != 'TOIL') {
+              names.add(name);
+            }
           }
+        }
+        if (wantsRest && shiftHint == null) {
+          count = rest.length;
+          names
+            ..clear()
+            ..addAll(rest);
         }
         if (wantsCoverage) {
           final required = _estimateCoverageNeed(roster, date, shiftHint);
@@ -2010,9 +2416,11 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
                 : text.contains('sick')
                     ? 'sick'
                     : 'on leave')
-            : shiftHint != null
-                ? _shiftLabel(shiftHint)
-                : 'working';
+            : wantsRest
+                ? 'on rest day'
+                : shiftHint != null
+                    ? _shiftLabel(shiftHint)
+                    : 'working';
         if (wantsCoverage) {
           responses.add(
             missing == 0
@@ -2020,15 +2428,35 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
                 : 'Coverage gap: $missing for $label on ${DateFormat('MMM d').format(date)}.',
           );
         } else {
-          responses.add(
-            '$count staff are $label on ${DateFormat('MMM d').format(date)}.',
-          );
+          final base =
+              '$count staff are $label on ${DateFormat('MMM d').format(date)}.';
+          if (dates.length == 1 && names.isNotEmpty) {
+            responses.add('$base Names: ${formatNames(names)}.');
+          } else {
+            responses.add(base);
+          }
         }
+        summaries.add(
+          _RosterQuerySummary(
+            date: date,
+            shiftLabel: label,
+            count: count,
+            names: names,
+            restCount: rest.length,
+            restNames: rest,
+            leaveCount: leave.length,
+            leaveNames: leave,
+          ),
+        );
       }
+      setState(() {
+        _lastQuerySummaries = summaries;
+        _showQueryDetails = false;
+      });
       _respondWithRC(context, responses.join(' '));
       return;
     }
-    if (isWhoQuery) {
+    if (isWhoQuery || wantsBoth) {
       if (dates.length > 3) {
         _respondWithRC(
           context,
@@ -2038,13 +2466,22 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
       }
       final results = <String>[];
       final responses = <String>[];
+      final summaries = <_RosterQuerySummary>[];
       for (final date in dates) {
         results.clear();
+        final rest = <String>[];
+        final leave = <String>[];
         for (final name in staff) {
           final staffMember = roster.staffMembers
               .where((s) => s.name == name)
               .firstOrNull;
           if (staffMember == null) continue;
+          if (roster.isStaffUnavailableOnDate(staffMember, date)) {
+            leave.add(name);
+            if (!wantsLeave) {
+              continue;
+            }
+          }
           if (wantsLeave) {
             final unavailable =
                 roster.isStaffUnavailableOnDate(staffMember, date);
@@ -2057,6 +2494,13 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
             continue;
           }
           final shift = roster.getShiftForDate(name, date);
+          if (shift == 'R' || shift == 'OFF') {
+            rest.add(name);
+            if (wantsRest && shiftHint == null) {
+              results.add(name);
+              continue;
+            }
+          }
           final normalizedShift = _normalizeShiftForCoverage(shift);
           final normalizedHint = _normalizeShiftForCoverage(shiftHint);
           if (shiftHint != null) {
@@ -2064,7 +2508,7 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
               results.add(name);
             }
           } else {
-            if (shift != 'OFF' && shift != 'AL') {
+            if (shift != 'OFF' && shift != 'AL' && shift != 'TOIL') {
               results.add(name);
             }
           }
@@ -2075,15 +2519,45 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
                 : text.contains('sick')
                     ? 'sick'
                     : 'on leave')
-            : shiftHint != null
-                ? _shiftLabel(shiftHint)
-                : 'working';
-        responses.add(
-          results.isEmpty
-              ? 'No staff $label on ${DateFormat('MMM d').format(date)}.'
-              : '${results.join(', ')} are $label on ${DateFormat('MMM d').format(date)}.',
+            : wantsRest
+                ? 'on rest day'
+                : shiftHint != null
+                    ? _shiftLabel(shiftHint)
+                    : 'working';
+        final countLabel = wantsBoth
+            ? ' (${results.length} total)'
+            : '';
+        final base = results.isEmpty
+            ? 'No staff $label on ${DateFormat('MMM d').format(date)}.'
+            : '${results.join(', ')} are $label on ${DateFormat('MMM d').format(date)}$countLabel.';
+        if (wantsBoth) {
+          final restLine = rest.isEmpty
+              ? 'Rest day: none.'
+              : 'Rest day (${rest.length}): ${rest.join(', ')}.';
+          final leaveLine = leave.isEmpty
+              ? 'Leave: none.'
+              : 'Leave (${leave.length}): ${leave.join(', ')}.';
+          responses.add('$base $restLine $leaveLine');
+        } else {
+          responses.add(base);
+        }
+        summaries.add(
+          _RosterQuerySummary(
+            date: date,
+            shiftLabel: label,
+            count: results.length,
+            names: List<String>.from(results),
+            restCount: rest.length,
+            restNames: rest,
+            leaveCount: leave.length,
+            leaveNames: leave,
+          ),
         );
       }
+      setState(() {
+        _lastQuerySummaries = summaries;
+        _showQueryDetails = false;
+      });
       _respondWithRC(context, responses.join(' '));
       return;
     }
@@ -2275,7 +2749,7 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
     for (int i = 0; i < 30; i++) {
       final date = now.add(Duration(days: i));
       final shift = roster.getShiftForDate(staffName, date);
-      if (shift != 'OFF' && shift != 'AL') {
+      if (shift != 'OFF' && shift != 'AL' && shift != 'TOIL') {
         next30++;
         if (i < 7) next7++;
       }
@@ -3733,7 +4207,8 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
     if (staffMatches.isEmpty) return false;
 
     final settings = ref.read(settingsProvider);
-    final hourMap = settings.shiftHourMap;
+      final hourMap = settings.shiftHourMap;
+      final dstEnabled = settings.dstAdjustmentsEnabled;
 
     final summaries = <String>[];
     for (final staff in staffMatches) {
@@ -3744,7 +4219,7 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
         final shift = roster.getShiftForDate(staff, date);
         if (shift.isNotEmpty && shift != 'OFF') {
           shifts[shift] = (shifts[shift] ?? 0) + 1;
-          totalHours += _estimateShiftHours(shift, hourMap);
+          totalHours += _estimateShiftHours(shift, hourMap, date, dstEnabled);
         }
         date = date.add(const Duration(days: 1));
       }
@@ -3765,14 +4240,30 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
     return true;
   }
 
-  double _estimateShiftHours(String shift, Map<String, double> hourMap) {
+  double _estimateShiftHours(
+    String shift,
+    Map<String, double> hourMap,
+    DateTime date,
+    bool dstEnabled,
+  ) {
     final normalized = shift.toUpperCase();
     if (hourMap.containsKey(normalized)) {
-      return hourMap[normalized] ?? 0.0;
+      final base = hourMap[normalized] ?? 0.0;
+      return DstService.adjustShiftHours(
+        date: date,
+        shiftCode: normalized,
+        baseHours: base,
+        enabled: dstEnabled,
+      );
     }
     if (normalized.contains('12')) return 12.0;
     if (normalized == 'OFF' || normalized == 'R') return 0.0;
-    return 8.0;
+    return DstService.adjustShiftHours(
+      date: date,
+      shiftCode: normalized,
+      baseHours: 8.0,
+      enabled: dstEnabled,
+    );
   }
 
   String? _extractMathExpression(String text) {
@@ -6568,6 +7059,8 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
     final holidayCountries = <String>{
       settings.holidayCountryCode,
       ...settings.additionalHolidayCountries,
+      if (settings.autoHolidaySyncEnabled)
+        ...settings.autoHolidayCountries,
     };
     final holidays = <HolidayItem>[];
     for (final country in holidayCountries) {
@@ -6676,13 +7169,273 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
   }
 
   void _respondWithRC(BuildContext context, String message) {
+    final polished = _polishRcMessage(message);
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: Text('RC: $message'),
+        content: Text('RC: $polished'),
       ),
     );
     final settings = ref.read(settingsProvider);
-    _voiceService.speak(message, settings);
+    if (settings.voiceEnabled && !settings.voiceOutputMuted) {
+      _voiceService.speak(polished, settings);
+    }
+  }
+
+  String _polishRcMessage(String message) {
+    final trimmed = message.trim();
+    if (trimmed.isEmpty) return message;
+    var polished = trimmed;
+    final lower = polished.toLowerCase();
+    final isQuestion = trimmed.endsWith('?');
+    final isError = lower.startsWith('sorry') ||
+        lower.contains('error') ||
+        lower.contains('failed') ||
+        lower.contains('trouble') ||
+        lower.contains('unable') ||
+        lower.contains('could not');
+    if (isQuestion || isError) return trimmed;
+    polished = _softenPhrasing(polished);
+    polished = _applyContractions(polished);
+    const prefixes = [
+      'Got it.',
+      'Okay.',
+      'All set.',
+      'Done.',
+      'Sorted.',
+    ];
+    final prefix = prefixes[polished.hashCode.abs() % prefixes.length];
+    if (polished.startsWith(prefix)) return polished;
+    return '$prefix $polished';
+  }
+
+  String _applyContractions(String input) {
+    return input
+        .replaceAll('do not', "don't")
+        .replaceAll('does not', "doesn't")
+        .replaceAll('did not', "didn't")
+        .replaceAll('cannot', "can't")
+        .replaceAll('could not', "couldn't")
+        .replaceAll('will not', "won't")
+        .replaceAll('should not', "shouldn't")
+        .replaceAll('I am', "I'm")
+        .replaceAll('I will', "I'll")
+        .replaceAll('I have', "I've")
+        .replaceAll('We are', "We're")
+        .replaceAll('You are', "You're");
+  }
+
+  String _softenPhrasing(String input) {
+    var text = input;
+    text = text.replaceFirst(
+      RegExp(r'^I did not catch that\\.', caseSensitive: false),
+      "I didn't catch that.",
+    );
+    text = text.replaceFirst(
+      RegExp(r'^I could not', caseSensitive: false),
+      "I couldn't",
+    );
+    text = text.replaceFirst(
+      RegExp(r'^Please ', caseSensitive: false),
+      '',
+    );
+    text = text.replaceAll('Please ', '');
+    return text;
+  }
+
+  bool _isStaffNamesIntent(String text) {
+    return text.contains('staff list') ||
+        text.contains('staff names') ||
+        text.contains('replace staff') ||
+        text.contains('set staff') ||
+        text.contains('edit names') ||
+        text.contains('change names') ||
+        text.contains('update names') ||
+        text.contains('add staff') ||
+        text.contains('append staff') ||
+        text.contains('rename staff');
+  }
+
+  void _handleStaffNamesCommand(BuildContext context, String raw) async {
+    final roster = ref.read(rosterProvider);
+    if (roster.readOnly) {
+      _respondWithRC(context, 'This roster is read-only.');
+      return;
+    }
+    final normalized = _normalizeCommand(raw);
+    final isRename = normalized.contains('rename');
+    final isAppend = normalized.contains('append') ||
+        normalized.contains('add staff') ||
+        normalized.contains('add names');
+
+    if (isRename) {
+      final renames = _extractRenamePairs(raw);
+      if (renames.isEmpty) {
+        _respondWithRC(
+          context,
+          'Tell me the rename pairs like: "Rename Alex -> Alexis, Sam -> Samuel".',
+        );
+        return;
+      }
+      final confirmed = await _confirmStaffNamesApply(
+        context,
+        title: 'Rename staff',
+        subtitle: 'Rename ${renames.length} staff name(s)',
+        previewItems: renames.entries
+            .map((e) => '${e.key} → ${e.value}')
+            .toList(),
+        confirmLabel: 'Apply',
+      );
+      if (confirmed == true) {
+        roster.applyStaffRenames(renames);
+        _respondWithRC(context, 'Updated the staff names.');
+      }
+      return;
+    }
+
+    final names = _extractStaffNamesList(raw);
+    if (names.isEmpty) {
+      _respondWithRC(
+        context,
+        'List the staff names in order, separated by commas.',
+      );
+      return;
+    }
+
+    if (isAppend) {
+      final confirmed = await _confirmStaffNamesApply(
+        context,
+        title: 'Add staff',
+        subtitle: 'Append ${names.length} staff name(s)',
+        previewItems: names,
+        confirmLabel: 'Add',
+      );
+      if (confirmed == true) {
+        roster.applyStaffNamesAppend(names);
+        _respondWithRC(context, 'Added the staff names in order.');
+      }
+      return;
+    }
+
+    final overwriteCount =
+        names.length.clamp(0, roster.staffMembers.length);
+    final willAdd = names.length > roster.staffMembers.length;
+    final subtitle = willAdd
+        ? 'Replace first $overwriteCount and add ${names.length - overwriteCount}'
+        : 'Replace first $overwriteCount staff name(s)';
+    final confirmed = await _confirmStaffNamesApply(
+      context,
+      title: 'Replace staff',
+      subtitle: subtitle,
+      previewItems: names,
+      confirmLabel: 'Apply',
+    );
+    if (confirmed == true) {
+      roster.applyStaffNamesReplace(names);
+      _respondWithRC(context, 'Staff list updated top-down.');
+    }
+  }
+
+  List<String> _extractStaffNamesList(String raw) {
+    final lowered = raw.toLowerCase();
+    final markers = [
+      'replace staff with',
+      'replace staff',
+      'set staff list to',
+      'set staff list',
+      'set staff to',
+      'set staff',
+      'staff list:',
+      'staff:',
+      'add staff',
+      'append staff',
+      'add names',
+      'edit names',
+      'change names',
+      'update names',
+      'names:',
+    ];
+    String segment = raw;
+    for (final marker in markers) {
+      final idx = lowered.indexOf(marker);
+      if (idx != -1) {
+        segment = raw.substring(idx + marker.length);
+        break;
+      }
+    }
+    segment = segment.replaceAll('\n', ',');
+    segment = segment.replaceAll(' and ', ',');
+    return segment
+        .split(RegExp(r'[;,]'))
+        .map((name) => name.trim())
+        .map((name) => name.replaceAll(RegExp("^['\\\"]|['\\\"]" + "\$"), ''))
+        .map((name) => name.replaceAll(RegExp(r'^\\d+\\.?\\s*'), ''))
+        .where((name) => name.isNotEmpty)
+        .toList();
+  }
+
+  Map<String, String> _extractRenamePairs(String raw) {
+    final pairs = <String, String>{};
+    final pattern = RegExp(
+      r'([^,;]+?)\\s*(?:->|=>| to )\\s*([^,;]+)',
+      caseSensitive: false,
+    );
+    for (final match in pattern.allMatches(raw)) {
+      final from = match.group(1)?.trim();
+      final to = match.group(2)?.trim();
+      if (from == null || to == null) continue;
+      if (from.isEmpty || to.isEmpty) continue;
+      pairs[from] = to;
+    }
+    return pairs;
+  }
+
+  Future<bool?> _confirmStaffNamesApply(
+    BuildContext context, {
+    required String title,
+    required String subtitle,
+    required List<String> previewItems,
+    required String confirmLabel,
+  }) async {
+    return showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(title),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(subtitle),
+            const SizedBox(height: 12),
+            SizedBox(
+              height: 160,
+              child: SingleChildScrollView(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: previewItems.take(40).map((item) {
+                    return Padding(
+                      padding: const EdgeInsets.only(bottom: 4),
+                      child: Text('• $item'),
+                    );
+                  }).toList(),
+                ),
+              ),
+            ),
+            if (previewItems.length > 40)
+              Text('…and ${previewItems.length - 40} more'),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: Text(confirmLabel),
+          ),
+        ],
+      ),
+    );
   }
 
   void _clearExpiredPendingContext() {
@@ -6690,12 +7443,7 @@ class _AiSuggestionsViewState extends ConsumerState<AiSuggestionsView> {
     if (created == null) return;
     final now = DateTime.now();
     if (now.difference(created) > const Duration(minutes: 3)) {
-      _contextState.remember(
-        action: '',
-        pendingStaff: '',
-        pendingShift: '',
-        pendingDates: const [],
-      );
+      _contextState.clearPending();
     }
   }
 
@@ -7185,14 +7933,14 @@ class _SuggestionCard extends ConsumerWidget {
                 Row(
                   children: [
                     if (suggestion.impactScore != null)
-                      _buildMetaChip(
+                      _buildMetaChipInline(
                         context,
                         'Impact ${(suggestion.impactScore! * 100).toStringAsFixed(0)}%',
                         Icons.trending_up,
                       ),
                     const SizedBox(width: 8),
                     if (suggestion.confidence != null)
-                      _buildMetaChip(
+                      _buildMetaChipInline(
                         context,
                         'Confidence ${(suggestion.confidence! * 100).toStringAsFixed(0)}%',
                         Icons.verified,
@@ -7385,7 +8133,7 @@ class _SuggestionCard extends ConsumerWidget {
     }
   }
 
-  Widget _buildMetaChip(
+  Widget _buildMetaChipInline(
     BuildContext context,
     String label,
     IconData icon,
@@ -7428,3 +8176,4 @@ class _SuggestionCard extends ConsumerWidget {
     );
   }
 }
+

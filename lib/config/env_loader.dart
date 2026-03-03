@@ -13,7 +13,8 @@ class EnvLoader {
     _env = {
       'AWS_API_URL': const String.fromEnvironment(
         'AWS_API_URL',
-        defaultValue: 'https://uxqxypf3p4.execute-api.us-east-1.amazonaws.com/dev',
+        defaultValue:
+            'https://mql6snubqb.execute-api.us-east-1.amazonaws.com/prod',
       ),
       'AWS_REGION': const String.fromEnvironment(
         'AWS_REGION',
@@ -21,28 +22,32 @@ class EnvLoader {
       ),
       'COGNITO_USER_POOL_ID': const String.fromEnvironment(
         'COGNITO_USER_POOL_ID',
-        defaultValue: 'us-east-1_TrwHCKjHA',
+        defaultValue: 'us-east-1_FuKEW2wJ7',
       ),
       'COGNITO_APP_CLIENT_ID': const String.fromEnvironment(
         'COGNITO_APP_CLIENT_ID',
-        defaultValue: '412n6o2tfbd0uiv80i4733n0l0',
+        defaultValue: 'kmq4njoc2jcekjorhck39qg60',
       ),
       'COGNITO_DOMAIN': const String.fromEnvironment(
         'COGNITO_DOMAIN',
         defaultValue:
-            'https://roster-dev-dhjw6acs.auth.us-east-1.amazoncognito.com',
+            'https://auth-live.rosterchampion.com',
       ),
       'COGNITO_REDIRECT_URI': const String.fromEnvironment(
         'COGNITO_REDIRECT_URI',
-        defaultValue: 'rosterchamp://auth',
+        defaultValue: 'rosterchamp://auth-prod',
       ),
       'COGNITO_DESKTOP_REDIRECT_URI': const String.fromEnvironment(
         'COGNITO_DESKTOP_REDIRECT_URI',
         defaultValue: 'http://127.0.0.1:53682/',
       ),
+      'COGNITO_WEB_REDIRECT_URI': const String.fromEnvironment(
+        'COGNITO_WEB_REDIRECT_URI',
+        defaultValue: 'https://app.rosterchampion.com',
+      ),
       'COGNITO_IDENTITY_POOL_ID': const String.fromEnvironment(
         'COGNITO_IDENTITY_POOL_ID',
-        defaultValue: 'us-east-1:d5e17b9b-d839-4f91-9940-62e61909b443',
+        defaultValue: 'us-east-1:47171ba2-3887-4a2c-9137-a08c51d8dcbb',
       ),
     };
 

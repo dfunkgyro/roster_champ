@@ -23,7 +23,8 @@ class SportsService {
     required List<String> leagueIds,
     required String apiKey,
   }) async {
-    if (apiKey.trim().isEmpty || leagueIds.isEmpty) return [];
+    if (leagueIds.isEmpty) return [];
+    final resolvedKey = apiKey.trim().isEmpty ? '1' : apiKey.trim();
     final events = <SportsEventItem>[];
     for (final leagueId in leagueIds) {
       final cached = _leagueCache[leagueId];
@@ -32,10 +33,10 @@ class SportsService {
         continue;
       }
       final nextUri = Uri.parse(
-        'https://www.thesportsdb.com/api/v1/json/$apiKey/eventsnextleague.php?id=$leagueId',
+        'https://www.thesportsdb.com/api/v1/json/$resolvedKey/eventsnextleague.php?id=$leagueId',
       );
       final pastUri = Uri.parse(
-        'https://www.thesportsdb.com/api/v1/json/$apiKey/eventspastleague.php?id=$leagueId',
+        'https://www.thesportsdb.com/api/v1/json/$resolvedKey/eventspastleague.php?id=$leagueId',
       );
       final nextResponse = await http.get(nextUri);
       final pastResponse = await http.get(pastUri);

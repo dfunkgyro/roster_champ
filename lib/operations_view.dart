@@ -327,7 +327,15 @@ class _OperationsViewState extends ConsumerState<OperationsView>
                 title: Text(
                   '${request.type.name} · ${_formatDate(request.startDate)}',
                 ),
-                subtitle: Text(request.notes),
+                subtitle: Text(
+                  [
+                    if (request.guestName != null &&
+                        request.guestName!.trim().isNotEmpty)
+                      'Guest: ${request.guestName}',
+                    if (request.userId.isNotEmpty) 'User: ${request.userId}',
+                    if (request.notes.isNotEmpty) request.notes,
+                  ].join(' • '),
+                ),
                 trailing: _buildDecisionButtons(
                   context,
                   onApprove: () => roster.reviewAvailabilityRequest(
@@ -551,10 +559,27 @@ class _OperationsViewState extends ConsumerState<OperationsView>
       itemCount: roster.auditLogs.length,
       itemBuilder: (context, index) {
         final entry = roster.auditLogs[index];
+        final accessCode = entry.metadata['accessCode']?.toString();
+        final source = entry.metadata['source']?.toString();
+        final changedSections = entry.metadata['changedSections'];
+        final dataKeys = entry.metadata['dataKeys'];
+        final details = <String>[
+          _formatDate(entry.timestamp),
+          if (entry.userId.isNotEmpty) 'User: ${entry.userId}',
+          if (accessCode != null && accessCode.isNotEmpty)
+            'Access code: $accessCode',
+          if (source != null && source.isNotEmpty) 'Source: $source',
+          if (changedSections is List && changedSections.isNotEmpty)
+            'Changes: ${changedSections.take(3).join(', ')}',
+          if (changedSections is! List &&
+              dataKeys is List &&
+              dataKeys.isNotEmpty)
+            'Fields: ${dataKeys.take(3).join(', ')}',
+        ];
         return ListTile(
           leading: const Icon(Icons.history),
           title: Text(entry.action),
-          subtitle: Text(_formatDate(entry.timestamp)),
+          subtitle: Text(details.join(' • ')),
         );
       },
     );

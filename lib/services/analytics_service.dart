@@ -50,6 +50,13 @@ class AnalyticsService extends ChangeNotifier {
     String? rosterId,
   }) {
     if (!_enabled) return;
+    final platform = kIsWeb
+        ? 'web'
+        : defaultTargetPlatform.name.toLowerCase();
+    final mergedProps = {
+      'platform': platform,
+      ...?properties,
+    };
     final event = models.AnalyticsEvent(
       id: '${DateTime.now().millisecondsSinceEpoch}_${const Uuid().v4()}',
       name: name,
@@ -58,7 +65,7 @@ class AnalyticsService extends ChangeNotifier {
       userId: AwsService.instance.userId,
       rosterId: rosterId ?? AwsService.instance.currentRosterId,
       sessionId: _sessionId,
-      properties: properties ?? const {},
+      properties: mergedProps,
     );
     _events.add(event);
     if (_events.length > _maxStored) {

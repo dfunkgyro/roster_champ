@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/legacy.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:intl/intl.dart';
 import 'package:encrypt/encrypt.dart' as enc;
 import 'package:crypto/crypto.dart';
 import 'models.dart' as models;
@@ -45,10 +46,13 @@ class SettingsNotifier extends StateNotifier<models.AppSettings> {
         final remote = await AwsService.instance.getUserSettings();
         if (remote != null && remote.isNotEmpty) {
           state = models.AppSettings.fromJson(remote);
-          await prefs.setString('app_settings', jsonEncode(state.toJson()));
           AnalyticsService.instance.updateSettings(state);
         }
       }
+      await prefs.setString('app_settings', jsonEncode(state.toJson()));
+      await _ref
+          .read(rosterProvider)
+          .autoSyncDefaultHolidaysIfNeeded(state);
     } catch (e) {
       debugPrint('Error loading settings: $e');
     }
@@ -72,6 +76,9 @@ class SettingsNotifier extends StateNotifier<models.AppSettings> {
     if (AwsService.instance.isAuthenticated) {
       AwsService.instance.saveUserSettings(settings.toJson());
     }
+    _ref
+        .read(rosterProvider)
+        .autoSyncDefaultHolidaysIfNeeded(settings);
   }
 }
 
@@ -193,6 +200,9 @@ class AISuggestionEngine {
     // Check leave balances
     suggestions.addAll(_checkLeaveBalances());
 
+    // TOIL opportunities
+    suggestions.addAll(_checkToilOpportunities());
+
     // Check preferences and constraints
     suggestions.addAll(_checkPreferences());
 
@@ -218,7 +228,7 @@ class AISuggestionEngine {
       for (int i = 0; i < 30; i++) {
         final date = now.add(Duration(days: i));
         final shift = notifier.getShiftForDate(staff.name, date);
-        if (shift != 'OFF' && shift != 'AL') {
+        if (notifier._isWorkingShift(shift)) {
           shiftCount++;
         }
       }
@@ -299,7 +309,7 @@ class AISuggestionEngine {
       for (final staff in notifier.staffMembers) {
         if (!staff.isActive) continue;
         final shift = notifier.getShiftForDate(staff.name, date);
-        if (shift != 'OFF' && shift != 'AL') {
+        if (notifier._isWorkingShift(shift)) {
           staffOnShift.add(staff.name);
         }
       }
@@ -310,12 +320,18 @@ class AISuggestionEngine {
           : notifier.constraints.minStaffPerDay;
       if (staffOnShift.length < minStaff) {
         final coverageCandidate = _findCoverageCandidate(date);
+        final crossRosterHints = coverageCandidate == null
+            ? notifier.getCrossRosterCoverageHints(date)
+            : const <String>[];
+        final hintText = crossRosterHints.isNotEmpty
+            ? ' Linked roster options: ${crossRosterHints.join(', ')}.'
+            : '';
         suggestions.add(
           models.AiSuggestion(
             id: '${DateTime.now().millisecondsSinceEpoch}_coverage_${date.toIso8601String()}',
             title: 'Low Coverage Warning',
             description:
-                'Only ${staffOnShift.length} staff scheduled for ${_formatDate(date)} (target: $minStaff).',
+                'Only ${staffOnShift.length} staff scheduled for ${_formatDate(date)} (target: $minStaff).$hintText',
             reason:
                 'Coverage is below the minimum staffing constraint for this day.',
             priority: staffOnShift.isEmpty
@@ -350,7 +366,7 @@ class AISuggestionEngine {
         for (final staff in notifier.staffMembers) {
           if (!staff.isActive) continue;
           final shift = notifier.getShiftForDate(staff.name, date);
-          if (shift != 'OFF' && shift != 'AL') {
+          if (notifier._isWorkingShift(shift)) {
             count++;
           }
         }
@@ -511,7 +527,7 @@ class AISuggestionEngine {
       for (int i = 0; i < 7; i++) {
         final date = now.add(Duration(days: i));
         final shift = notifier.getShiftForDate(staff.name, date);
-        if (shift != 'OFF' && shift != 'AL') {
+        if (notifier._isWorkingShift(shift)) {
           weekShifts++;
         }
         if (prefs.preferredDaysOff.contains(date.weekday) && shift != 'OFF') {
@@ -583,7 +599,7 @@ class AISuggestionEngine {
       for (final staff in notifier.staffMembers) {
         if (!staff.isActive) continue;
         final shift = notifier.getShiftForDate(staff.name, date);
-        if (shift == 'OFF' || shift == 'AL') continue;
+        if (!notifier._isWorkingShift(shift)) continue;
         final baseShift = _normalizeCoverageShiftType(shift);
         counts[baseShift] = (counts[baseShift] ?? 0) + 1;
       }
@@ -604,12 +620,18 @@ class AISuggestionEngine {
           final payload = notifier.constraints.allowAiOverrides
               ? _findCoverageCandidateForShift(baseType, date)
               : null;
+          final crossRosterHints = payload == null
+              ? notifier.getCrossRosterCoverageHints(date)
+              : const <String>[];
+          final hintText = crossRosterHints.isNotEmpty
+              ? ' Linked roster options: ${crossRosterHints.join(', ')}.'
+              : '';
           suggestions.add(
             models.AiSuggestion(
               id: '${DateTime.now().millisecondsSinceEpoch}_shiftgap_${baseType}_${date.toIso8601String()}',
               title: 'Coverage Gap ($baseType)',
               description:
-                  'Only $staffed staff on $baseType shift for ${_formatDate(date)} (target: $minCount).',
+                  'Only $staffed staff on $baseType shift for ${_formatDate(date)} (target: $minCount).$hintText',
               reason: 'Shift coverage is below the minimum target.',
               priority: models.SuggestionPriority.high,
               type: models.SuggestionType.coverage,
@@ -703,13 +725,31 @@ class AISuggestionEngine {
     DateTime date,
   ) {
     if (!notifier.constraints.allowAiOverrides) return null;
+    Map<String, dynamic>? restRiskCandidate;
     for (final staff in notifier.staffMembers) {
       if (!staff.isActive) continue;
       final shift = notifier.getShiftForDate(staff.name, date);
       if (shift == 'OFF') {
+        if (notifier.isLinkedStaffWorkingElsewhere(staff.id, date)) {
+          continue;
+        }
         final preferences = staff.preferences;
         if (preferences != null &&
             preferences.preferredDaysOff.contains(date.weekday)) {
+          continue;
+        }
+        final workedPrevElsewhere = notifier.isLinkedStaffWorkingElsewhere(
+          staff.id,
+          date.subtract(const Duration(days: 1)),
+        );
+        if (workedPrevElsewhere && restRiskCandidate == null) {
+          restRiskCandidate = {
+            'personName': staff.name,
+            'date': date.toIso8601String(),
+            'shift': shiftType,
+            'reason': 'AI shift coverage fill (rest risk override)',
+            'restRisk': true,
+          };
           continue;
         }
         return {
@@ -720,7 +760,50 @@ class AISuggestionEngine {
         };
       }
     }
-    return null;
+    return restRiskCandidate;
+  }
+
+  List<models.AiSuggestion> _checkToilOpportunities() {
+    final suggestions = <models.AiSuggestion>[];
+    final settings = notifier.appSettings;
+    if (!settings.toilEnabled) return suggestions;
+
+    final overtimeByStaff = <String, double>{};
+    for (final entry in notifier.tickSheetEntries) {
+      final hours = entry.overtimeHours ?? 0;
+      if (hours <= 0) continue;
+      if (entry.convertToToil) continue;
+      overtimeByStaff.update(
+        entry.staffId,
+        (value) => value + hours,
+        ifAbsent: () => hours,
+      );
+    }
+
+    for (final entry in overtimeByStaff.entries) {
+      if (entry.value < 4) continue;
+      final staff = notifier.staffMembers
+          .firstWhere((s) => s.id == entry.key, orElse: () {
+        return models.StaffMember(id: entry.key, name: entry.key);
+      });
+      suggestions.add(
+        models.AiSuggestion(
+          id: '${DateTime.now().millisecondsSinceEpoch}_toil_${entry.key}',
+          title: 'Convert overtime to TOIL',
+          description:
+              '${staff.name} logged ${entry.value.toStringAsFixed(1)} overtime hours without TOIL conversion. Consider applying ${settings.toilMultiplier.toStringAsFixed(2)}x TOIL.',
+          reason: 'Overtime hours can be converted into time off in lieu.',
+          priority: models.SuggestionPriority.medium,
+          type: models.SuggestionType.leave,
+          createdDate: DateTime.now(),
+          affectedStaff: [staff.name],
+          impactScore: 0.12,
+          confidence: 0.55,
+        ),
+      );
+    }
+
+    return suggestions;
   }
 
   String _normalizeCoverageShiftType(String shift) {
@@ -743,13 +826,31 @@ class AISuggestionEngine {
 
   Map<String, dynamic>? _findCoverageCandidate(DateTime date) {
     if (!notifier.constraints.allowAiOverrides) return null;
+    Map<String, dynamic>? restRiskCandidate;
     for (final staff in notifier.staffMembers) {
       if (!staff.isActive) continue;
       final shift = notifier.getShiftForDate(staff.name, date);
       if (shift == 'OFF') {
+        if (notifier.isLinkedStaffWorkingElsewhere(staff.id, date)) {
+          continue;
+        }
         final preferences = staff.preferences;
         if (preferences != null &&
             preferences.preferredDaysOff.contains(date.weekday)) {
+          continue;
+        }
+        final workedPrevElsewhere = notifier.isLinkedStaffWorkingElsewhere(
+          staff.id,
+          date.subtract(const Duration(days: 1)),
+        );
+        if (workedPrevElsewhere && restRiskCandidate == null) {
+          restRiskCandidate = {
+            'personName': staff.name,
+            'date': date.toIso8601String(),
+            'shift': 'D',
+            'reason': 'AI coverage fill (rest risk override)',
+            'restRisk': true,
+          };
           continue;
         }
         return {
@@ -760,7 +861,7 @@ class AISuggestionEngine {
         };
       }
     }
-    return null;
+    return restRiskCandidate;
   }
 
   Map<String, dynamic>? _findSwapCandidate(
@@ -792,7 +893,13 @@ class AISuggestionEngine {
 
 // Roster Provider - Main state management
 final rosterProvider = ChangeNotifierProvider<RosterNotifier>((ref) {
-  return RosterNotifier();
+  final roster = RosterNotifier();
+  roster.updateAppSettings(ref.read(settingsProvider));
+  ref.listen<models.AppSettings>(
+    settingsProvider,
+    (_, next) => roster.updateAppSettings(next),
+  );
+  return roster;
 });
 
 class SyncConflict {
@@ -840,14 +947,17 @@ class RosterNotifier extends ChangeNotifier {
   List<models.AuditLogEntry> auditLogs = [];
   List<models.PresenceEntry> presenceEntries = [];
   List<models.TimeClockEntry> timeClockEntries = [];
+  List<models.TickSheetEntry> tickSheetEntries = [];
   List<models.RosterUpdate> recentUpdates = [];
   List<models.GeneratedRosterTemplate> generatedRosters = [];
   List<models.RosterSnapshot> rosterSnapshots = [];
+  SyncConflict? pendingConflict;
   models.GeneratedRosterTemplate? quickBaseTemplate;
   List<models.GeneratedRosterTemplate> quickVariationPresets = [];
   models.PatternPropagationSettings? propagationSettings;
   models.PatternRecognitionResult? lastPatternRecognition;
   models.RosterConstraints constraints = const models.RosterConstraints();
+  models.AppSettings appSettings = const models.AppSettings();
   bool readOnly = false;
   String? sharedAccessCode;
   String? sharedRosterName;
@@ -860,6 +970,12 @@ class RosterNotifier extends ChangeNotifier {
   int _nextStaffId = 1;
   final Map<String, String> _shiftCache = {};
   final Map<String, bool> _unavailableCache = {};
+  final Map<String, Map<String, bool>> _linkedRosterWorkByStaffDate = {};
+  final Map<String, Set<String>> _linkedRosterNamesByStaff = {};
+  final Map<String, String> _linkedRosterStaffNames = {};
+  final Set<String> _currentRosterStaffIds = {};
+  static const String _hiddenRosterIdsKey = 'hiddenRosterIds';
+  DateTime? _linkedRosterCacheAt;
   late AISuggestionEngine _aiEngine;
   Timer? _autoSaveTimer;
   Timer? _syncTimer;
@@ -880,6 +996,262 @@ class RosterNotifier extends ChangeNotifier {
   RosterNotifier() {
     _aiEngine = AISuggestionEngine(this);
     _startAutoSave();
+  }
+
+  String _generateStaffId() {
+    final now = DateTime.now().microsecondsSinceEpoch;
+    final rand = Random().nextInt(1 << 20);
+    return '${now.toRadixString(36)}${rand.toRadixString(36)}';
+  }
+
+  String _ensureUniqueStaffName(String name, {String? ignoreStaffId}) {
+    final trimmed = name.trim();
+    if (trimmed.isEmpty) return trimmed;
+    final lowerExisting = staffMembers
+        .where((s) => ignoreStaffId == null || s.id != ignoreStaffId)
+        .map((s) => s.name.toLowerCase())
+        .toSet();
+    if (!lowerExisting.contains(trimmed.toLowerCase())) {
+      return trimmed;
+    }
+    var i = 2;
+    while (true) {
+      final candidate = '$trimmed ($i)';
+      if (!lowerExisting.contains(candidate.toLowerCase())) {
+        return candidate;
+      }
+      i += 1;
+    }
+  }
+
+  void _triggerHolidayAutoSync() {
+    Future(() async {
+      final cachedSettings = await _loadCachedSettings();
+      if (cachedSettings != null) {
+        await autoSyncDefaultHolidaysIfNeeded(cachedSettings);
+      }
+    });
+  }
+
+  Future<void> refreshLinkedRosterAvailability({
+    int days = 30,
+    bool force = false,
+  }) async {
+    if (!AwsService.instance.isAuthenticated) return;
+    final currentRosterId = AwsService.instance.currentRosterId;
+    if (currentRosterId == null || currentRosterId.isEmpty) return;
+    if (!force && _linkedRosterCacheAt != null) {
+      final age = DateTime.now().difference(_linkedRosterCacheAt!);
+      if (age.inMinutes < 20) return;
+    }
+    try {
+      final rosters = await AwsService.instance.getUserRosters();
+      final currentRosterEntry = rosters.firstWhere(
+        (entry) {
+          final roster = entry['rosters'] as Map?;
+          final id = roster?['id']?.toString() ?? entry['roster_id']?.toString();
+          return id == currentRosterId;
+        },
+        orElse: () => {},
+      );
+      final currentRoster =
+          currentRosterEntry['rosters'] as Map<String, dynamic>?;
+      final currentOrgId = currentRoster?['org_id']?.toString();
+      _linkedRosterWorkByStaffDate.clear();
+      _linkedRosterNamesByStaff.clear();
+      _linkedRosterStaffNames.clear();
+      _currentRosterStaffIds
+        ..clear()
+        ..addAll(staffMembers.map((s) => s.id));
+
+      if (currentOrgId == null || currentOrgId.isEmpty) {
+        _linkedRosterCacheAt = DateTime.now();
+        return;
+      }
+
+      final start = DateTime.now();
+      final daysRange = List.generate(days, (i) => start.add(Duration(days: i)));
+
+      for (final entry in rosters) {
+        final roster = entry['rosters'] as Map<String, dynamic>?;
+        if (roster == null) continue;
+        final rosterId = roster['id']?.toString() ?? '';
+        if (rosterId.isEmpty || rosterId == currentRosterId) continue;
+        if (roster['org_id']?.toString() != currentOrgId) continue;
+        final rosterName = roster['name']?.toString() ?? 'Roster';
+        final dataResponse =
+            await AwsService.instance.loadRosterData(rosterId);
+        final rosterData =
+            dataResponse?['data'] as Map<String, dynamic>? ?? {};
+        final staffList =
+            (rosterData['staffMembers'] as List?)?.cast<dynamic>() ?? [];
+        final overrides =
+            (rosterData['overrides'] as List?)?.cast<dynamic>() ?? [];
+        final masterPattern =
+            (rosterData['masterPattern'] as List?)?.cast<dynamic>() ?? [];
+        final cycleLength =
+            (rosterData['cycleLength'] as int?) ?? masterPattern.length;
+
+        for (final rawStaff in staffList) {
+          final staff = Map<String, dynamic>.from(rawStaff as Map);
+          final staffId = staff['id']?.toString();
+          final staffName = staff['name']?.toString() ?? '';
+          if (staffId == null || staffId.isEmpty || staffName.isEmpty) continue;
+          if (!_linkedRosterWorkByStaffDate.containsKey(staffId)) {
+            _linkedRosterWorkByStaffDate[staffId] = {};
+          }
+          _linkedRosterStaffNames.putIfAbsent(staffId, () => staffName);
+          _linkedRosterNamesByStaff
+              .putIfAbsent(staffId, () => <String>{})
+              .add(rosterName);
+          for (final day in daysRange) {
+            final shift = _resolveShiftFromExternalRoster(
+              staff: staff,
+              overrides: overrides,
+              masterPattern: masterPattern,
+              cycleLength: cycleLength,
+              date: day,
+              staffName: staffName,
+            );
+            final working = _isWorkingShift(shift);
+            if (working) {
+              final key = DateFormat('yyyy-MM-dd').format(day);
+              _linkedRosterWorkByStaffDate[staffId]![key] = true;
+            }
+          }
+        }
+      }
+      _linkedRosterCacheAt = DateTime.now();
+    } catch (e) {
+      debugPrint('Linked roster availability refresh error: $e');
+    }
+  }
+
+  bool isLinkedStaffWorkingElsewhere(String staffId, DateTime date) {
+    final map = _linkedRosterWorkByStaffDate[staffId];
+    if (map == null || map.isEmpty) return false;
+    final key = DateFormat('yyyy-MM-dd').format(date);
+    return map[key] == true;
+  }
+
+  List<String> getCrossRosterCoverageHints(
+    DateTime date, {
+    int maxResults = 3,
+    bool allowRestRisk = true,
+  }) {
+    if (_linkedRosterWorkByStaffDate.isEmpty) return [];
+    final key = DateFormat('yyyy-MM-dd').format(date);
+    final prevKey =
+        DateFormat('yyyy-MM-dd').format(date.subtract(const Duration(days: 1)));
+    final results = <String>[];
+
+    for (final entry in _linkedRosterWorkByStaffDate.entries) {
+      final staffId = entry.key;
+      if (_currentRosterStaffIds.contains(staffId)) {
+        continue;
+      }
+      final workedToday = entry.value[key] == true;
+      if (workedToday) continue;
+      final workedPrev = entry.value[prevKey] == true;
+      if (workedPrev && !allowRestRisk) continue;
+      final rosterNames = _linkedRosterNamesByStaff[staffId]?.toList() ?? [];
+      final label = rosterNames.isNotEmpty
+          ? '${rosterNames.join(', ')}'
+          : 'linked roster';
+      final staffName = _linkedRosterStaffName(staffId);
+      final restNote = workedPrev ? ' (rest risk)' : '';
+      results.add('$staffName - $label$restNote');
+      if (results.length >= maxResults) break;
+    }
+    return results;
+  }
+
+  String _linkedRosterStaffName(String staffId) {
+    final cached = _linkedRosterStaffNames[staffId];
+    if (cached != null && cached.isNotEmpty) {
+      return cached;
+    }
+    final local = staffMembers.firstWhere(
+      (s) => s.id == staffId,
+      orElse: () => models.StaffMember(id: '', name: '', isActive: false),
+    );
+    if (local.id.isNotEmpty) return local.name;
+    return staffId;
+  }
+
+  bool _isLeaveShift(String shift) {
+    final normalized = shift.trim().toUpperCase();
+    if (normalized.isEmpty) return false;
+    return normalized == 'AL' || normalized == 'TOIL';
+  }
+
+  bool _isWorkingShift(String shift) {
+    final normalized = shift.trim().toUpperCase();
+    if (normalized.isEmpty) return false;
+    if (normalized == 'OFF') return false;
+    return !_isLeaveShift(normalized);
+  }
+
+  String _resolveShiftFromExternalRoster({
+    required Map<String, dynamic> staff,
+    required List overrides,
+    required List masterPattern,
+    required int cycleLength,
+    required DateTime date,
+    required String staffName,
+  }) {
+    if (!_isExternalStaffActiveOnDate(staff, date)) {
+      return '';
+    }
+    for (final raw in overrides) {
+      final override = Map<String, dynamic>.from(raw as Map);
+      if ((override['personName']?.toString() ?? '') != staffName) {
+        continue;
+      }
+      final dateStr = override['date']?.toString() ?? '';
+      if (dateStr.isEmpty) continue;
+      final overrideDate = DateTime.tryParse(dateStr);
+      if (overrideDate == null) continue;
+      if (overrideDate.year == date.year &&
+          overrideDate.month == date.month &&
+          overrideDate.day == date.day) {
+        return override['shift']?.toString() ?? '';
+      }
+    }
+
+    final referenceDate = DateTime(2024, 1, 1);
+    final daysSinceReference = date.difference(referenceDate).inDays;
+    final effectiveCycle = cycleLength > 0 ? cycleLength : masterPattern.length;
+    if (effectiveCycle <= 0 || masterPattern.isEmpty) return 'OFF';
+    final cycleDay = daysSinceReference % (effectiveCycle * 7);
+    final week = cycleDay ~/ 7;
+    final day = cycleDay % 7;
+    if (week < masterPattern.length) {
+      final weekPattern = masterPattern[week] as List;
+      if (day < weekPattern.length) {
+        return weekPattern[day].toString();
+      }
+    }
+    return 'OFF';
+  }
+
+  bool _isExternalStaffActiveOnDate(
+    Map<String, dynamic> staff,
+    DateTime date,
+  ) {
+    final isActive = staff['isActive'] as bool? ?? true;
+    final startStr = staff['startDate']?.toString();
+    final endStr = staff['endDate']?.toString();
+    if (!isActive && endStr == null) return false;
+    if (startStr != null && startStr.isNotEmpty) {
+      final startDate = DateTime.tryParse(startStr);
+      if (startDate != null && date.isBefore(startDate)) return false;
+    }
+    if (endStr != null && endStr.isNotEmpty) {
+      final endDate = DateTime.tryParse(endStr);
+      if (endDate != null && date.isAfter(endDate)) return false;
+    }
+    return true;
   }
 
   @override
@@ -904,23 +1276,61 @@ class RosterNotifier extends ChangeNotifier {
     focusRequestDate = null;
   }
 
+  void updateAppSettings(models.AppSettings settings) {
+    appSettings = settings;
+    notifyListeners();
+  }
+
   String _normalizeShiftType(String shift) {
     if (shift.isEmpty) return shift;
-    if (shift == 'OFF' || shift == 'AL') return shift;
+    if (shift == 'OFF' || shift == 'AL' || shift == 'TOIL') return shift;
     final match = RegExp(r'^([A-Za-z]+)').firstMatch(shift.trim());
     return (match?.group(1) ?? shift).toUpperCase();
+  }
+
+  String _normalizeOverrideInput(String shift, String reason) {
+    if (shift.isEmpty) return shift;
+    final raw = shift.trim();
+    final upper = raw.toUpperCase();
+    if (upper == 'AL' || upper == 'A/L') return 'AL';
+    if (upper == 'TOIL' || upper == 'TIL') return 'TOIL';
+    if (upper.contains('ANNUAL') || upper.contains('LEAVE')) return 'AL';
+    if (upper.contains('TOIL') ||
+        upper.contains('IN LIEU') ||
+        upper.contains('TIME OFF')) {
+      return 'TOIL';
+    }
+    if (upper == 'OFF' || upper == 'REST' || upper == 'R') return 'R';
+    if (upper == 'DAY') return 'D';
+    if (upper == 'NIGHT') return 'N';
+    if (upper == 'EARLY') return 'E';
+    if (upper == 'LATE') return 'L';
+    final reasonLower = reason.toLowerCase();
+    if (reasonLower.contains('annual') || reasonLower.contains('leave')) {
+      return 'AL';
+    }
+    if (reasonLower.contains('toil') ||
+        reasonLower.contains('time off') ||
+        reasonLower.contains('in lieu')) {
+      return 'TOIL';
+    }
+    return _normalizeShiftType(raw);
   }
 
   String _normalizeOverrideShift(models.Override override) {
     final raw = override.shift.toUpperCase();
     if (raw == 'AL') return 'AL';
+    if (raw == 'TOIL') return 'TOIL';
     if (raw != 'L') return raw;
     final reason = (override.reason ?? '').toLowerCase();
     final isLeaveReason = reason.contains('leave') ||
         reason.contains('holiday') ||
         reason.contains('annual') ||
         reason.contains('sick') ||
-        reason.contains('secondment');
+        reason.contains('secondment') ||
+        reason.contains('toil') ||
+        reason.contains('time off') ||
+        reason.contains('in lieu');
     return isLeaveReason ? 'AL' : raw;
   }
 
@@ -1145,12 +1555,13 @@ class RosterNotifier extends ChangeNotifier {
 
   // Enhanced Staff Management
   void addStaff(String name) {
+    final safeName = _ensureUniqueStaffName(name);
     final newStaff = models.StaffMember(
-      id: (_nextStaffId++).toString(),
-      name: name.trim(),
+      id: _generateStaffId(),
+      name: safeName,
     );
     staffMembers.add(newStaff.copyWith(startDate: DateTime.now()));
-    _addHistory('Staff Added', 'Added staff member: $name');
+    _addHistory('Staff Added', 'Added staff member: $safeName');
     _rememberStaffNames([newStaff.name]);
     _scheduleAutoSave();
     _scheduleCloudSync();
@@ -1191,14 +1602,18 @@ class RosterNotifier extends ChangeNotifier {
         index < staffMembers.length &&
         newName.trim().isNotEmpty) {
       final oldName = staffMembers[index].name;
-      staffMembers[index] = staffMembers[index].copyWith(name: newName.trim());
+      final safeName = _ensureUniqueStaffName(
+        newName.trim(),
+        ignoreStaffId: staffMembers[index].id,
+      );
+      staffMembers[index] = staffMembers[index].copyWith(name: safeName);
 
       // Update all overrides with the new name
       for (var i = 0; i < overrides.length; i++) {
         if (overrides[i].personName == oldName) {
           overrides[i] = models.Override(
             id: overrides[i].id,
-            personName: newName.trim(),
+            personName: safeName,
             date: overrides[i].date,
             shift: overrides[i].shift,
             reason: overrides[i].reason,
@@ -1207,8 +1622,8 @@ class RosterNotifier extends ChangeNotifier {
         }
       }
 
-      _addHistory('Staff Renamed', 'Renamed $oldName to ${newName.trim()}');
-      _rememberStaffNames([newName.trim()]);
+      _addHistory('Staff Renamed', 'Renamed $oldName to $safeName');
+      _rememberStaffNames([safeName]);
       _scheduleAutoSave();
       _scheduleCloudSync();
       notifyListeners();
@@ -1219,6 +1634,109 @@ class RosterNotifier extends ChangeNotifier {
     final index = staffMembers.indexWhere((s) => s.id == staffId);
     if (index != -1) {
       renameStaff(index, newName);
+    }
+  }
+
+  void applyStaffNamesReplace(List<String> names) {
+    final cleaned = names
+        .map((name) => name.trim())
+        .where((name) => name.isNotEmpty)
+        .toList();
+    if (cleaned.isEmpty) return;
+    final updates = <String, String>{};
+    final count = cleaned.length.clamp(0, staffMembers.length);
+    for (var i = 0; i < count; i++) {
+      final oldName = staffMembers[i].name;
+      final newName = cleaned[i];
+      if (oldName != newName) {
+        staffMembers[i] = staffMembers[i].copyWith(name: newName);
+        updates[oldName] = newName;
+      }
+    }
+    if (cleaned.length > staffMembers.length) {
+      for (var i = staffMembers.length; i < cleaned.length; i++) {
+        final newStaff = models.StaffMember(
+          id: (_nextStaffId++).toString(),
+          name: cleaned[i],
+        );
+        staffMembers.add(newStaff.copyWith(startDate: DateTime.now()));
+      }
+    }
+    if (updates.isNotEmpty) {
+      for (var i = 0; i < overrides.length; i++) {
+        final old = overrides[i].personName;
+        final renamed = updates[old];
+        if (renamed == null) continue;
+        overrides[i] = models.Override(
+          id: overrides[i].id,
+          personName: renamed,
+          date: overrides[i].date,
+          shift: overrides[i].shift,
+          reason: overrides[i].reason,
+          createdAt: overrides[i].createdAt,
+        );
+      }
+    }
+    _addHistory(
+      'Staff Updated',
+      'Replaced ${cleaned.length} staff name(s) top-down',
+    );
+    _rememberStaffNames(cleaned);
+    _scheduleAutoSave();
+    _scheduleCloudSync();
+    notifyListeners();
+  }
+
+  void applyStaffNamesAppend(List<String> names) {
+    final cleaned = names
+        .map((name) => name.trim())
+        .where((name) => name.isNotEmpty)
+        .toList();
+    if (cleaned.isEmpty) return;
+    for (final name in cleaned) {
+      final newStaff = models.StaffMember(
+        id: (_nextStaffId++).toString(),
+        name: name,
+      );
+      staffMembers.add(newStaff.copyWith(startDate: DateTime.now()));
+    }
+    _addHistory('Staff Added', 'Appended ${cleaned.length} staff name(s)');
+    _rememberStaffNames(cleaned);
+    _scheduleAutoSave();
+    _scheduleCloudSync();
+    notifyListeners();
+  }
+
+  void applyStaffRenames(Map<String, String> renames) {
+    if (renames.isEmpty) return;
+    final updates = <String, String>{};
+    for (var i = 0; i < staffMembers.length; i++) {
+      final oldName = staffMembers[i].name;
+      final newName = renames[oldName] ?? renames[oldName.trim()];
+      if (newName != null && newName.trim().isNotEmpty) {
+        staffMembers[i] = staffMembers[i].copyWith(name: newName.trim());
+        updates[oldName] = newName.trim();
+      }
+    }
+    if (updates.isNotEmpty) {
+      for (var i = 0; i < overrides.length; i++) {
+        final old = overrides[i].personName;
+        final renamed = updates[old];
+        if (renamed == null) continue;
+        overrides[i] = models.Override(
+          id: overrides[i].id,
+          personName: renamed,
+          date: overrides[i].date,
+          shift: overrides[i].shift,
+          reason: overrides[i].reason,
+          createdAt: overrides[i].createdAt,
+        );
+      }
+      _addHistory('Staff Renamed', 'Renamed ${updates.length} staff name(s)');
+      _rememberStaffNames(updates.values.toList());
+      _scheduleAutoSave();
+      _scheduleCloudSync();
+      notifyListeners();
     }
   }
 
@@ -1629,8 +2147,11 @@ class RosterNotifier extends ChangeNotifier {
       );
 
       if (shouldSave) {
-        final newVersion = await AwsService.instance
-            .saveRosterData(currentRosterId, toJson());
+        final newVersion = await AwsService.instance.saveRosterData(
+          currentRosterId,
+          toJson(),
+          reason: 'auto-sync',
+        );
         _lastSyncedVersion = newVersion;
         _lastSyncedAt = DateTime.now();
         _addHistory('Sync', 'Saved roster to cloud');
@@ -1728,6 +2249,7 @@ class RosterNotifier extends ChangeNotifier {
       final newVersion = await AwsService.instance.saveRosterData(
         AwsService.instance.currentRosterId ?? 'local',
         data,
+        reason: 'manual sync',
       );
       _lastSyncedVersion = newVersion;
       _lastSyncedAt = DateTime.now();
@@ -1751,10 +2273,13 @@ class RosterNotifier extends ChangeNotifier {
     try {
       final conflict = await checkForSyncConflict();
       if (conflict != null) {
+        pendingConflict = conflict;
+        notifyListeners();
         _addHistory('Sync', 'Auto-sync skipped due to conflict');
         return false;
       }
       await syncToAWS();
+      pendingConflict = null;
       return true;
     } catch (e) {
       debugPrint('Auto-sync error: $e');
@@ -1784,8 +2309,16 @@ class RosterNotifier extends ChangeNotifier {
     fromJson(data);
     _lastSyncedVersion = version;
     _lastSyncedAt = DateTime.now();
+    pendingConflict = null;
     _addHistory('Sync', 'Loaded remote data due to conflict');
     notifyListeners();
+  }
+
+  Future<void> tryProcessPendingSync() async {
+    if (readOnly) return;
+    if (!AwsService.instance.isAuthenticated) return;
+    if (AwsService.instance.currentRosterId == null) return;
+    await _processPendingSync();
   }
 
   Future<void> exportData() async {
@@ -1837,11 +2370,13 @@ class RosterNotifier extends ChangeNotifier {
         _lastSyncedAt = _parseDateTime(data['last_modified']);
         readOnly = false;
         sharedAccessCode = null;
+        AwsService.instance.sharedAccessCode = null;
         sharedRosterName = null;
         sharedRole = null;
         _addHistory('Sync', 'Loaded roster from cloud');
         await saveToLocal();
         notifyListeners();
+        _triggerHolidayAutoSync();
       }
     } catch (e) {
       debugPrint('Load from AWS error: $e');
@@ -1860,9 +2395,13 @@ class RosterNotifier extends ChangeNotifier {
       fromJson(Map<String, dynamic>.from(data as Map));
       AwsService.instance.currentRosterId = response['rosterId'] as String?;
       sharedAccessCode = code;
+      AwsService.instance.sharedAccessCode = code;
       sharedRosterName = response['rosterName'] as String?;
       sharedRole = response['role'] as String? ?? 'viewer';
-      readOnly = sharedRole != 'editor';
+      final canEditShared = sharedRole == 'editor' &&
+          AwsService.instance.isAuthenticated &&
+          await AwsService.instance.isCachedSubscriptionPaidActive();
+      readOnly = !canEditShared;
       final remoteVersion = response['version'];
       if (remoteVersion is int) {
         _lastSyncedVersion = remoteVersion;
@@ -1871,13 +2410,31 @@ class RosterNotifier extends ChangeNotifier {
       if (lastModifiedRaw is String) {
         _lastSyncedAt = DateTime.tryParse(lastModifiedRaw);
       }
+      await _cacheSharedRoster(code, response);
       _addHistory(
         'Shared Roster',
         'Opened shared roster ${sharedRosterName ?? ''}'.trim(),
       );
       notifyListeners();
+      _triggerHolidayAutoSync();
     } catch (e) {
       final message = e.toString().toLowerCase();
+      if (message.contains('socket') ||
+          message.contains('network') ||
+          message.contains('timeout') ||
+          message.contains('connection') ||
+          message.contains('failed host lookup')) {
+        final cached = await _loadSharedRosterCache(code);
+        if (cached) {
+          _addHistory(
+            'Shared Roster',
+            'Opened cached shared roster ${sharedRosterName ?? ''}'.trim(),
+          );
+          notifyListeners();
+          _triggerHolidayAutoSync();
+          return;
+        }
+      }
       if (message.contains('404') ||
           message.contains('not found') ||
           message.contains('invalid code')) {
@@ -1890,6 +2447,61 @@ class RosterNotifier extends ChangeNotifier {
         throw Exception('Access code has reached its usage limit.');
       }
       rethrow;
+    }
+  }
+
+  Future<void> _cacheSharedRoster(
+    String code,
+    Map<String, dynamic> response,
+  ) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final payload = {
+        'code': code,
+        'rosterId': response['rosterId'],
+        'rosterName': response['rosterName'],
+        'role': response['role'],
+        'version': response['version'],
+        'last_modified': response['last_modified'],
+        'data': response['data'],
+        'cachedAt': DateTime.now().toIso8601String(),
+      };
+      await prefs.setString(
+        'shared_roster_cache_$code',
+        jsonEncode(payload),
+      );
+    } catch (e) {
+      debugPrint('Shared roster cache error: $e');
+    }
+  }
+
+  Future<bool> _loadSharedRosterCache(String code) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString('shared_roster_cache_$code');
+      if (raw == null || raw.isEmpty) return false;
+      final payload = jsonDecode(raw) as Map<String, dynamic>;
+      final data = payload['data'];
+      if (data == null) return false;
+      fromJson(Map<String, dynamic>.from(data as Map));
+      AwsService.instance.currentRosterId = payload['rosterId'] as String?;
+      sharedAccessCode = code;
+      AwsService.instance.sharedAccessCode = code;
+      sharedRosterName = payload['rosterName'] as String?;
+      sharedRole = payload['role'] as String? ?? 'viewer';
+      readOnly = true;
+      final version = payload['version'];
+      if (version is int) {
+        _lastSyncedVersion = version;
+      }
+      final lastModified = payload['last_modified'];
+      if (lastModified is String) {
+        _lastSyncedAt = DateTime.tryParse(lastModified);
+      }
+      return true;
+    } catch (e) {
+      debugPrint('Shared roster cache load error: $e');
+      return false;
     }
   }
 
@@ -1910,6 +2522,30 @@ class RosterNotifier extends ChangeNotifier {
       guestName: guestName,
     );
     _addHistory('Leave Request', 'Submitted guest leave request');
+  }
+
+  Future<void> submitSharedRosterRequest({
+    required models.AvailabilityType type,
+    required String guestName,
+    required DateTime startDate,
+    DateTime? endDate,
+    String? notes,
+  }) async {
+    if (sharedAccessCode == null || sharedAccessCode!.isEmpty) {
+      throw Exception('No shared access code available');
+    }
+    await AwsService.instance.submitSharedRequestWithCode(
+      code: sharedAccessCode!,
+      type: type.name,
+      startDate: startDate,
+      endDate: endDate,
+      notes: notes,
+      guestName: guestName,
+    );
+    _addHistory(
+      'Roster Request',
+      'Submitted guest ${type.name} request',
+    );
   }
 
   void applyRemoteUpdate(models.RosterUpdate update) {
@@ -2109,6 +2745,7 @@ class RosterNotifier extends ChangeNotifier {
         // AI suggestions refresh is now manual to avoid heavy background work.
 
         notifyListeners();
+        _triggerHolidayAutoSync();
       }
     } catch (e) {
       debugPrint('Load error: $e');
@@ -2131,6 +2768,7 @@ class RosterNotifier extends ChangeNotifier {
       'shiftLocks': shiftLocks.map((l) => l.toJson()).toList(),
       'changeProposals': changeProposals.map((p) => p.toJson()).toList(),
       'auditLogs': auditLogs.map((l) => l.toJson()).toList(),
+      'tickSheetEntries': tickSheetEntries.map((e) => e.toJson()).toList(),
       'generatedRosters': generatedRosters.map((t) => t.toJson()).toList(),
       'rosterSnapshots': rosterSnapshots.map((s) => s.toJson()).toList(),
       'quickVariationPresets':
@@ -2212,6 +2850,12 @@ class RosterNotifier extends ChangeNotifier {
                 ))
             .toList() ??
         [];
+    tickSheetEntries = (json['tickSheetEntries'] as List?)
+            ?.map((e) => models.TickSheetEntry.fromJson(
+                  Map<String, dynamic>.from(e as Map),
+                ))
+            .toList() ??
+        [];
     generatedRosters = (json['generatedRosters'] as List?)
             ?.map((t) => models.GeneratedRosterTemplate.fromJson(
                   Map<String, dynamic>.from(t as Map),
@@ -2255,13 +2899,23 @@ class RosterNotifier extends ChangeNotifier {
     cycleLength = json['cycleLength'] as int? ?? 16;
     numPeople = json['numPeople'] as int? ?? 16;
     weekStartDay = json['weekStartDay'] as int? ?? 0;
-    _nextStaffId = json['_nextStaffId'] as int? ??
-        (staffMembers.isNotEmpty
-            ? staffMembers
-                    .map((s) => int.parse(s.id))
-                    .reduce((a, b) => a > b ? a : b) +
-                1
-            : 1);
+    _nextStaffId = json['_nextStaffId'] as int? ?? (staffMembers.length + 1);
+
+    final seenIds = <String>{};
+    final updatedStaff = <models.StaffMember>[];
+    for (final staff in staffMembers) {
+      var id = staff.id;
+      if (id.trim().isEmpty || seenIds.contains(id)) {
+        id = _generateStaffId();
+      }
+      seenIds.add(id);
+      final safeName = _ensureUniqueStaffName(
+        staff.name,
+        ignoreStaffId: id,
+      );
+      updatedStaff.add(staff.copyWith(id: id, name: safeName));
+    }
+    staffMembers = updatedStaff;
 
     if (masterPattern.isEmpty) {
       _generateDefaultPattern();
@@ -2305,8 +2959,8 @@ class RosterNotifier extends ChangeNotifier {
       staffMembers = List.generate(
         numPeople,
         (i) => models.StaffMember(
-          id: (_nextStaffId++).toString(),
-          name: 'Person ${i + 1}',
+          id: _generateStaffId(),
+          name: _ensureUniqueStaffName('Person ${i + 1}'),
         ),
       );
     }
@@ -2328,6 +2982,7 @@ class RosterNotifier extends ChangeNotifier {
     }
 
     notifyListeners();
+    _triggerHolidayAutoSync();
   }
 
   // Pattern management
@@ -2597,10 +3252,6 @@ class RosterNotifier extends ChangeNotifier {
       return '';
     }
     final key = _cacheKey(personName, date);
-    final cached = _shiftCache[key];
-    if (cached != null) {
-      return cached;
-    }
     // Check for overrides first
     final override = overrides.firstWhere(
       (o) =>
@@ -2623,9 +3274,18 @@ class RosterNotifier extends ChangeNotifier {
       return resolved;
     }
 
-    // Calculate from master pattern
-    final referenceDate = DateTime(2024, 1, 1);
-    final daysSinceReference = date.difference(referenceDate).inDays;
+    if (_isHiddenOnCurrentRosterByName(personName)) {
+      _shiftCache[key] = 'OFF';
+      return 'OFF';
+    }
+
+    final cached = _shiftCache[key];
+    if (cached != null) {
+      return cached;
+    }
+
+    // Calculate from master pattern using date-only UTC to avoid DST drift
+    final daysSinceReference = _daysSinceReference(date);
 
     // Check if pattern propagation is active
     if (propagationSettings?.isActive == true) {
@@ -2642,6 +3302,82 @@ class RosterNotifier extends ChangeNotifier {
     }
 
     return 'OFF';
+  }
+
+  String _tickDateKey(DateTime date) {
+    final normalized = DateTime(date.year, date.month, date.day);
+    return DateFormat('yyyy-MM-dd').format(normalized);
+  }
+
+  models.TickSheetEntry? getTickSheetEntry(String staffId, DateTime date) {
+    final key = _tickDateKey(date);
+    return tickSheetEntries
+        .where((entry) => entry.staffId == staffId && entry.date == key)
+        .firstOrNull;
+  }
+
+  void updateTickSheetEntry({
+    required String staffId,
+    required DateTime date,
+    required String status,
+    String? comment,
+    double? overtimeHours,
+    String? overtimeJobNumber,
+    String? overtimeLocation,
+    String? overtimeReason,
+    bool? convertToToil,
+  }) {
+    final key = _tickDateKey(date);
+    final settings = appSettings;
+    final shouldConvert = convertToToil ??
+        (settings.toilEnabled &&
+            settings.toilAutoConvertOvertime &&
+            (overtimeHours ?? 0) > 0);
+    final toilHours = (settings.toilEnabled && shouldConvert)
+        ? (overtimeHours ?? 0) * settings.toilMultiplier
+        : null;
+    tickSheetEntries.removeWhere(
+      (entry) => entry.staffId == staffId && entry.date == key,
+    );
+    tickSheetEntries.add(
+      models.TickSheetEntry(
+        staffId: staffId,
+        date: key,
+        status: status,
+        comment: comment,
+        overtimeHours: overtimeHours,
+        overtimeJobNumber: overtimeJobNumber,
+        overtimeLocation: overtimeLocation,
+        overtimeReason: overtimeReason,
+        convertToToil: shouldConvert,
+        toilHours: toilHours,
+        updatedAt: DateTime.now(),
+        updatedBy:
+            AwsService.instance.userEmail ?? AwsService.instance.displayName,
+      ),
+    );
+    _addHistory(
+      'Tick Sheet',
+      'Updated tick sheet for $staffId on $key ($status)',
+    );
+    saveToLocal();
+    notifyListeners();
+  }
+
+  void clearTickSheetEntry({
+    required String staffId,
+    required DateTime date,
+  }) {
+    final key = _tickDateKey(date);
+    tickSheetEntries.removeWhere(
+      (entry) => entry.staffId == staffId && entry.date == key,
+    );
+    _addHistory(
+      'Tick Sheet',
+      'Cleared tick sheet for $staffId on $key',
+    );
+    saveToLocal();
+    notifyListeners();
   }
 
   void saveRosterSnapshot({
@@ -2993,6 +3729,11 @@ class RosterNotifier extends ChangeNotifier {
     if (!isStaffActiveOnDateByName(personName, date)) {
       return '';
     }
+    if (_isHiddenOnCurrentRosterByName(personName)) {
+      final key = _cacheKey(personName, date);
+      _shiftCache[key] = 'OFF';
+      return 'OFF';
+    }
 
     final referenceDate = DateTime(2024, 1, 1);
     final key = _cacheKey(personName, date);
@@ -3019,8 +3760,7 @@ class RosterNotifier extends ChangeNotifier {
   }
 
   String getPatternShiftForDate(String personName, DateTime date) {
-    final referenceDate = DateTime(2024, 1, 1);
-    final daysSinceReference = date.difference(referenceDate).inDays;
+    final daysSinceReference = _daysSinceReference(date);
     final cycleDay = daysSinceReference % (cycleLength * 7);
     final week = cycleDay ~/ 7;
     final day = cycleDay % 7;
@@ -3034,12 +3774,10 @@ class RosterNotifier extends ChangeNotifier {
   String _getShiftWithPropagation(String personName, DateTime date) {
     if (propagationSettings == null) return 'OFF';
 
-    final adjustedDate = date
+    final adjustedDate = _dateOnlyUtc(date)
         .subtract(Duration(days: propagationSettings!.weekShift * 7))
         .subtract(Duration(days: propagationSettings!.dayShift));
-
-    final referenceDate = DateTime(2024, 1, 1);
-    final daysSinceReference = adjustedDate.difference(referenceDate).inDays;
+    final daysSinceReference = _daysSinceReference(adjustedDate);
 
     final cycleDay = daysSinceReference % (cycleLength * 7);
     final week = cycleDay ~/ 7;
@@ -3056,6 +3794,15 @@ class RosterNotifier extends ChangeNotifier {
     }
 
     return 'OFF';
+  }
+
+  DateTime _dateOnlyUtc(DateTime date) {
+    return DateTime.utc(date.year, date.month, date.day);
+  }
+
+  int _daysSinceReference(DateTime date) {
+    final referenceDate = DateTime.utc(2024, 1, 1);
+    return _dateOnlyUtc(date).difference(referenceDate).inDays;
   }
 
   // Pattern propagation
@@ -3655,12 +4402,13 @@ class RosterNotifier extends ChangeNotifier {
     String newShift,
     String reason,
   ) {
+    final normalizedShift = _normalizeOverrideInput(newShift, reason);
     final currentShift = getShiftForDate(person, date);
     if (_isShiftLocked(date, currentShift, person) ||
-        _isShiftLocked(date, newShift, person)) {
+        _isShiftLocked(date, normalizedShift, person)) {
       _addHistory(
         'Change Blocked',
-        'Shift locked on ${_formatDate(date)} for $newShift',
+        'Shift locked on ${_formatDate(date)} for $normalizedShift',
       );
       return;
     }
@@ -3673,19 +4421,22 @@ class RosterNotifier extends ChangeNotifier {
           o.date.day == date.day,
     );
 
-    if (newShift.isNotEmpty) {
+    if (normalizedShift.isNotEmpty) {
       overrides.add(
         models.Override(
           id: DateTime.now().millisecondsSinceEpoch.toString(),
           personName: person,
           date: date,
-          shift: newShift,
-          reason: reason,
+          shift: normalizedShift,
+          reason: reason.isEmpty && normalizedShift == 'AL'
+              ? 'Annual leave'
+              : reason,
           createdAt: DateTime.now(),
         ),
       );
     }
-    final newEffectiveShift = newShift.isNotEmpty ? newShift : baseShift;
+    final newEffectiveShift =
+        normalizedShift.isNotEmpty ? normalizedShift : baseShift;
     _adjustLeaveBalanceForOverrideChange(
       person,
       currentShift,
@@ -3693,7 +4444,7 @@ class RosterNotifier extends ChangeNotifier {
     );
     _addHistory(
       'Change Applied',
-      'Set $person on ${_formatDate(date)} to $newShift',
+      'Set $person on ${_formatDate(date)} to $normalizedShift',
     );
     _scheduleCloudSync();
     notifyListeners();
@@ -4107,6 +4858,7 @@ class RosterNotifier extends ChangeNotifier {
   Future<void> refreshAiSuggestions() async {
     aiSuggestions.clear();
     try {
+      await refreshLinkedRosterAvailability();
       if (AiService.instance.isConfigured &&
           AwsService.instance.isAuthenticated) {
         final suggestions = await AiService.instance.generateRosterSuggestions(
@@ -4309,7 +5061,7 @@ class RosterNotifier extends ChangeNotifier {
       for (final staff in staffMembers) {
         if (!staff.isActive) continue;
         final shift = getShiftForDate(staff.name, date);
-        if (shift == 'OFF' || shift == 'AL') continue;
+        if (!_isWorkingShift(shift)) continue;
         counts[shift] = (counts[shift] ?? 0) + 1;
       }
       heatmap[dateKey] = counts;
@@ -4558,6 +5310,70 @@ class RosterNotifier extends ChangeNotifier {
     return isStaffActiveOnDate(staff, date);
   }
 
+  Set<String> _getHiddenRosterIds(models.StaffMember staff) {
+    final data = staff.metadata?[_hiddenRosterIdsKey];
+    if (data is List) {
+      return data.map((e) => e.toString()).toSet();
+    }
+    if (data is Set) {
+      return data.map((e) => e.toString()).toSet();
+    }
+    return <String>{};
+  }
+
+  bool isStaffHiddenOnRoster(String staffId, String rosterId) {
+    if (rosterId.isEmpty) return false;
+    final staff = staffMembers.where((s) => s.id == staffId).firstOrNull;
+    if (staff == null) return false;
+    return _getHiddenRosterIds(staff).contains(rosterId);
+  }
+
+  bool _isHiddenOnCurrentRosterByName(String personName) {
+    final rosterId = AwsService.instance.currentRosterId ?? '';
+    if (rosterId.isEmpty) return false;
+    final staff = staffMembers.where((s) => s.name == personName).firstOrNull;
+    if (staff == null) return false;
+    return _getHiddenRosterIds(staff).contains(rosterId);
+  }
+
+  void setStaffHiddenOnCurrentRoster(String staffId, bool hidden) {
+    final rosterId = AwsService.instance.currentRosterId;
+    if (rosterId == null || rosterId.isEmpty) return;
+    final index = staffMembers.indexWhere((s) => s.id == staffId);
+    if (index == -1) return;
+    final current = staffMembers[index];
+    final hiddenIds = _getHiddenRosterIds(current);
+    if (hidden) {
+      hiddenIds.add(rosterId);
+    } else {
+      hiddenIds.remove(rosterId);
+    }
+    final updatedMetadata = Map<String, dynamic>.from(current.metadata ?? {});
+    updatedMetadata[_hiddenRosterIdsKey] = hiddenIds.toList()..sort();
+    staffMembers[index] = current.copyWith(metadata: updatedMetadata);
+    _shiftCache.clear();
+    _scheduleCloudSync();
+    notifyListeners();
+  }
+
+  void updateStaffMetadata(String staffId, Map<String, dynamic> updates) {
+    final index = staffMembers.indexWhere((s) => s.id == staffId);
+    if (index == -1) return;
+    final current = staffMembers[index];
+    final updated = Map<String, dynamic>.from(current.metadata ?? {});
+    updates.forEach((key, value) {
+      if (value == null) {
+        updated.remove(key);
+      } else {
+        updated[key] = value;
+      }
+    });
+    staffMembers[index] = current.copyWith(metadata: updated);
+    _scheduleCloudSync();
+    saveToLocal();
+    notifyListeners();
+  }
+
   List<models.StaffMember> getStaffForRange(DateTime start, DateTime end) {
     return staffMembers.where((staff) {
       if (!staff.isActive && staff.endDate == null) return false;
@@ -4572,16 +5388,41 @@ class RosterNotifier extends ChangeNotifier {
     }).toList();
   }
 
+  List<models.StaffMember> getVisibleStaffForRange(
+    DateTime start,
+    DateTime end,
+  ) {
+    final rosterId = AwsService.instance.currentRosterId ?? '';
+    final staffInRange = getStaffForRange(start, end);
+    if (rosterId.isEmpty) return staffInRange;
+
+    return staffInRange.where((staff) {
+      if (!isStaffHiddenOnRoster(staff.id, rosterId)) {
+        return true;
+      }
+      var cursor = DateTime(start.year, start.month, start.day);
+      final last = DateTime(end.year, end.month, end.day);
+      while (!cursor.isAfter(last)) {
+        final shift = getShiftForDate(staff.name, cursor);
+        if (shift.isNotEmpty && _isWorkingShift(shift)) {
+          return true;
+        }
+        cursor = cursor.add(const Duration(days: 1));
+      }
+      return false;
+    }).toList();
+  }
+
   List<String> getShiftTypes() {
     final types = <String>{};
     for (final week in masterPattern) {
       for (final shift in week) {
-        if (shift == 'OFF' || shift == 'AL') continue;
+        if (!_isWorkingShift(shift)) continue;
         types.add(shift);
       }
     }
     for (final override in overrides) {
-      if (override.shift == 'OFF' || override.shift == 'AL') continue;
+      if (!_isWorkingShift(override.shift)) continue;
       types.add(override.shift);
     }
     return types.toList()..sort();
@@ -4608,7 +5449,7 @@ class RosterNotifier extends ChangeNotifier {
           .where((s) => s.isActive)
           .where((s) {
             final shift = getShiftForDate(s.name, date);
-            return shift != 'OFF' && shift != 'AL';
+            return _isWorkingShift(shift);
           })
           .length;
       final minStaff = (date.weekday == DateTime.saturday ||
@@ -4625,7 +5466,7 @@ class RosterNotifier extends ChangeNotifier {
         for (final staff in staffMembers) {
           if (!staff.isActive) continue;
           final shift = getShiftForDate(staff.name, date);
-          if (shift == 'OFF' || shift == 'AL') continue;
+          if (!_isWorkingShift(shift)) continue;
           counts[shift] = (counts[shift] ?? 0) + 1;
         }
         final dayKey = date.weekday.toString();
@@ -4646,7 +5487,7 @@ class RosterNotifier extends ChangeNotifier {
       for (int i = 0; i < daysAhead; i++) {
         final date = now.add(Duration(days: i));
         final shift = getShiftForDate(staff.name, date);
-        if (shift != 'OFF' && shift != 'AL') {
+        if (_isWorkingShift(shift)) {
           currentConsecutive++;
           if (currentConsecutive > constraints.maxConsecutiveDays) {
             maxConsecutiveViolations++;
@@ -4663,10 +5504,7 @@ class RosterNotifier extends ChangeNotifier {
           final nextDate = now.add(Duration(days: i + 1));
           final shift = getShiftForDate(staff.name, date);
           final nextShift = getShiftForDate(staff.name, nextDate);
-          if (shift != 'OFF' &&
-              shift != 'AL' &&
-              nextShift != 'OFF' &&
-              nextShift != 'AL') {
+          if (_isWorkingShift(shift) && _isWorkingShift(nextShift)) {
             minRestViolations++;
           }
         }
@@ -4707,7 +5545,7 @@ class RosterNotifier extends ChangeNotifier {
         for (int i = 0; i < daysAhead; i++) {
           final date = now.add(Duration(days: i));
           final shift = getShiftForDate(staff.name, date);
-          if (shift != 'OFF' && shift != 'AL') {
+          if (_isWorkingShift(shift)) {
             hours += 8;
           }
         }
@@ -4815,7 +5653,7 @@ class RosterNotifier extends ChangeNotifier {
       for (final staff in staffMembers) {
         if (!staff.isActive) continue;
         final shift = getShiftForDate(staff.name, date);
-        if (shift != 'OFF' && shift != 'AL') {
+        if (_isWorkingShift(shift)) {
           staffed++;
         }
       }
@@ -4842,7 +5680,7 @@ class RosterNotifier extends ChangeNotifier {
       for (int i = 0; i < daysAhead; i++) {
         final date = now.add(Duration(days: i));
         final shift = getShiftForDate(staff.name, date);
-        if (shift != 'OFF' && shift != 'AL') {
+        if (_isWorkingShift(shift)) {
           shifts++;
         }
       }
@@ -4878,7 +5716,7 @@ class RosterNotifier extends ChangeNotifier {
           continue;
         }
         final shift = getShiftForDate(staff.name, date);
-        if (shift != 'OFF' && shift != 'AL') {
+        if (_isWorkingShift(shift)) {
           shifts++;
         }
       }
@@ -4935,6 +5773,7 @@ class RosterNotifier extends ChangeNotifier {
     constraints = const models.RosterConstraints();
     readOnly = false;
     sharedAccessCode = null;
+    AwsService.instance.sharedAccessCode = null;
     sharedRosterName = null;
     sharedRole = null;
     _nextStaffId = 1;
@@ -5002,6 +5841,85 @@ class RosterNotifier extends ChangeNotifier {
     };
   }
 
+  Future<void> autoSyncDefaultHolidaysIfNeeded(
+    models.AppSettings settings,
+  ) async {
+    if (!settings.autoHolidaySyncEnabled) return;
+    if (readOnly) return;
+    if (staffMembers.isEmpty && masterPattern.isEmpty) return;
+    final rosterId = AwsService.instance.currentRosterId;
+    final rosterKey =
+        (rosterId == null || rosterId.isEmpty) ? 'local' : rosterId;
+
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final today = DateTime.now().toIso8601String().substring(0, 10);
+      final countries = settings.autoHolidayCountries.isNotEmpty
+          ? settings.autoHolidayCountries
+          : const ['US', 'GB', 'CN', 'IN'];
+      final normalized = countries
+          .map((c) => c.toUpperCase())
+          .toSet()
+          .toList()
+        ..sort();
+      final countriesKey = normalized.join(',');
+      final key = 'holiday_auto_sync_$rosterKey';
+      final last = prefs.getString(key);
+      if (last == '$today|$countriesKey') return;
+
+      final years = <int>{DateTime.now().year, DateTime.now().year + 1};
+      final holidays = <HolidayItem>[];
+      for (final country in normalized) {
+        for (final year in years) {
+          final fetched = await HolidayService.instance.getHolidays(
+            countryCode: country,
+            year: year,
+          );
+          final label = normalized.length > 1 ? ' ($country)' : '';
+          holidays.addAll(
+            fetched.map(
+              (item) => HolidayItem(
+                date: item.date,
+                name: '${item.name}$label',
+                localName: '${item.localName}$label',
+                types: item.types,
+              ),
+            ),
+          );
+        }
+      }
+
+      if (holidays.isNotEmpty) {
+        await importHolidays(
+          holidays: holidays,
+          addEvents: true,
+          applyLeaveOverrides: false,
+          staffNames: const [],
+        );
+        await saveToLocal();
+        if (settings.autoSync) {
+          await autoSyncToAWS();
+        }
+      }
+
+      await prefs.setString(key, '$today|$countriesKey');
+    } catch (e) {
+      debugPrint('Auto holiday sync error: $e');
+    }
+  }
+
+  Future<models.AppSettings?> _loadCachedSettings() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString('app_settings');
+      if (raw == null || raw.trim().isEmpty) return null;
+      final decoded = jsonDecode(raw) as Map<String, dynamic>;
+      return models.AppSettings.fromJson(decoded);
+    } catch (_) {
+      return null;
+    }
+  }
+
   bool get hasUnsavedChanges {
     if (staffMembers.isEmpty && overrides.isEmpty && events.isEmpty) {
       return false;
@@ -5028,7 +5946,7 @@ class RosterNotifier extends ChangeNotifier {
       for (int i = 0; i < horizonDays; i++) {
         final date = now.add(Duration(days: i));
         final shift = getShiftForDate(staff.name, date);
-        if (shift != 'OFF' && shift != 'AL') {
+        if (_isWorkingShift(shift)) {
           count++;
           totalShifts++;
           if (rate > 0) {
@@ -5063,7 +5981,9 @@ class RosterNotifier extends ChangeNotifier {
       'activeStaff': activeStaff.length,
       'totalOverrides': overrides.length,
       'totalEvents': events.length,
-      'totalLeaveDays': overrides.where((o) => o.shift == 'AL').length,
+      'totalLeaveDays': overrides
+          .where((o) => _isLeaveShift(o.shift))
+          .length,
       'aiSuggestions': aiSuggestions.length,
       'unreadSuggestions': aiSuggestions.where((s) => !s.isRead).length,
       'patternPropagationActive': propagationSettings?.isActive ?? false,

@@ -1,6 +1,7 @@
 import 'dart:io';
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 class SafeTextField extends StatefulWidget {
@@ -106,7 +107,7 @@ class _SafeTextFieldState extends State<SafeTextField> {
 
   @override
   Widget build(BuildContext context) {
-    final isAndroid = Platform.isAndroid;
+    final isAndroid = !kIsWeb && Platform.isAndroid;
     final multiLine = (widget.maxLines != null && widget.maxLines != 1) ||
         widget.expands ||
         (widget.minLines != null && widget.minLines! > 1);

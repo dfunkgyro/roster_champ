@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:intl/intl.dart';
 import 'providers.dart';
 
 class StatsView extends ConsumerWidget {
@@ -10,6 +11,34 @@ class StatsView extends ConsumerWidget {
     final roster = ref.watch(rosterProvider);
     final stats = roster.getStatistics();
 
+    return DefaultTabController(
+      length: 2,
+      child: Column(
+        children: [
+          const TabBar(
+            tabs: [
+              Tab(text: 'Insights'),
+              Tab(text: 'Audit trail'),
+            ],
+          ),
+          Expanded(
+            child: TabBarView(
+              children: [
+                _buildStatsList(context, stats, roster),
+                _buildAuditTrailTab(context, roster),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildStatsList(
+    BuildContext context,
+    Map<String, dynamic> stats,
+    dynamic roster,
+  ) {
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
@@ -33,6 +62,43 @@ class StatsView extends ConsumerWidget {
         const SizedBox(height: 16),
         _buildAISuggestionsCard(context, stats),
       ],
+    );
+  }
+
+  Widget _buildAuditTrailTab(BuildContext context, dynamic roster) {
+    final logs = List.of(roster.auditLogs);
+    logs.sort((a, b) => b.timestamp.compareTo(a.timestamp));
+    if (logs.isEmpty) {
+      return const Center(child: Text('No audit activity yet.'));
+    }
+    final formatter = DateFormat('yyyy-MM-dd HH:mm');
+    return ListView.separated(
+      padding: const EdgeInsets.all(16),
+      itemCount: logs.length,
+      separatorBuilder: (_, __) => const SizedBox(height: 12),
+      itemBuilder: (context, index) {
+        final entry = logs[index];
+        final timestamp = formatter.format(entry.timestamp.toLocal());
+        final meta = entry.metadata.isEmpty
+            ? null
+            : entry.metadata.entries
+                .map((e) => '${e.key}: ${e.value}')
+                .join(' · ');
+        return Card(
+          child: ListTile(
+            leading: const Icon(Icons.history),
+            title: Text(entry.action.isEmpty ? 'Roster update' : entry.action),
+            subtitle: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('User: ${entry.userId.isEmpty ? 'unknown' : entry.userId}'),
+                Text('Time: $timestamp'),
+                if (meta != null) Text(meta),
+              ],
+            ),
+          ),
+        );
+      },
     );
   }
 

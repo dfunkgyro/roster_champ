@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'login_screen.dart';
+import '../import_roster_screen.dart';
 import '../utils/error_handler.dart';
 import 'package:roster_champ/safe_text_field.dart';
 
@@ -302,6 +303,25 @@ class _WelcomeScreenState extends State<WelcomeScreen>
             ),
           ),
         ),
+        const SizedBox(height: 12),
+        SizedBox(
+          width: double.infinity,
+          child: OutlinedButton.icon(
+            onPressed: _isLoading ? null : _openTemplateCodeDialog,
+            icon: const Icon(Icons.copy_all_rounded),
+            label: const Text(
+              'Paste Template Code',
+              style: TextStyle(fontSize: 16),
+            ),
+            style: OutlinedButton.styleFrom(
+              padding: const EdgeInsets.symmetric(vertical: 16),
+              foregroundColor: Theme.of(context).colorScheme.onSurface,
+              side: BorderSide(
+                color: Theme.of(context).colorScheme.onSurface.withOpacity(0.4),
+              ),
+            ),
+          ),
+        ),
       ],
     );
   }
@@ -354,6 +374,62 @@ class _WelcomeScreenState extends State<WelcomeScreen>
               }
             },
             child: const Text('Open'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _openTemplateCodeDialog() async {
+    final codeController = TextEditingController();
+    final passwordController = TextEditingController();
+    await showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Paste Template Code'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            SafeTextField(
+              controller: codeController,
+              decoration: const InputDecoration(
+                labelText: 'Template code (starts with RC2-)',
+                border: OutlineInputBorder(),
+              ),
+              maxLines: 3,
+            ),
+            const SizedBox(height: 12),
+            SafeTextField(
+              controller: passwordController,
+              decoration: const InputDecoration(
+                labelText: 'Password (optional)',
+                border: OutlineInputBorder(),
+              ),
+              obscureText: true,
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () {
+              final code = codeController.text.trim();
+              if (code.isEmpty) return;
+              Navigator.pop(context);
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (context) => ImportRosterScreen(
+                    initialTemplateCode: code,
+                    initialTemplatePassword: passwordController.text.trim(),
+                  ),
+                ),
+              );
+            },
+            child: const Text('Continue'),
           ),
         ],
       ),

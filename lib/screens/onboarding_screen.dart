@@ -4,6 +4,7 @@ import 'package:google_fonts/google_fonts.dart';
 import '../home_screen.dart';
 import '../providers.dart';
 import '../dialogs.dart';
+import '../import_roster_screen.dart';
 
 class OnboardingScreen extends ConsumerStatefulWidget {
   final bool isGuestMode;
@@ -109,10 +110,10 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Icon(
-            Icons.calendar_today_rounded,
-            size: 80,
-            color: Theme.of(context).colorScheme.primary,
+          Image.asset(
+            'assets/images/rc1c.gif',
+            height: 120,
+            fit: BoxFit.contain,
           ),
           const SizedBox(height: 32),
           Text(
@@ -183,6 +184,13 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
             size: 60,
             color: Theme.of(context).colorScheme.primary,
           ),
+          const SizedBox(height: 12),
+          Image.asset(
+            'assets/images/rc1gold1img1a.gif',
+            height: 80,
+            fit: BoxFit.contain,
+            semanticLabel: 'Roster Champion mascot',
+          ),
           const SizedBox(height: 32),
           Text(
             'Setup Your Roster',
@@ -209,7 +217,27 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
               padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
             ),
           ),
+          const SizedBox(height: 12),
+          OutlinedButton.icon(
+            onPressed: _openTemplateImport,
+            icon: const Icon(Icons.qr_code_rounded),
+            label: const Text('Use Template Code'),
+            style: OutlinedButton.styleFrom(
+              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+            ),
+          ),
         ],
+      ),
+    );
+  }
+
+  Future<void> _openTemplateImport() async {
+    await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => const ImportRosterScreen(
+          openTemplateOnStart: true,
+        ),
       ),
     );
   }
@@ -220,10 +248,10 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Icon(
-            Icons.check_circle_rounded,
-            size: 80,
-            color: Colors.green,
+          Image.asset(
+            'assets/images/rc1gold1a.gif',
+            height: 120,
+            fit: BoxFit.contain,
           ),
           const SizedBox(height: 32),
           Text(

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_fonts/google_fonts.dart';
+import '../aws_service.dart';
 import '../providers.dart';
 import '../models.dart' as models;
 import 'package:roster_champ/safe_text_field.dart';
@@ -61,15 +62,29 @@ class _PatternEditorScreenState extends ConsumerState<PatternEditorScreen> {
       appBar: AppBar(
         title: const Text('Pattern Editor'),
         actions: [
-          IconButton(
-            icon: const Icon(Icons.add),
-            onPressed: _addWeek,
-            tooltip: 'Add Week',
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 6),
+            child: TextButton.icon(
+              onPressed: _removeWeek,
+              icon: const Icon(Icons.remove),
+              label: const Text('Remove Week'),
+            ),
           ),
-          IconButton(
-            icon: const Icon(Icons.remove),
-            onPressed: _removeWeek,
-            tooltip: 'Remove Week',
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 6),
+            child: TextButton.icon(
+              onPressed: _addWeek,
+              icon: const Icon(Icons.add),
+              label: const Text('Add Week'),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 6),
+            child: FilledButton.icon(
+              onPressed: _applyPatternChanges,
+              icon: const Icon(Icons.check_circle_outline),
+              label: const Text('Apply'),
+            ),
           ),
           PopupMenuButton<String>(
             onSelected: (value) {
@@ -150,11 +165,7 @@ class _PatternEditorScreenState extends ConsumerState<PatternEditorScreen> {
           ),
         ],
       ),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: _analyzePattern,
-        icon: const Icon(Icons.psychology),
-        label: const Text('AI Analysis'),
-      ),
+      floatingActionButton: null,
     );
   }
 
@@ -553,6 +564,18 @@ class _PatternEditorScreenState extends ConsumerState<PatternEditorScreen> {
         const SnackBar(content: Text('Cannot remove the last week')),
       );
     }
+  }
+
+  Future<void> _applyPatternChanges() async {
+    final roster = ref.read(rosterProvider);
+    await roster.saveToLocal();
+    if (AwsService.instance.isAuthenticated && !roster.readOnly) {
+      await roster.autoSyncToAWS();
+    }
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Pattern applied')),
+    );
   }
 
   void _analyzePattern() async {

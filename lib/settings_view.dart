@@ -11,9 +11,17 @@ import 'services/analytics_service.dart';
 import 'services/voice_service.dart';
 import 'services/adaptive_learning_service.dart';
 import 'package:roster_champ/safe_text_field.dart';
+import 'screens/paywall_screen.dart';
+
+enum SettingsMode { basic, advanced }
 
 class SettingsView extends ConsumerWidget {
-  const SettingsView({super.key});
+  const SettingsView({
+    super.key,
+    this.mode = SettingsMode.advanced,
+  });
+
+  final SettingsMode mode;
 
   static const String _privacyUrl = 'https://rosterchampion.com/privacy';
   static const String _termsUrl = 'https://rosterchampion.com/terms';
@@ -24,6 +32,31 @@ class SettingsView extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final settings = ref.watch(settingsProvider);
     final roster = ref.watch(rosterProvider);
+
+    List<Widget> buildWithSpacing(List<Widget> sections) {
+      final widgets = <Widget>[];
+      for (var i = 0; i < sections.length; i++) {
+        widgets.add(sections[i]);
+        if (i != sections.length - 1) {
+          widgets.add(const SizedBox(height: 16));
+        }
+      }
+      return widgets;
+    }
+
+    if (mode == SettingsMode.basic) {
+      return ListView(
+        padding: const EdgeInsets.all(16),
+        children: buildWithSpacing([
+          _buildAccountSection(context, ref),
+          _buildBillingSection(context),
+          _buildHolidayMiniSection(context, ref, settings, roster),
+          _buildLocaleMiniSection(context, ref, settings, roster),
+          _buildNotificationsSection(context, ref, settings),
+          _buildAppearanceSection(context, ref, settings),
+        ]),
+      );
+    }
 
     return ListView(
       padding: const EdgeInsets.all(16),
@@ -50,7 +83,9 @@ class SettingsView extends ConsumerWidget {
         const SizedBox(height: 16),
         _buildMultiCountryHolidaySection(context, ref, settings),
         const SizedBox(height: 16),
-        _buildAccountSection(context),
+        _buildBillingSection(context),
+        const SizedBox(height: 16),
+        _buildAccountSection(context, ref),
         const SizedBox(height: 16),
         _buildRoleTemplatesSection(context),
         const SizedBox(height: 16),
@@ -178,6 +213,246 @@ class SettingsView extends ConsumerWidget {
             child: const Text('Add'),
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _buildHolidayMiniSection(
+    BuildContext context,
+    WidgetRef ref,
+    models.AppSettings settings,
+    dynamic roster,
+  ) {
+    final isReadOnly = roster.readOnly as bool? ?? false;
+    const freeTypes = [
+      'Public',
+      'Bank',
+      'Optional',
+      'School',
+      'Authorities',
+    ];
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(
+                  Icons.public,
+                  color: Theme.of(context).colorScheme.primary,
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  'Holidays & Locale',
+                  style: Theme.of(context).textTheme.titleMedium,
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            SwitchListTile(
+              title: const Text('Holiday overlay'),
+              subtitle: const Text('Show public holidays on roster'),
+              value: settings.showHolidayOverlay,
+              onChanged: isReadOnly
+                  ? null
+                  : (value) {
+                      ref.read(settingsProvider.notifier).updateSettings(
+                            settings.copyWith(showHolidayOverlay: value),
+                          );
+                    },
+              secondary: const Icon(Icons.event_available),
+              contentPadding: EdgeInsets.zero,
+            ),
+            const SizedBox(height: 8),
+            FutureBuilder<List<CountryInfo>>(
+              future: CountryService.instance.getCountries(),
+              builder: (context, snapshot) {
+                if (snapshot.connectionState == ConnectionState.waiting) {
+                  return const LinearProgressIndicator();
+                }
+                if (!snapshot.hasData) {
+                  return const Text('Unable to load country list.');
+                }
+                final countries = snapshot.data!;
+                final selected = countries.firstWhere(
+                  (c) => c.code == settings.holidayCountryCode,
+                  orElse: () => countries.first,
+                );
+                return DropdownButtonFormField<String>(
+                  value: selected.code,
+                  items: countries
+                      .map((country) => DropdownMenuItem(
+                            value: country.code,
+                            child: Text('${country.flag} ${country.name}'),
+                          ))
+                      .toList(),
+                  onChanged: isReadOnly
+                      ? null
+                      : (value) {
+                          if (value != null) {
+                            final chosen = countries.firstWhere(
+                              (c) => c.code == value,
+                              orElse: () => countries.first,
+                            );
+                            ref.read(settingsProvider.notifier).updateSettings(
+                                  settings.copyWith(
+                                    holidayCountryCode: value,
+                                    timeZone: chosen.timezones.isNotEmpty
+                                        ? chosen.timezones.first
+                                        : settings.timeZone,
+                                    siteLat: chosen.lat ?? settings.siteLat,
+                                    siteLon: chosen.lon ?? settings.siteLon,
+                                    siteName: chosen.name,
+                                  ),
+                                );
+                          }
+                        },
+                  decoration: const InputDecoration(
+                    labelText: 'Country',
+                    border: OutlineInputBorder(),
+                  ),
+                );
+              },
+            ),
+            const SizedBox(height: 12),
+            Text(
+              'Holiday types',
+              style: Theme.of(context).textTheme.titleSmall,
+            ),
+            const SizedBox(height: 6),
+            Wrap(
+              spacing: 8,
+              children: freeTypes.map((type) {
+                final selected = settings.holidayTypes.contains(type);
+                return FilterChip(
+                  label: Text(type),
+                  selected: selected,
+                  onSelected: isReadOnly
+                      ? null
+                      : (value) {
+                          final updated =
+                              List<String>.from(settings.holidayTypes);
+                          if (value) {
+                            if (!updated.contains(type)) {
+                              updated.add(type);
+                            }
+                          } else {
+                            updated.remove(type);
+                          }
+                          ref.read(settingsProvider.notifier).updateSettings(
+                                settings.copyWith(holidayTypes: updated),
+                              );
+                        },
+                );
+              }).toList(),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Public holidays only. API-key overlays remain in Advanced Settings.',
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildLocaleMiniSection(
+    BuildContext context,
+    WidgetRef ref,
+    models.AppSettings settings,
+    dynamic roster,
+  ) {
+    final isReadOnly = roster.readOnly as bool? ?? false;
+    final locationController =
+        TextEditingController(text: settings.siteName);
+    List<LocationResult> results = [];
+
+    return StatefulBuilder(
+      builder: (context, setState) => Card(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Icon(
+                    Icons.location_on_outlined,
+                    color: Theme.of(context).colorScheme.primary,
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    'Location & Timezone',
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              SafeTextField(
+                controller: locationController,
+                decoration: InputDecoration(
+                  labelText: 'Search location',
+                  border: const OutlineInputBorder(),
+                  suffixIcon: IconButton(
+                    icon: const Icon(Icons.search),
+                    onPressed: isReadOnly
+                        ? null
+                        : () async {
+                            final query = locationController.text.trim();
+                            if (query.isEmpty) return;
+                            try {
+                              final found =
+                                  await LocationService.instance.search(query);
+                              setState(() => results = found);
+                            } catch (e) {
+                              if (context.mounted) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  SnackBar(content: Text('Location error: $e')),
+                                );
+                              }
+                            }
+                          },
+                  ),
+                ),
+                readOnly: isReadOnly,
+              ),
+              if (results.isNotEmpty) ...[
+                const SizedBox(height: 8),
+                ...results.map(
+                  (result) => ListTile(
+                    title: Text(result.name),
+                    subtitle: Text(
+                      '${result.lat.toStringAsFixed(4)}, ${result.lon.toStringAsFixed(4)}',
+                    ),
+                    onTap: isReadOnly
+                        ? null
+                        : () {
+                            ref.read(settingsProvider.notifier).updateSettings(
+                                  settings.copyWith(
+                                    siteName: result.name,
+                                    siteLat: result.lat,
+                                    siteLon: result.lon,
+                                  ),
+                                );
+                            setState(() => results = []);
+                          },
+                  ),
+                ),
+              ],
+              const SizedBox(height: 8),
+              Text(
+                'Selected timezone: ${settings.timeZone}',
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -723,6 +998,19 @@ class SettingsView extends ConsumerWidget {
                 },
               );
             }),
+            const SizedBox(height: 8),
+            SwitchListTile(
+              title: const Text('Adjust for daylight saving time'),
+              subtitle: const Text(
+                'Night shifts adjust by the DST hour change on transition days.',
+              ),
+              value: settings.dstAdjustmentsEnabled,
+              onChanged: (value) {
+                ref.read(settingsProvider.notifier).updateSettings(
+                      settings.copyWith(dstAdjustmentsEnabled: value),
+                    );
+              },
+            ),
           ],
         ),
       ),
@@ -1352,6 +1640,26 @@ class SettingsView extends ConsumerWidget {
                 },
               ),
             const SizedBox(height: 8),
+            SwitchListTile(
+              title: const Text('Mute voice output'),
+              subtitle: const Text(
+                'RC will still listen and respond, but no audio will play.',
+              ),
+              value: settings.voiceOutputMuted,
+              onChanged: settings.voiceEnabled
+                  ? (value) {
+                      ref.read(settingsProvider.notifier).updateSettings(
+                            settings.copyWith(voiceOutputMuted: value),
+                          );
+                    }
+                  : null,
+              secondary: Icon(
+                settings.voiceOutputMuted
+                    ? Icons.volume_off_rounded
+                    : Icons.volume_up_rounded,
+              ),
+            ),
+            const SizedBox(height: 8),
             Text(
               'If offline, RC automatically falls back to on-device speech.',
               style: Theme.of(context).textTheme.bodySmall?.copyWith(
@@ -1371,6 +1679,14 @@ class SettingsView extends ConsumerWidget {
     dynamic roster,
   ) {
     final isReadOnly = roster.readOnly as bool? ?? false;
+    final isAdmin = AwsService.instance.isAdmin;
+    final autoCountries = settings.autoHolidayCountries.toSet();
+    const defaultAutoCountries = [
+      {'code': 'US', 'name': 'United States'},
+      {'code': 'GB', 'name': 'United Kingdom'},
+      {'code': 'CN', 'name': 'China'},
+      {'code': 'IN', 'name': 'India'},
+    ];
       const allTypes = [
         'Public',
         'Bank',
@@ -1457,6 +1773,83 @@ class SettingsView extends ConsumerWidget {
               },
             ),
             const SizedBox(height: 12),
+            Card(
+              margin: const EdgeInsets.only(bottom: 12),
+              color: Theme.of(context).colorScheme.surfaceVariant.withOpacity(0.4),
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        const Icon(Icons.auto_awesome_outlined),
+                        const SizedBox(width: 8),
+                        Text(
+                          'Auto Holiday Sync (Admin)',
+                          style: Theme.of(context).textTheme.titleSmall,
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    SwitchListTile(
+                      title: const Text('Auto-sync default countries daily'),
+                      subtitle: const Text(
+                        'Adds and updates holidays on existing rosters.',
+                      ),
+                      value: settings.autoHolidaySyncEnabled,
+                      onChanged: !isAdmin
+                          ? null
+                          : (value) {
+                              ref.read(settingsProvider.notifier).updateSettings(
+                                    settings.copyWith(
+                                      autoHolidaySyncEnabled: value,
+                                    ),
+                                  );
+                            },
+                      secondary: const Icon(Icons.sync_rounded),
+                    ),
+                    Wrap(
+                      spacing: 8,
+                      children: defaultAutoCountries.map((entry) {
+                        final code = entry['code']!;
+                        final name = entry['name']!;
+                        final selected = autoCountries.contains(code);
+                        return FilterChip(
+                          label: Text(name),
+                          selected: selected,
+                          onSelected: !isAdmin || !settings.autoHolidaySyncEnabled
+                              ? null
+                              : (value) {
+                                  final updated = autoCountries.toSet();
+                                  if (value) {
+                                    updated.add(code);
+                                  } else {
+                                    updated.remove(code);
+                                  }
+                                  ref
+                                      .read(settingsProvider.notifier)
+                                      .updateSettings(
+                                        settings.copyWith(
+                                          autoHolidayCountries: updated.toList(),
+                                        ),
+                                      );
+                                },
+                        );
+                      }).toList(),
+                    ),
+                    if (!isAdmin)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 8),
+                        child: Text(
+                          'Only admins can change auto holiday sync.',
+                          style: Theme.of(context).textTheme.bodySmall,
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ),
             Text(
               'Holiday types',
               style: Theme.of(context).textTheme.titleSmall,
@@ -1825,7 +2218,190 @@ class SettingsView extends ConsumerWidget {
     }
   }
 
-  Widget _buildAccountSection(BuildContext context) {
+  Widget _buildBillingSection(BuildContext context) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(
+                  Icons.credit_card,
+                  color: Theme.of(context).colorScheme.primary,
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  'Subscription',
+                  style: Theme.of(context).textTheme.titleLarge,
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            FutureBuilder<Map<String, dynamic>>(
+              future: AwsService.instance.getProfile(),
+              builder: (context, snapshot) {
+                final profile = snapshot.data ?? {};
+                final status =
+                    profile['subscriptionStatus']?.toString() ?? 'inactive';
+                final plan = profile['subscriptionPlan']?.toString() ?? 'none';
+                final periodEnd =
+                    profile['subscriptionPeriodEnd']?.toString();
+                final trialActive = profile['trialActive'] == true ||
+                    status.toLowerCase() == 'trialing';
+                final trialEndsAt = profile['trialEndsAt']?.toString() ??
+                    profile['trialExpiresAt']?.toString();
+                final trialEnds =
+                    trialEndsAt == null ? null : DateTime.tryParse(trialEndsAt);
+                final trialDaysRemaining = trialEnds == null
+                    ? 0
+                    : trialEnds.difference(DateTime.now()).inDays;
+                final isActive = status.toLowerCase() == 'active' ||
+                    status.toLowerCase() == 'trialing';
+                final usage = profile['usageSnapshot'] as Map<String, dynamic>?;
+                final usageRemaining =
+                    (usage?['remaining'] as Map?)?.cast<String, dynamic>() ??
+                        {};
+                final usageLimits =
+                    (usage?['limits'] as Map?)?.cast<String, dynamic>() ?? {};
+
+                void openPaywall() {
+                  Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (_) => PaywallScreen(
+                        subscriptionStatus: status,
+                        subscriptionPlan: plan,
+                        trialActive: trialActive,
+                        trialEndsAt: trialEndsAt,
+                      ),
+                    ),
+                  );
+                }
+
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Status: ${status.toUpperCase()}',
+                      style: Theme.of(context).textTheme.bodyLarge,
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      'Plan: ${plan.isEmpty ? 'none' : plan}',
+                      style: Theme.of(context).textTheme.bodyMedium,
+                    ),
+                    if (trialActive) ...[
+                      const SizedBox(height: 6),
+                      Text(
+                        trialDaysRemaining > 0
+                            ? 'Trial ends in $trialDaysRemaining day${trialDaysRemaining == 1 ? '' : 's'}'
+                            : 'Trial expired',
+                        style: Theme.of(context)
+                            .textTheme
+                            .bodySmall
+                            ?.copyWith(color: Colors.orange.shade700),
+                      ),
+                    ],
+                    if (periodEnd != null && periodEnd.isNotEmpty) ...[
+                      const SizedBox(height: 6),
+                      Text(
+                        'Renews: $periodEnd',
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    ],
+                    if (!isActive) ...[
+                      const SizedBox(height: 6),
+                      Text(
+                        'Access is suspended. Upgrade to restore full access.',
+                        style: Theme.of(context)
+                            .textTheme
+                            .bodySmall
+                            ?.copyWith(
+                              color: Theme.of(context).colorScheme.error,
+                            ),
+                      ),
+                    ],
+                    if (trialActive) ...[
+                      const SizedBox(height: 12),
+                      _TrialUpgradeBanner(onPressed: openPaywall),
+                    ],
+                    if (usageRemaining.isNotEmpty) const SizedBox(height: 12),
+                    const SizedBox(height: 12),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        OutlinedButton.icon(
+                          onPressed: AwsService.instance.isAuthenticated
+                              ? () async {
+                                  final url = await AwsService.instance
+                                      .createBillingPortal();
+                                  if (url != null) {
+                                    await _openExternal(context, url);
+                                  }
+                                }
+                              : null,
+                          icon: const Icon(Icons.swap_horiz_rounded),
+                          label: const Text('Switch Plan'),
+                        ),
+                        FilledButton(
+                          onPressed: () async {
+                            final url = await AwsService.instance
+                                .createCheckoutSession(plan: 'starter');
+                            if (url != null) {
+                              await _openExternal(context, url);
+                            }
+                          },
+                          child: const Text('Upgrade Starter'),
+                        ),
+                        FilledButton(
+                          onPressed: () async {
+                            final url = await AwsService.instance
+                                .createCheckoutSession(plan: 'operations');
+                            if (url != null) {
+                              await _openExternal(context, url);
+                            }
+                          },
+                          child: const Text('Upgrade Operations'),
+                        ),
+                        FilledButton(
+                          onPressed: () async {
+                            final url = await AwsService.instance
+                                .createCheckoutSession(plan: 'enterprise');
+                            if (url != null) {
+                              await _openExternal(context, url);
+                            }
+                          },
+                          child: const Text('Upgrade Enterprise'),
+                        ),
+                        OutlinedButton.icon(
+                          onPressed: AwsService.instance.isAuthenticated
+                              ? () async {
+                                  final url = await AwsService.instance
+                                      .createBillingPortal();
+                                  if (url != null) {
+                                    await _openExternal(context, url);
+                                  }
+                                }
+                              : null,
+                          icon: const Icon(Icons.manage_accounts),
+                          label: const Text('Manage / Cancel Subscription'),
+                        ),
+                      ],
+                    ),
+                  ],
+                );
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildAccountSection(BuildContext context, WidgetRef ref) {
+    final settings = ref.watch(settingsProvider);
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(16),
@@ -1851,6 +2427,65 @@ class SettingsView extends ConsumerWidget {
               style: Theme.of(context).textTheme.bodySmall,
             ),
             const SizedBox(height: 12),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Stay signed in on this device'),
+              subtitle: const Text(
+                'If disabled, you will be signed out when the app closes.',
+              ),
+              value: settings.staySignedIn,
+              onChanged: (value) {
+                ref.read(settingsProvider.notifier).updateSettings(
+                      settings.copyWith(
+                        staySignedIn: value,
+                        signOutOnExit: value ? false : settings.signOutOnExit,
+                      ),
+                    );
+              },
+            ),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Sign out when app closes'),
+              subtitle: const Text(
+                'Helpful when switching accounts on shared devices.',
+              ),
+              value: settings.signOutOnExit,
+              onChanged: (value) {
+                ref.read(settingsProvider.notifier).updateSettings(
+                      settings.copyWith(
+                        signOutOnExit: value,
+                        staySignedIn: value ? false : settings.staySignedIn,
+                      ),
+                    );
+              },
+            ),
+            const SizedBox(height: 8),
+            OutlinedButton.icon(
+              onPressed: () async {
+                try {
+                  final groups =
+                      await AwsService.instance.refreshPermissions();
+                  if (context.mounted) {
+                    final label =
+                        groups.isEmpty ? 'none' : groups.join(', ');
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: Text('Permissions refreshed. Groups: $label'),
+                      ),
+                    );
+                  }
+                } catch (e) {
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text('Refresh failed: $e')),
+                    );
+                  }
+                }
+              },
+              icon: const Icon(Icons.refresh),
+              label: const Text('Refresh Permissions'),
+            ),
+            const SizedBox(height: 8),
             FilledButton.icon(
               onPressed: () async {
                 await _confirmLogout(context);
@@ -2164,6 +2799,139 @@ class SettingsView extends ConsumerWidget {
           );
         },
       ),
+    );
+  }
+}
+
+class _QuotaChip extends StatelessWidget {
+  final String label;
+  final dynamic remaining;
+  final dynamic limit;
+
+  const _QuotaChip({
+    required this.label,
+    required this.remaining,
+    required this.limit,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final limitValue = limit is num ? limit.toInt() : null;
+    final remainingValue = remaining is num ? remaining.toInt() : null;
+    final text = limitValue == null
+        ? '$label: unlimited'
+        : '$label: ${remainingValue ?? 0} / $limitValue';
+    return Chip(
+      label: Text(text),
+      backgroundColor: theme.colorScheme.secondaryContainer.withOpacity(0.6),
+    );
+  }
+}
+
+class _TrialUpgradeBanner extends StatelessWidget {
+  final VoidCallback onPressed;
+
+  const _TrialUpgradeBanner({required this.onPressed});
+
+  @override
+  Widget build(BuildContext context) {
+    return _ShimmerButton(
+      onPressed: onPressed,
+      label: 'Upgrade to keep full access',
+      icon: Icons.auto_awesome,
+    );
+  }
+}
+
+class _ShimmerButton extends StatefulWidget {
+  final VoidCallback onPressed;
+  final String label;
+  final IconData icon;
+
+  const _ShimmerButton({
+    required this.onPressed,
+    required this.label,
+    required this.icon,
+  });
+
+  @override
+  State<_ShimmerButton> createState() => _ShimmerButtonState();
+}
+
+class _ShimmerButtonState extends State<_ShimmerButton>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1800),
+    )..repeat();
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final baseColor = Theme.of(context).colorScheme.primary;
+    return AnimatedBuilder(
+      animation: _controller,
+      builder: (context, child) {
+        final value = -1.0 + (_controller.value * 3.0);
+        return Container(
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(14),
+            gradient: LinearGradient(
+              begin: Alignment(-1 + value, -0.2),
+              end: Alignment(1 + value, 0.2),
+              colors: [
+                baseColor.withOpacity(0.6),
+                baseColor.withOpacity(0.9),
+                baseColor.withOpacity(0.6),
+              ],
+            ),
+            boxShadow: [
+              BoxShadow(
+                color: baseColor.withOpacity(0.3),
+                blurRadius: 16,
+                offset: const Offset(0, 6),
+              ),
+            ],
+          ),
+          child: Material(
+            color: Colors.transparent,
+            child: InkWell(
+              borderRadius: BorderRadius.circular(14),
+              onTap: widget.onPressed,
+              child: Padding(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(widget.icon, color: Colors.white),
+                    const SizedBox(width: 10),
+                    Text(
+                      widget.label,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
+      },
     );
   }
 }
