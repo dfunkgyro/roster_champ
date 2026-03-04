@@ -71,6 +71,7 @@ class AwsService {
   static const String _subPlanKey = 'subscription_plan';
   static const String _subCheckedAtKey = 'subscription_checked_at';
   static const String _subPeriodEndKey = 'subscription_period_end';
+  static const String _subTrialEndsAtKey = 'subscription_trial_ends_at';
 
   set onAuthStateChanged(Function(bool isAuthenticated)? callback) {
     _onAuthStateChanged = callback;
@@ -481,6 +482,7 @@ class AwsService {
     required String status,
     required String plan,
     String? periodEnd,
+    String? trialEndsAt,
   }) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_subStatusKey, status);
@@ -498,6 +500,15 @@ class AwsService {
         );
       }
     }
+    if (trialEndsAt != null && trialEndsAt.isNotEmpty) {
+      final parsed = DateTime.tryParse(trialEndsAt);
+      if (parsed != null) {
+        await prefs.setInt(
+          _subTrialEndsAtKey,
+          parsed.millisecondsSinceEpoch,
+        );
+      }
+    }
   }
 
   Future<Map<String, dynamic>> getCachedSubscription() async {
@@ -507,6 +518,7 @@ class AwsService {
       'plan': prefs.getString(_subPlanKey) ?? 'none',
       'checkedAt': prefs.getInt(_subCheckedAtKey),
       'periodEnd': prefs.getInt(_subPeriodEndKey),
+      'trialEndsAt': prefs.getInt(_subTrialEndsAtKey),
     };
   }
 
@@ -522,10 +534,14 @@ class AwsService {
     if (status == 'trialing' && !(hasPaidPlan || isTrial)) return false;
     final checkedAt = cached['checkedAt'] as int?;
     final periodEnd = cached['periodEnd'] as int?;
+    final trialEndsAt = cached['trialEndsAt'] as int?;
     final now = DateTime.now().millisecondsSinceEpoch;
     final graceMs = graceDays * 24 * 60 * 60 * 1000;
     if (periodEnd != null && periodEnd > 0) {
       return now <= periodEnd + graceMs;
+    }
+    if (status == 'trialing' && trialEndsAt != null && trialEndsAt > 0) {
+      return now <= trialEndsAt + graceMs;
     }
     if (checkedAt != null) {
       return now - checkedAt <= graceMs;
@@ -850,16 +866,18 @@ class AwsService {
               : (isMobile
                   ? _redirectUri
                   : (_redirectUri ?? _desktopRedirectUri)));
-      if (logoutUri != null &&
-          logoutUri.isNotEmpty &&
-          _userPoolClientId != null &&
-          _userPoolClientId!.isNotEmpty) {
-        final uri = Uri.parse('$_cognitoDomain/oauth2/logout').replace(
-          queryParameters: {
-            'client_id': _userPoolClientId!,
-            'logout_uri': logoutUri,
-          },
-        );
+        if (logoutUri != null &&
+            logoutUri.isNotEmpty &&
+            _userPoolClientId != null &&
+            _userPoolClientId!.isNotEmpty) {
+          final base =
+              _cognitoDomain!.endsWith('/') ? _cognitoDomain!.substring(0, _cognitoDomain!.length - 1) : _cognitoDomain!;
+          final uri = Uri.parse('$base/logout').replace(
+            queryParameters: {
+              'client_id': _userPoolClientId!,
+              'logout_uri': logoutUri,
+            },
+          );
         try {
           await launchUrl(uri, mode: LaunchMode.externalApplication);
         } catch (_) {}

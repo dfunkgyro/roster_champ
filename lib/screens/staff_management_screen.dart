@@ -6,6 +6,7 @@ import 'package:intl/intl.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
+import 'package:printing/printing.dart';
 import '../providers.dart';
 import '../models.dart' as models;
 import '../services/staff_name_store.dart';
@@ -50,6 +51,10 @@ class _StaffManagementScreenState extends ConsumerState<StaffManagementScreen> {
   final ScrollController _tickSheetScroll = ScrollController();
   int _alSummaryYear = DateTime.now().year;
   String? _timesheetStaffId;
+  bool _showSummary = false;
+  DateTime _timesheetWeekAnchor = DateTime.now();
+  int _timesheetWeekEndDay = DateTime.sunday;
+  DateTime? _timesheetWeekEndDate;
 
   @override
   void dispose() {
@@ -185,8 +190,8 @@ class _StaffManagementScreenState extends ConsumerState<StaffManagementScreen> {
     RosterNotifier roster,
     List<models.StaffMember> staff,
   ) {
-    final theme = Theme.of(context);
     final today = DateTime.now();
+    final theme = Theme.of(context);
     final todayKey = DateTime(today.year, today.month, today.day);
     final start = todayKey.subtract(const Duration(days: 3));
     final days = List.generate(7, (i) => start.add(Duration(days: i)));
@@ -685,6 +690,18 @@ class _StaffManagementScreenState extends ConsumerState<StaffManagementScreen> {
                       ? null
                       : overtimeReasonController.text.trim(),
                   convertToToil: hasOvertime ? convertToToil : false,
+                  startTime: entry?.startTime,
+                  endTime: entry?.endTime,
+                  breakMinutes: entry?.breakMinutes,
+                  paidHours: entry?.paidHours,
+                  shiftCode: entry?.shiftCode,
+                  taxableActivities: entry?.taxableActivities ?? const [],
+                  nonTaxableActivities:
+                      entry?.nonTaxableActivities ?? const [],
+                  overtimeEntries: entry?.overtimeEntries ?? const [],
+                  higherGradeEntries:
+                      entry?.higherGradeEntries ?? const [],
+                  bonusPayments: entry?.bonusPayments ?? const [],
                 );
                 Navigator.pop(context, true);
               },
@@ -708,8 +725,22 @@ class _StaffManagementScreenState extends ConsumerState<StaffManagementScreen> {
     List<models.StaffMember> staff,
   ) {
     final theme = Theme.of(context);
-    final today = DateTime.now();
-    final weekStart = _startOfWeek(today, roster.weekStartDay);
+    final weekAnchor = DateTime(
+      _timesheetWeekAnchor.year,
+      _timesheetWeekAnchor.month,
+      _timesheetWeekAnchor.day,
+    );
+    if (_timesheetWeekEndDate == null) {
+      final start = _startOfWeek(weekAnchor, roster.weekStartDay);
+      _timesheetWeekEndDate = start.add(const Duration(days: 6));
+      _timesheetWeekEndDay = _timesheetWeekEndDate!.weekday;
+    }
+    final weekEnd = DateTime(
+      _timesheetWeekEndDate!.year,
+      _timesheetWeekEndDate!.month,
+      _timesheetWeekEndDate!.day,
+    );
+    final weekStart = weekEnd.subtract(const Duration(days: 6));
     final weeks = List.generate(
       4,
       (i) => weekStart.subtract(Duration(days: i * 7)),
@@ -752,19 +783,59 @@ class _StaffManagementScreenState extends ConsumerState<StaffManagementScreen> {
               ),
               const SizedBox(width: 12),
               OutlinedButton.icon(
-                onPressed: selected.id.isEmpty
-                    ? null
-                    : () => _exportTimesheetCsv(selected, weeks),
-                icon: const Icon(Icons.table_view),
-                label: const Text('CSV'),
+                onPressed: () async {
+                  final picked = await showDatePicker(
+                    context: context,
+                    initialDate: weekEnd,
+                    firstDate: DateTime(2000),
+                    lastDate: DateTime(2100),
+                  );
+                  if (picked == null) return;
+                  setState(() {
+                    _timesheetWeekEndDate = picked;
+                    _timesheetWeekEndDay = picked.weekday;
+                    _timesheetWeekAnchor = picked;
+                  });
+                },
+                icon: const Icon(Icons.event),
+                label: Text(
+                  'Week ending ${DateFormat('MMM d, yyyy').format(weekEnd)}',
+                ),
               ),
               const SizedBox(width: 8),
-              OutlinedButton.icon(
-                onPressed: selected.id.isEmpty
-                    ? null
-                    : () => _exportTimesheetPdf(selected, weeks),
-                icon: const Icon(Icons.picture_as_pdf_outlined),
-                label: const Text('PDF'),
+              DropdownButton<int>(
+                value: _timesheetWeekEndDay,
+                items: const [
+                  DropdownMenuItem(value: DateTime.monday, child: Text('Ends Mon')),
+                  DropdownMenuItem(value: DateTime.tuesday, child: Text('Ends Tue')),
+                  DropdownMenuItem(value: DateTime.wednesday, child: Text('Ends Wed')),
+                  DropdownMenuItem(value: DateTime.thursday, child: Text('Ends Thu')),
+                  DropdownMenuItem(value: DateTime.friday, child: Text('Ends Fri')),
+                  DropdownMenuItem(value: DateTime.saturday, child: Text('Ends Sat')),
+                  DropdownMenuItem(value: DateTime.sunday, child: Text('Ends Sun')),
+                ],
+                onChanged: (value) {
+                  if (value == null) return;
+                  final offset = (value - weekStart.weekday) % 7;
+                  setState(() {
+                    _timesheetWeekEndDay = value;
+                    _timesheetWeekEndDate = weekStart.add(Duration(days: offset));
+                    _timesheetWeekAnchor = _timesheetWeekEndDate!;
+                  });
+                },
+              ),
+              const SizedBox(width: 12),
+              Tooltip(
+                message:
+                    _showSummary ? 'Hide summary view' : 'Show summary view',
+                child: IconButton(
+                  icon: Icon(
+                    _showSummary ? Icons.table_rows : Icons.table_rows_outlined,
+                  ),
+                  onPressed: () {
+                    setState(() => _showSummary = !_showSummary);
+                  },
+                ),
               ),
             ],
           ),
@@ -782,44 +853,65 @@ class _StaffManagementScreenState extends ConsumerState<StaffManagementScreen> {
                           ?.copyWith(fontWeight: FontWeight.w700),
                     ),
                     const SizedBox(height: 12),
+                    if (_showSummary) ...[
+                      SizedBox(
+                        height: 220,
+                        child: SingleChildScrollView(
+                          scrollDirection: Axis.horizontal,
+                          child: DataTable(
+                            columns: const [
+                              DataColumn(label: Text('Week')),
+                              DataColumn(label: Text('Rostered')),
+                              DataColumn(label: Text('Booked on')),
+                              DataColumn(label: Text('Sick')),
+                              DataColumn(label: Text('Absent')),
+                              DataColumn(label: Text('Overtime (hrs)')),
+                              DataColumn(label: Text('TOIL (hrs)')),
+                            ],
+                            rows: weeks.map((start) {
+                              final summary =
+                                  _summarizeWeek(roster, selected, start);
+                              return DataRow(
+                                cells: [
+                                  DataCell(Text(summary['label'] as String)),
+                                  DataCell(Text('${summary['rostered']}')),
+                                  DataCell(Text('${summary['confirmed']}')),
+                                  DataCell(Text('${summary['sick']}')),
+                                  DataCell(Text('${summary['absent']}')),
+                                  DataCell(
+                                    Text(
+                                      (summary['overtime'] as double)
+                                          .toStringAsFixed(1),
+                                    ),
+                                  ),
+                                  DataCell(
+                                    Text(
+                                      (summary['toilHours'] as double)
+                                          .toStringAsFixed(1),
+                                    ),
+                                  ),
+                                ],
+                              );
+                            }).toList(),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                    ],
+                    _buildTimesheetDetailHeader(
+                      context,
+                      roster,
+                      selected,
+                      weekStart,
+                    ),
+                    const SizedBox(height: 12),
                     Expanded(
                       child: SingleChildScrollView(
-                        scrollDirection: Axis.horizontal,
-                        child: DataTable(
-                          columns: const [
-                            DataColumn(label: Text('Week')),
-                            DataColumn(label: Text('Rostered')),
-                            DataColumn(label: Text('Booked on')),
-                            DataColumn(label: Text('Sick')),
-                            DataColumn(label: Text('Absent')),
-                            DataColumn(label: Text('Overtime (hrs)')),
-                            DataColumn(label: Text('TOIL (hrs)')),
-                          ],
-                          rows: weeks.map((start) {
-                            final summary =
-                                _summarizeWeek(roster, selected, start);
-                            return DataRow(
-                              cells: [
-                                DataCell(Text(summary['label'] as String)),
-                                DataCell(Text('${summary['rostered']}')),
-                                DataCell(Text('${summary['confirmed']}')),
-                                DataCell(Text('${summary['sick']}')),
-                                DataCell(Text('${summary['absent']}')),
-                                DataCell(
-                                  Text(
-                                    (summary['overtime'] as double)
-                                        .toStringAsFixed(1),
-                                  ),
-                                ),
-                                DataCell(
-                                  Text(
-                                    (summary['toilHours'] as double)
-                                        .toStringAsFixed(1),
-                                  ),
-                                ),
-                              ],
-                            );
-                          }).toList(),
+                        child: _buildTimesheetDetailTable(
+                          context,
+                          roster,
+                          selected,
+                          weekStart,
                         ),
                       ),
                     ),
@@ -831,6 +923,1893 @@ class _StaffManagementScreenState extends ConsumerState<StaffManagementScreen> {
         ],
       ),
     );
+  }
+
+  Widget _buildTimesheetDetailHeader(
+    BuildContext context,
+    RosterNotifier roster,
+    models.StaffMember member,
+    DateTime weekStart,
+  ) {
+    final meta = member.metadata ?? {};
+    final businessUnit = meta['businessUnit']?.toString() ?? '';
+    final employeeNumber = meta['employeeNumber']?.toString() ?? '';
+    final grade = meta['grade']?.toString() ?? '';
+    final jobTitle = meta['jobTitle']?.toString() ?? '';
+    final weekEnd = weekStart.add(const Duration(days: 6));
+
+    return Row(
+      children: [
+        Expanded(
+          child: Text(
+            'Week ending ${DateFormat('MMM d').format(weekEnd)}',
+            style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                  fontWeight: FontWeight.w600,
+                ),
+          ),
+        ),
+        OutlinedButton.icon(
+          onPressed: () => _exportWeeklyTimesheetCsv(
+            roster,
+            member,
+            weekStart,
+          ),
+          icon: const Icon(Icons.table_view),
+          label: const Text('Week CSV'),
+        ),
+        const SizedBox(width: 8),
+        OutlinedButton.icon(
+          onPressed: () => _exportWeeklyTimesheetPdf(
+            roster,
+            member,
+            weekStart,
+          ),
+          icon: const Icon(Icons.picture_as_pdf_outlined),
+          label: const Text('Week PDF'),
+        ),
+        const SizedBox(width: 8),
+        OutlinedButton.icon(
+          onPressed: () => _printWeeklyTimesheet(
+            roster,
+            member,
+            weekStart,
+          ),
+          icon: const Icon(Icons.print),
+          label: const Text('Print'),
+        ),
+        const SizedBox(width: 12),
+        IconButton(
+          tooltip: 'Previous week',
+          icon: const Icon(Icons.chevron_left),
+          onPressed: () {
+            setState(() {
+              _timesheetWeekEndDate = weekEnd.subtract(const Duration(days: 7));
+              _timesheetWeekAnchor = _timesheetWeekEndDate!;
+            });
+          },
+        ),
+        IconButton(
+          tooltip: 'Next week',
+          icon: const Icon(Icons.chevron_right),
+          onPressed: () {
+            setState(() {
+              _timesheetWeekEndDate = weekEnd.add(const Duration(days: 7));
+              _timesheetWeekAnchor = _timesheetWeekEndDate!;
+            });
+          },
+        ),
+        const SizedBox(width: 8),
+        TextButton.icon(
+          onPressed: () => _editTimesheetMetadata(member),
+          icon: const Icon(Icons.edit_outlined, size: 18),
+          label: const Text('Edit profile fields'),
+        ),
+        const SizedBox(width: 12),
+        Flexible(
+          child: Wrap(
+            spacing: 12,
+            runSpacing: 4,
+            children: [
+              if (businessUnit.isNotEmpty) _metaChip('Unit', businessUnit),
+              if (employeeNumber.isNotEmpty)
+                _metaChip('Employee #', employeeNumber),
+              if (grade.isNotEmpty) _metaChip('Grade', grade),
+              if (jobTitle.isNotEmpty) _metaChip('Job', jobTitle),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _metaChip(String label, String value) {
+    return Chip(
+      label: Text('$label: $value'),
+      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+    );
+  }
+
+  Widget _buildTimesheetDetailTable(
+    BuildContext context,
+    RosterNotifier roster,
+    models.StaffMember member,
+    DateTime weekStart,
+  ) {
+    final settings = roster.appSettings;
+    final days = List.generate(7, (i) => weekStart.add(Duration(days: i)));
+    final dayData = days.map((date) {
+      final shift = roster.getShiftForDate(member.name, date);
+      final entry = roster.getTickSheetEntry(member.id, date);
+      final activities = entry?.taxableActivities ?? const [];
+      final nonTaxable = entry?.nonTaxableActivities ?? const [];
+      final activityHours = _sumActivityHours(activities);
+      final nonTaxableHours = _sumNonTaxableHours(nonTaxable);
+      final overtimeHours =
+          _sumOvertimeHours(entry?.overtimeEntries ?? const []);
+      final higherGradeHours =
+          _sumHigherGradeHours(entry?.higherGradeEntries ?? const []);
+      final bonusHours = _sumBonusHours(entry?.bonusPayments ?? const []);
+      final shiftCode = entry?.shiftCode ?? shift;
+      final defaultStart = settings.shiftStartTimes[shiftCode] ?? '';
+      final defaultEnd = settings.shiftEndTimes[shiftCode] ?? '';
+      final defaultBreak = settings.shiftBreakMinutes[shiftCode] ?? 0;
+      final startTime = entry?.startTime ?? defaultStart;
+      final endTime = entry?.endTime ?? defaultEnd;
+      final breakMinutes = entry?.breakMinutes ?? defaultBreak;
+      final paidHours = entry?.paidHours ??
+          _calculatePaidHours(startTime, endTime, breakMinutes);
+      final totalHours = activityHours > 0 ? activityHours : paidHours;
+      final discrepancy = (totalHours + nonTaxableHours) - paidHours;
+      return {
+        'date': date,
+        'entry': entry,
+        'shiftCode': shiftCode,
+        'startTime': startTime,
+        'endTime': endTime,
+        'breakMinutes': breakMinutes,
+        'paidHours': paidHours,
+        'totalHours': totalHours,
+        'nonTaxableHours': nonTaxableHours,
+        'overtimeHours': overtimeHours,
+        'higherGradeHours': higherGradeHours,
+        'bonusHours': bonusHours,
+        'discrepancy': discrepancy,
+      };
+    }).toList();
+
+    final columns = <DataColumn>[
+      const DataColumn(label: Text('Details')),
+      ...dayData.map(
+        (d) => DataColumn(
+          label: Text(DateFormat('EEE dd').format(d['date'] as DateTime)),
+        ),
+      ),
+      const DataColumn(label: Text('Total')),
+    ];
+
+    DataRow buildRow(
+      String label,
+      List<Widget> cells,
+      Widget totalCell,
+    ) {
+      return DataRow(
+        cells: [
+          DataCell(Text(label)),
+          ...cells.map((widget) => DataCell(widget)),
+          DataCell(totalCell),
+        ],
+      );
+    }
+
+    List<Widget> mapCells(Widget Function(Map<String, dynamic>) builder) {
+      return dayData.map((d) => builder(d)).toList();
+    }
+
+    final paidTotal = dayData.fold<double>(
+      0,
+      (sum, d) => sum + (d['paidHours'] as double),
+    );
+    final taxableTotal = dayData.fold<double>(
+      0,
+      (sum, d) => sum + (d['totalHours'] as double),
+    );
+    final nonTaxableTotal = dayData.fold<double>(
+      0,
+      (sum, d) => sum + (d['nonTaxableHours'] as double),
+    );
+    final overtimeTotal = dayData.fold<double>(
+      0,
+      (sum, d) => sum + (d['overtimeHours'] as double),
+    );
+    final higherTotal = dayData.fold<double>(
+      0,
+      (sum, d) => sum + (d['higherGradeHours'] as double),
+    );
+    final bonusTotal = dayData.fold<double>(
+      0,
+      (sum, d) => sum + (d['bonusHours'] as double),
+    );
+    final combinedTotal = taxableTotal + nonTaxableTotal;
+    final deltaTotal = combinedTotal - paidTotal;
+
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      child: DataTable(
+        columns: columns,
+        rows: [
+          buildRow(
+            'Shift',
+            mapCells(
+              (d) => Text(
+                (d['shiftCode'] as String).isEmpty
+                    ? '-'
+                    : d['shiftCode'] as String,
+              ),
+            ),
+            const Text('-'),
+          ),
+          buildRow(
+            'Start',
+            mapCells(
+              (d) => SizedBox(
+                width: 90,
+                child: TextFormField(
+                  initialValue: d['startTime'] as String,
+                  decoration: const InputDecoration(
+                    isDense: true,
+                    border: OutlineInputBorder(),
+                    hintText: 'HH:MM',
+                  ),
+                  onFieldSubmitted: (value) {
+                    _updateTimesheetEntry(
+                      roster,
+                      member,
+                      d['date'] as DateTime,
+                      d['shiftCode'] as String,
+                      value,
+                      d['endTime'] as String,
+                      d['breakMinutes'] as int,
+                    );
+                  },
+                ),
+              ),
+            ),
+            const Text('-'),
+          ),
+          buildRow(
+            'End',
+            mapCells(
+              (d) => SizedBox(
+                width: 90,
+                child: TextFormField(
+                  initialValue: d['endTime'] as String,
+                  decoration: const InputDecoration(
+                    isDense: true,
+                    border: OutlineInputBorder(),
+                    hintText: 'HH:MM',
+                  ),
+                  onFieldSubmitted: (value) {
+                    _updateTimesheetEntry(
+                      roster,
+                      member,
+                      d['date'] as DateTime,
+                      d['shiftCode'] as String,
+                      d['startTime'] as String,
+                      value,
+                      d['breakMinutes'] as int,
+                    );
+                  },
+                ),
+              ),
+            ),
+            const Text('-'),
+          ),
+          buildRow(
+            'Break (min)',
+            mapCells(
+              (d) => SizedBox(
+                width: 80,
+                child: TextFormField(
+                  initialValue: (d['breakMinutes'] as int).toString(),
+                  decoration: const InputDecoration(
+                    isDense: true,
+                    border: OutlineInputBorder(),
+                  ),
+                  keyboardType: TextInputType.number,
+                  onFieldSubmitted: (value) {
+                    final parsed =
+                        int.tryParse(value) ?? (d['breakMinutes'] as int);
+                    _updateTimesheetEntry(
+                      roster,
+                      member,
+                      d['date'] as DateTime,
+                      d['shiftCode'] as String,
+                      d['startTime'] as String,
+                      d['endTime'] as String,
+                      parsed,
+                    );
+                  },
+                ),
+              ),
+            ),
+            const Text('-'),
+          ),
+          buildRow(
+            'Paid hrs',
+            mapCells(
+              (d) => Text((d['paidHours'] as double).toStringAsFixed(2)),
+            ),
+            Text(paidTotal.toStringAsFixed(2)),
+          ),
+          buildRow(
+            'Taxable hrs',
+            mapCells(
+              (d) => Row(
+                children: [
+                  Text((d['totalHours'] as double).toStringAsFixed(2)),
+                  const SizedBox(width: 6),
+                  IconButton(
+                    tooltip: 'Edit activities',
+                    icon: const Icon(Icons.playlist_add),
+                    onPressed: () => _editTaxableActivities(
+                      roster,
+                      member,
+                      d['date'] as DateTime,
+                      d['entry'] as models.TickSheetEntry?,
+                      d['paidHours'] as double,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            Text(taxableTotal.toStringAsFixed(2)),
+          ),
+          buildRow(
+            'Non-taxable hrs',
+            mapCells(
+              (d) => Row(
+                children: [
+                  Text((d['nonTaxableHours'] as double).toStringAsFixed(2)),
+                  const SizedBox(width: 6),
+                  IconButton(
+                    tooltip: 'Edit non-taxable activities',
+                    icon: const Icon(Icons.playlist_add_check),
+                    onPressed: () => _editNonTaxableActivities(
+                      roster,
+                      member,
+                      d['date'] as DateTime,
+                      d['entry'] as models.TickSheetEntry?,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            Text(nonTaxableTotal.toStringAsFixed(2)),
+          ),
+          buildRow(
+            'Overtime',
+            mapCells(
+              (d) => Row(
+                children: [
+                  Text((d['overtimeHours'] as double).toStringAsFixed(2)),
+                  const SizedBox(width: 6),
+                  IconButton(
+                    tooltip: 'Edit overtime',
+                    icon: const Icon(Icons.timelapse),
+                    onPressed: () => _editOvertimeEntries(
+                      roster,
+                      member,
+                      d['date'] as DateTime,
+                      d['entry'] as models.TickSheetEntry?,
+                      d['paidHours'] as double,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            Text(overtimeTotal.toStringAsFixed(2)),
+          ),
+          buildRow(
+            'Higher grade',
+            mapCells(
+              (d) => Row(
+                children: [
+                  Text((d['higherGradeHours'] as double).toStringAsFixed(2)),
+                  const SizedBox(width: 6),
+                  if ((d['higherGradeHours'] as double) > 0 &&
+                      (member.metadata?['grade']?.toString().isNotEmpty ??
+                          false))
+                    Icon(
+                      Icons.flag_outlined,
+                      size: 16,
+                      color: Theme.of(context).colorScheme.primary,
+                    ),
+                  const SizedBox(width: 4),
+                  IconButton(
+                    tooltip: 'Edit higher grade',
+                    icon: const Icon(Icons.workspace_premium),
+                    onPressed: () => _editHigherGradeEntries(
+                      roster,
+                      member,
+                      d['date'] as DateTime,
+                      d['entry'] as models.TickSheetEntry?,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            Text(higherTotal.toStringAsFixed(2)),
+          ),
+          buildRow(
+            'Bonus',
+            mapCells(
+              (d) => Row(
+                children: [
+                  Text((d['bonusHours'] as double).toStringAsFixed(2)),
+                  const SizedBox(width: 6),
+                  IconButton(
+                    tooltip: 'Edit bonus payments',
+                    icon: const Icon(Icons.card_giftcard),
+                    onPressed: () => _editBonusPayments(
+                      roster,
+                      member,
+                      d['date'] as DateTime,
+                      d['entry'] as models.TickSheetEntry?,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            Text(bonusTotal.toStringAsFixed(2)),
+          ),
+          buildRow(
+            'Status',
+            mapCells(
+              (d) => Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text((d['entry'] as models.TickSheetEntry?)?.status ?? '-'),
+                  if ((d['discrepancy'] as double).abs() > 0.01)
+                    Text(
+                      'Delta ${(d['discrepancy'] as double).toStringAsFixed(2)}h',
+                      style: TextStyle(
+                        color: (d['discrepancy'] as double).abs() > 0.5
+                            ? Theme.of(context).colorScheme.error
+                            : Theme.of(context).colorScheme.onSurfaceVariant,
+                        fontSize: 11,
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Combined ${combinedTotal.toStringAsFixed(2)}h',
+                  style: const TextStyle(fontWeight: FontWeight.w600),
+                ),
+                if (deltaTotal.abs() > 0.01)
+                  Text(
+                    'Delta ${deltaTotal.toStringAsFixed(2)}h',
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: Theme.of(context).colorScheme.error,
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+  double _calculatePaidHours(
+    String startTime,
+    String endTime,
+    int breakMinutes,
+  ) {
+    final start = _parseTime(startTime);
+    final end = _parseTime(endTime);
+    if (start == null || end == null) return 0;
+    var diff = end.difference(start);
+    if (diff.isNegative) {
+      diff = diff + const Duration(hours: 24);
+    }
+    final totalMinutes = diff.inMinutes - breakMinutes;
+    return (totalMinutes <= 0 ? 0 : totalMinutes / 60.0);
+  }
+
+  DateTime? _parseTime(String value) {
+    final parts = value.split(':');
+    if (parts.length != 2) return null;
+    final h = int.tryParse(parts[0]);
+    final m = int.tryParse(parts[1]);
+    if (h == null || m == null) return null;
+    return DateTime(2000, 1, 1, h, m);
+  }
+
+  void _updateTimesheetEntry(
+    RosterNotifier roster,
+    models.StaffMember member,
+    DateTime date,
+    String shiftCode,
+    String startTime,
+    String endTime,
+    int breakMinutes,
+  ) {
+    final paidHours = _calculatePaidHours(startTime, endTime, breakMinutes);
+    final existing = roster.getTickSheetEntry(member.id, date);
+    roster.updateTickSheetEntry(
+      staffId: member.id,
+      date: date,
+      status: existing?.status ?? 'confirmed',
+      comment: existing?.comment,
+      overtimeHours: existing?.overtimeHours,
+      overtimeJobNumber: existing?.overtimeJobNumber,
+      overtimeLocation: existing?.overtimeLocation,
+      overtimeReason: existing?.overtimeReason,
+      convertToToil: existing?.convertToToil ?? false,
+      startTime: startTime.trim(),
+      endTime: endTime.trim(),
+      breakMinutes: breakMinutes,
+      paidHours: paidHours,
+      shiftCode: shiftCode,
+      taxableActivities: existing?.taxableActivities ?? const [],
+      nonTaxableActivities: existing?.nonTaxableActivities ?? const [],
+      overtimeEntries: existing?.overtimeEntries ?? const [],
+      higherGradeEntries: existing?.higherGradeEntries ?? const [],
+      bonusPayments: existing?.bonusPayments ?? const [],
+    );
+
+    final settingsNotifier = ref.read(settingsProvider.notifier);
+    final settings = ref.read(settingsProvider);
+    final normalizedShift = shiftCode.trim().toUpperCase();
+    if (normalizedShift.isNotEmpty &&
+        normalizedShift != 'OFF' &&
+        normalizedShift != 'AL' &&
+        normalizedShift != 'TOIL') {
+      final updatedStartTimes = Map<String, String>.from(settings.shiftStartTimes)
+        ..[normalizedShift] = startTime.trim();
+      final updatedEndTimes = Map<String, String>.from(settings.shiftEndTimes)
+        ..[normalizedShift] = endTime.trim();
+      final updatedBreaks =
+          Map<String, int>.from(settings.shiftBreakMinutes)
+            ..[normalizedShift] = breakMinutes;
+      settingsNotifier.updateSettings(
+        settings.copyWith(
+          shiftStartTimes: updatedStartTimes,
+          shiftEndTimes: updatedEndTimes,
+          shiftBreakMinutes: updatedBreaks,
+        ),
+      );
+    }
+  }
+
+  double _sumActivityHours(List<models.TaxableActivity> activities) {
+    return activities.fold<double>(0, (sum, a) => sum + a.hours);
+  }
+
+  double _sumNonTaxableHours(List<models.NonTaxableActivity> activities) {
+    return activities.fold<double>(0, (sum, a) => sum + a.hours);
+  }
+
+  double _sumOvertimeHours(List<models.OvertimeEntry> entries) {
+    return entries.fold<double>(0, (sum, e) => sum + e.hours);
+  }
+
+  double _sumHigherGradeHours(List<models.HigherGradeEntry> entries) {
+    return entries.fold<double>(0, (sum, e) => sum + e.hours);
+  }
+
+  double _sumBonusHours(List<models.BonusPaymentEntry> entries) {
+    return entries.fold<double>(0, (sum, e) => sum + e.hours);
+  }
+
+  List<Map<String, dynamic>> _buildWeeklyDetailRows(
+    RosterNotifier roster,
+    models.StaffMember member,
+    DateTime weekStart,
+  ) {
+    final settings = roster.appSettings;
+    final rows = <Map<String, dynamic>>[];
+    for (int i = 0; i < 7; i++) {
+      final date = weekStart.add(Duration(days: i));
+      final shift = roster.getShiftForDate(member.name, date);
+      final entry = roster.getTickSheetEntry(member.id, date);
+      final activities = entry?.taxableActivities ?? const [];
+      final nonTaxable = entry?.nonTaxableActivities ?? const [];
+      final activityHours = _sumActivityHours(activities);
+      final nonTaxableHours = _sumNonTaxableHours(nonTaxable);
+      final overtimeHours =
+          _sumOvertimeHours(entry?.overtimeEntries ?? const []);
+      final higherGradeHours =
+          _sumHigherGradeHours(entry?.higherGradeEntries ?? const []);
+      final bonusHours = _sumBonusHours(entry?.bonusPayments ?? const []);
+      final shiftCode = entry?.shiftCode ?? shift;
+      final defaultStart = settings.shiftStartTimes[shiftCode] ?? '';
+      final defaultEnd = settings.shiftEndTimes[shiftCode] ?? '';
+      final defaultBreak = settings.shiftBreakMinutes[shiftCode] ?? 0;
+      final startTime = entry?.startTime ?? defaultStart;
+      final endTime = entry?.endTime ?? defaultEnd;
+      final breakMinutes = entry?.breakMinutes ?? defaultBreak;
+      final paidHours = entry?.paidHours ??
+          _calculatePaidHours(startTime, endTime, breakMinutes);
+      final totalHours = activityHours > 0 ? activityHours : paidHours;
+      final discrepancy = (totalHours + nonTaxableHours) - paidHours;
+
+      rows.add({
+        'date': date,
+        'shift': shiftCode,
+        'start': startTime,
+        'end': endTime,
+        'break': breakMinutes,
+        'paid': paidHours,
+        'taxable': totalHours,
+        'nonTaxable': nonTaxableHours,
+        'overtime': overtimeHours,
+        'higherGrade': higherGradeHours,
+        'bonus': bonusHours,
+        'status': entry?.status ?? '-',
+        'discrepancy': discrepancy,
+      });
+    }
+    return rows;
+  }
+
+  Future<void> _exportWeeklyTimesheetCsv(
+    RosterNotifier roster,
+    models.StaffMember member,
+    DateTime weekStart,
+  ) async {
+    final rows = <List<String>>[];
+    rows.add([
+      'Day',
+      'Shift',
+      'Start',
+      'End',
+      'Break',
+      'Paid',
+      'Taxable',
+      'NonTaxable',
+      'Overtime',
+      'HigherGrade',
+      'Bonus',
+      'Status',
+      'Discrepancy',
+    ]);
+    final detailRows = _buildWeeklyDetailRows(roster, member, weekStart);
+    double totalPaid = 0;
+    double totalTaxable = 0;
+    double totalNonTaxable = 0;
+    double totalOvertime = 0;
+    double totalHigherGrade = 0;
+    double totalBonus = 0;
+    double totalCombined = 0;
+
+    for (final row in detailRows) {
+      final paid = row['paid'] as double;
+      final taxable = row['taxable'] as double;
+      final nonTaxable = row['nonTaxable'] as double;
+      final overtime = row['overtime'] as double;
+      final higher = row['higherGrade'] as double;
+      final bonus = row['bonus'] as double;
+      final discrepancy = row['discrepancy'] as double;
+      rows.add([
+        DateFormat('EEE dd').format(row['date'] as DateTime),
+        row['shift'].toString(),
+        row['start'].toString(),
+        row['end'].toString(),
+        row['break'].toString(),
+        paid.toStringAsFixed(2),
+        taxable.toStringAsFixed(2),
+        nonTaxable.toStringAsFixed(2),
+        overtime.toStringAsFixed(2),
+        higher.toStringAsFixed(2),
+        bonus.toStringAsFixed(2),
+        row['status'].toString(),
+        discrepancy.toStringAsFixed(2),
+      ]);
+      totalPaid += paid;
+      totalTaxable += taxable;
+      totalNonTaxable += nonTaxable;
+      totalOvertime += overtime;
+      totalHigherGrade += higher;
+      totalBonus += bonus;
+      totalCombined += taxable + nonTaxable;
+    }
+
+    rows.add([
+      'Total',
+      '',
+      '',
+      '',
+      '',
+      totalPaid.toStringAsFixed(2),
+      totalTaxable.toStringAsFixed(2),
+      totalNonTaxable.toStringAsFixed(2),
+      totalOvertime.toStringAsFixed(2),
+      totalHigherGrade.toStringAsFixed(2),
+      totalBonus.toStringAsFixed(2),
+      'Combined',
+      totalCombined.toStringAsFixed(2),
+    ]);
+
+    final csv = rows.map((row) => row.join(',')).join('\n');
+    final fileName =
+        'timesheet_week_${member.name}_${DateFormat('yyyyMMdd').format(weekStart)}.csv';
+    String? outputFile = await FilePicker.platform.saveFile(
+      dialogTitle: 'Export Weekly Timesheet CSV',
+      fileName: fileName,
+      type: FileType.custom,
+      allowedExtensions: ['csv'],
+    );
+    if (outputFile == null) return;
+    if (!outputFile.endsWith('.csv')) {
+      outputFile = '$outputFile.csv';
+    }
+    final file = File(outputFile);
+    await file.writeAsString(csv);
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('CSV exported to: ${file.path}')),
+      );
+    }
+  }
+
+  Future<void> _exportWeeklyTimesheetPdf(
+    RosterNotifier roster,
+    models.StaffMember member,
+    DateTime weekStart,
+  ) async {
+    final doc = pw.Document();
+    final detailRows = _buildWeeklyDetailRows(roster, member, weekStart);
+    final headers = [
+      'Day',
+      'Shift',
+      'Start',
+      'End',
+      'Break',
+      'Paid',
+      'Taxable',
+      'NonTaxable',
+      'Overtime',
+      'HigherGrade',
+      'Bonus',
+      'Status',
+      'Δ',
+    ];
+    final data = detailRows.map((row) {
+      return [
+        DateFormat('EEE dd').format(row['date'] as DateTime),
+        row['shift'].toString(),
+        row['start'].toString(),
+        row['end'].toString(),
+        row['break'].toString(),
+        (row['paid'] as double).toStringAsFixed(2),
+        (row['taxable'] as double).toStringAsFixed(2),
+        (row['nonTaxable'] as double).toStringAsFixed(2),
+        (row['overtime'] as double).toStringAsFixed(2),
+        (row['higherGrade'] as double).toStringAsFixed(2),
+        (row['bonus'] as double).toStringAsFixed(2),
+        row['status'].toString(),
+        (row['discrepancy'] as double).toStringAsFixed(2),
+      ];
+    }).toList();
+
+    doc.addPage(
+      pw.Page(
+        pageFormat: PdfPageFormat.a4.landscape,
+        build: (context) => pw.Column(
+          crossAxisAlignment: pw.CrossAxisAlignment.start,
+          children: [
+            pw.Text(
+              'Weekly Timesheet - ${member.name}',
+              style: pw.TextStyle(fontSize: 18, fontWeight: pw.FontWeight.bold),
+            ),
+            pw.SizedBox(height: 8),
+            pw.Text(
+              'Week ${DateFormat('MMM d').format(weekStart)} - ${DateFormat('MMM d').format(weekStart.add(const Duration(days: 6)))}',
+            ),
+            pw.SizedBox(height: 12),
+            pw.Table.fromTextArray(
+              headers: headers,
+              data: data,
+              headerStyle: pw.TextStyle(fontWeight: pw.FontWeight.bold),
+              cellAlignment: pw.Alignment.centerLeft,
+              headerDecoration:
+                  const pw.BoxDecoration(color: PdfColors.grey300),
+              cellStyle: const pw.TextStyle(fontSize: 9),
+              cellPadding: const pw.EdgeInsets.symmetric(
+                horizontal: 4,
+                vertical: 3,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+
+    final fileName =
+        'timesheet_week_${member.name}_${DateFormat('yyyyMMdd').format(weekStart)}.pdf';
+    String? outputFile = await FilePicker.platform.saveFile(
+      dialogTitle: 'Export Weekly Timesheet PDF',
+      fileName: fileName,
+      type: FileType.custom,
+      allowedExtensions: ['pdf'],
+    );
+    if (outputFile == null) return;
+    if (!outputFile.endsWith('.pdf')) {
+      outputFile = '$outputFile.pdf';
+    }
+    final file = File(outputFile);
+    await file.writeAsBytes(await doc.save());
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('PDF exported to: ${file.path}')),
+      );
+    }
+  }
+
+  Future<void> _printWeeklyTimesheet(
+    RosterNotifier roster,
+    models.StaffMember member,
+    DateTime weekStart,
+  ) async {
+    final doc = pw.Document();
+    final detailRows = _buildWeeklyDetailRows(roster, member, weekStart);
+    final headers = [
+      'Day',
+      'Shift',
+      'Start',
+      'End',
+      'Break',
+      'Paid',
+      'Taxable',
+      'NonTaxable',
+      'Overtime',
+      'HigherGrade',
+      'Bonus',
+      'Status',
+      'Δ',
+    ];
+    final data = detailRows.map((row) {
+      return [
+        DateFormat('EEE dd').format(row['date'] as DateTime),
+        row['shift'].toString(),
+        row['start'].toString(),
+        row['end'].toString(),
+        row['break'].toString(),
+        (row['paid'] as double).toStringAsFixed(2),
+        (row['taxable'] as double).toStringAsFixed(2),
+        (row['nonTaxable'] as double).toStringAsFixed(2),
+        (row['overtime'] as double).toStringAsFixed(2),
+        (row['higherGrade'] as double).toStringAsFixed(2),
+        (row['bonus'] as double).toStringAsFixed(2),
+        row['status'].toString(),
+        (row['discrepancy'] as double).toStringAsFixed(2),
+      ];
+    }).toList();
+
+    doc.addPage(
+      pw.Page(
+        pageFormat: PdfPageFormat.a4.landscape,
+        build: (context) => pw.Column(
+          crossAxisAlignment: pw.CrossAxisAlignment.start,
+          children: [
+            pw.Text(
+              'Weekly Timesheet - ${member.name}',
+              style: pw.TextStyle(fontSize: 18, fontWeight: pw.FontWeight.bold),
+            ),
+            pw.SizedBox(height: 8),
+            pw.Text(
+              'Week ${DateFormat('MMM d').format(weekStart)} - ${DateFormat('MMM d').format(weekStart.add(const Duration(days: 6)))}',
+            ),
+            pw.SizedBox(height: 12),
+            pw.Table.fromTextArray(
+              headers: headers,
+              data: data,
+              headerStyle: pw.TextStyle(fontWeight: pw.FontWeight.bold),
+              cellAlignment: pw.Alignment.centerLeft,
+              headerDecoration:
+                  const pw.BoxDecoration(color: PdfColors.grey300),
+              cellStyle: const pw.TextStyle(fontSize: 9),
+              cellPadding: const pw.EdgeInsets.symmetric(
+                horizontal: 4,
+                vertical: 3,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+
+    await Printing.layoutPdf(
+      onLayout: (format) async => doc.save(),
+      name:
+          'Weekly Timesheet - ${member.name} (${DateFormat('yyyyMMdd').format(weekStart)})',
+    );
+  }
+
+  Future<void> _editTaxableActivities(
+    RosterNotifier roster,
+    models.StaffMember member,
+    DateTime date,
+    models.TickSheetEntry? entry,
+    double paidHours,
+  ) async {
+    final activities =
+        entry?.taxableActivities.map((a) => a).toList() ?? <models.TaxableActivity>[];
+    final codeController = TextEditingController();
+    final descController = TextEditingController();
+    final hoursController = TextEditingController();
+
+    await showDialog<void>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setState) {
+          return AlertDialog(
+            title: Text(
+              'Work activities - ${member.name} (${DateFormat('EEE dd').format(date)})',
+            ),
+            content: SizedBox(
+              width: 480,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (activities.isEmpty)
+                    const Text('No activities recorded yet.')
+                  else
+                    ...activities.asMap().entries.map((entryRow) {
+                      final activity = entryRow.value;
+                      return ListTile(
+                        title: Text('${activity.code} · ${activity.description}'),
+                        subtitle: Text('${activity.hours.toStringAsFixed(2)} hrs'),
+                        trailing: IconButton(
+                          icon: const Icon(Icons.delete_outline),
+                          onPressed: () {
+                            setState(() => activities.removeAt(entryRow.key));
+                          },
+                        ),
+                      );
+                    }),
+                  const SizedBox(height: 12),
+                  DropdownButtonFormField<String>(
+                    value: null,
+                    decoration: const InputDecoration(
+                      labelText: 'Job / Order code',
+                      border: OutlineInputBorder(),
+                    ),
+                    items: roster.jobCodeLibrary
+                        .map(
+                          (item) => DropdownMenuItem(
+                            value: item.code,
+                            child: Text('${item.code} · ${item.description}'),
+                          ),
+                        )
+                        .toList(),
+                    onChanged: (value) {
+                      if (value == null) return;
+                      final found = roster.jobCodeLibrary.firstWhere(
+                        (e) => e.code == value,
+                        orElse: () => models.JobCodeEntry(
+                          code: value,
+                          description: '',
+                          createdAt: DateTime.now(),
+                        ),
+                      );
+                      codeController.text = found.code;
+                      descController.text = found.description;
+                    },
+                  ),
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: codeController,
+                    decoration: const InputDecoration(
+                      labelText: 'Code',
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: descController,
+                    decoration: const InputDecoration(
+                      labelText: 'Description',
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: hoursController,
+                    keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                    decoration: const InputDecoration(
+                      labelText: 'Hours',
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      FilledButton.icon(
+                        onPressed: () {
+                          final hours = double.tryParse(hoursController.text.trim());
+                          if (hours == null || hours <= 0) return;
+                          final code = codeController.text.trim();
+                          if (code.isEmpty) return;
+                          final desc = descController.text.trim();
+                          setState(() {
+                            activities.add(
+                              models.TaxableActivity(
+                                code: code,
+                                description: desc,
+                                hours: hours,
+                              ),
+                            );
+                          });
+                        },
+                        icon: const Icon(Icons.add),
+                        label: const Text('Add activity'),
+                      ),
+                      const SizedBox(width: 8),
+                      OutlinedButton.icon(
+                        onPressed: () {
+                          final code = codeController.text.trim();
+                          if (code.isEmpty) return;
+                          roster.addJobCode(
+                            code: code,
+                            description: descController.text.trim(),
+                          );
+                        },
+                        icon: const Icon(Icons.bookmark_add_outlined),
+                        label: const Text('Save code'),
+                      ),
+                    ],
+                  ),
+                  if (roster.jobCodeLibrary.isNotEmpty) ...[
+                    const SizedBox(height: 12),
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: Text(
+                        'Manage saved codes',
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    ),
+                    ...roster.jobCodeLibrary.map(
+                      (item) => ListTile(
+                        dense: true,
+                        title: Text(item.code),
+                        subtitle: item.description.isEmpty
+                            ? null
+                            : Text(item.description),
+                        trailing: IconButton(
+                          icon: const Icon(Icons.delete_outline),
+                          onPressed: () {
+                            setState(() => roster.removeJobCode(item.code));
+                          },
+                        ),
+                      ),
+                    ),
+                  ],
+                  const SizedBox(height: 8),
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      'Total recorded hours: ${_sumActivityHours(activities).toStringAsFixed(2)} (paid hrs ${paidHours.toStringAsFixed(2)})',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('Close'),
+              ),
+              FilledButton(
+                onPressed: () {
+                  roster.updateTickSheetEntry(
+                    staffId: member.id,
+                    date: date,
+                    status: entry?.status ?? 'confirmed',
+                    comment: entry?.comment,
+                    overtimeHours: entry?.overtimeHours,
+                    overtimeJobNumber: entry?.overtimeJobNumber,
+                    overtimeLocation: entry?.overtimeLocation,
+                    overtimeReason: entry?.overtimeReason,
+                    convertToToil: entry?.convertToToil ?? false,
+                    startTime: entry?.startTime,
+                    endTime: entry?.endTime,
+                    breakMinutes: entry?.breakMinutes,
+                    paidHours: entry?.paidHours,
+                    shiftCode: entry?.shiftCode,
+                    taxableActivities: activities,
+                    nonTaxableActivities:
+                        entry?.nonTaxableActivities ?? const [],
+                    overtimeEntries: entry?.overtimeEntries ?? const [],
+                    higherGradeEntries:
+                        entry?.higherGradeEntries ?? const [],
+                    bonusPayments: entry?.bonusPayments ?? const [],
+                  );
+                  Navigator.pop(context);
+                },
+                child: const Text('Save'),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+
+    codeController.dispose();
+    descController.dispose();
+    hoursController.dispose();
+  }
+
+  Future<void> _editNonTaxableActivities(
+    RosterNotifier roster,
+    models.StaffMember member,
+    DateTime date,
+    models.TickSheetEntry? entry,
+  ) async {
+    final activities =
+        entry?.nonTaxableActivities.map((a) => a).toList() ??
+            <models.NonTaxableActivity>[];
+    final typeController = TextEditingController();
+    final codeController = TextEditingController();
+    final descController = TextEditingController();
+    final hoursController = TextEditingController();
+    final types = const [
+      'Annual Leave (AL)',
+      'Sick Leave',
+      'Time Off in Lieu (TOIL)',
+      'Paternity Leave',
+      'Jury Duty',
+      'Moving Home',
+      'Trade Union Duties',
+      'Training',
+      'Management Briefing',
+      'Shift Change',
+      'Alternative Duties',
+    ];
+
+    await showDialog<void>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setState) {
+          return AlertDialog(
+            title: Text(
+              'Non-taxable activities - ${member.name} (${DateFormat('EEE dd').format(date)})',
+            ),
+            content: SizedBox(
+              width: 480,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (activities.isEmpty)
+                    const Text('No non-taxable activities recorded yet.')
+                  else
+                    ...activities.asMap().entries.map((entryRow) {
+                      final activity = entryRow.value;
+                      final label = activity.code?.isNotEmpty == true
+                          ? '${activity.type} · ${activity.code}'
+                          : activity.type;
+                      return ListTile(
+                        title: Text(label),
+                        subtitle: Text(
+                          '${activity.hours.toStringAsFixed(2)} hrs${activity.description?.isNotEmpty == true ? ' · ${activity.description}' : ''}',
+                        ),
+                        trailing: IconButton(
+                          icon: const Icon(Icons.delete_outline),
+                          onPressed: () {
+                            setState(() => activities.removeAt(entryRow.key));
+                          },
+                        ),
+                      );
+                    }),
+                  const SizedBox(height: 12),
+                  DropdownButtonFormField<String>(
+                    value: null,
+                    decoration: const InputDecoration(
+                      labelText: 'Activity type',
+                      border: OutlineInputBorder(),
+                    ),
+                    items: types
+                        .map(
+                          (item) => DropdownMenuItem(
+                            value: item,
+                            child: Text(item),
+                          ),
+                        )
+                        .toList(),
+                    onChanged: (value) {
+                      if (value == null) return;
+                      typeController.text = value;
+                    },
+                  ),
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: typeController,
+                    decoration: const InputDecoration(
+                      labelText: 'Type',
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: codeController,
+                    decoration: const InputDecoration(
+                      labelText: 'Order / classification code',
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: descController,
+                    decoration: const InputDecoration(
+                      labelText: 'Description',
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: hoursController,
+                    keyboardType:
+                        const TextInputType.numberWithOptions(decimal: true),
+                    decoration: const InputDecoration(
+                      labelText: 'Hours',
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      FilledButton.icon(
+                        onPressed: () {
+                          final hours =
+                              double.tryParse(hoursController.text.trim());
+                          if (hours == null || hours <= 0) return;
+                          final type = typeController.text.trim();
+                          if (type.isEmpty) return;
+                          setState(() {
+                            activities.add(
+                              models.NonTaxableActivity(
+                                type: type,
+                                code: codeController.text.trim().isEmpty
+                                    ? null
+                                    : codeController.text.trim(),
+                                description: descController.text.trim().isEmpty
+                                    ? null
+                                    : descController.text.trim(),
+                                hours: hours,
+                              ),
+                            );
+                          });
+                        },
+                        icon: const Icon(Icons.add),
+                        label: const Text('Add activity'),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      'Total non-taxable hours: ${_sumNonTaxableHours(activities).toStringAsFixed(2)}',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('Close'),
+              ),
+              FilledButton(
+                onPressed: () {
+                  roster.updateTickSheetEntry(
+                    staffId: member.id,
+                    date: date,
+                    status: entry?.status ?? 'confirmed',
+                    comment: entry?.comment,
+                    overtimeHours: entry?.overtimeHours,
+                    overtimeJobNumber: entry?.overtimeJobNumber,
+                    overtimeLocation: entry?.overtimeLocation,
+                    overtimeReason: entry?.overtimeReason,
+                    convertToToil: entry?.convertToToil ?? false,
+                    startTime: entry?.startTime,
+                    endTime: entry?.endTime,
+                    breakMinutes: entry?.breakMinutes,
+                    paidHours: entry?.paidHours,
+                    shiftCode: entry?.shiftCode,
+                    taxableActivities:
+                        entry?.taxableActivities ?? const [],
+                    nonTaxableActivities: activities,
+                    overtimeEntries: entry?.overtimeEntries ?? const [],
+                    higherGradeEntries:
+                        entry?.higherGradeEntries ?? const [],
+                    bonusPayments: entry?.bonusPayments ?? const [],
+                  );
+                  Navigator.pop(context);
+                },
+                child: const Text('Save'),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+
+    typeController.dispose();
+    codeController.dispose();
+    descController.dispose();
+    hoursController.dispose();
+  }
+
+  Future<void> _editOvertimeEntries(
+    RosterNotifier roster,
+    models.StaffMember member,
+    DateTime date,
+    models.TickSheetEntry? entry,
+    double paidHours,
+  ) async {
+    final entries =
+        entry?.overtimeEntries.map((e) => e).toList() ?? <models.OvertimeEntry>[];
+    final hoursController = TextEditingController();
+    final reasonController = TextEditingController();
+    final jobController = TextEditingController();
+    final typeController = TextEditingController();
+    final types = const ['time-and-a-half', 'double time', 'standard'];
+
+    await showDialog<void>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setState) => AlertDialog(
+          title: Text(
+            'Overtime - ${member.name} (${DateFormat('EEE dd').format(date)})',
+          ),
+          content: SizedBox(
+            width: 480,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (entries.isEmpty)
+                  const Text('No overtime recorded yet.')
+                else
+                  ...entries.asMap().entries.map((row) {
+                    final item = row.value;
+                    return ListTile(
+                      title: Text('${item.hours.toStringAsFixed(2)} hrs'),
+                      subtitle: Text(
+                        [
+                          if (item.overtimeType?.isNotEmpty == true)
+                            item.overtimeType,
+                          if (item.reason?.isNotEmpty == true) item.reason,
+                          if (item.jobCode?.isNotEmpty == true)
+                            'Job ${item.jobCode}',
+                        ].join(' · '),
+                      ),
+                      trailing: IconButton(
+                        icon: const Icon(Icons.delete_outline),
+                        onPressed: () => setState(() => entries.removeAt(row.key)),
+                      ),
+                    );
+                  }),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: hoursController,
+                  keyboardType:
+                      const TextInputType.numberWithOptions(decimal: true),
+                  decoration: const InputDecoration(
+                    labelText: 'Overtime hours',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: reasonController,
+                  decoration: const InputDecoration(
+                    labelText: 'Reason',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: jobController,
+                  decoration: const InputDecoration(
+                    labelText: 'Job / order number',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                DropdownButtonFormField<String>(
+                  value: null,
+                  decoration: const InputDecoration(
+                    labelText: 'Overtime type',
+                    border: OutlineInputBorder(),
+                  ),
+                  items: types
+                      .map(
+                        (item) => DropdownMenuItem(
+                          value: item,
+                          child: Text(item),
+                        ),
+                      )
+                      .toList(),
+                  onChanged: (value) {
+                    if (value == null) return;
+                    typeController.text = value;
+                  },
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: typeController,
+                  decoration: const InputDecoration(
+                    labelText: 'Type (optional)',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                FilledButton.icon(
+                  onPressed: () {
+                    final hours = double.tryParse(hoursController.text.trim());
+                    if (hours == null || hours <= 0) return;
+                    entries.add(
+                      models.OvertimeEntry(
+                        hours: hours,
+                        reason: reasonController.text.trim().isEmpty
+                            ? null
+                            : reasonController.text.trim(),
+                        jobCode: jobController.text.trim().isEmpty
+                            ? null
+                            : jobController.text.trim(),
+                        overtimeType: typeController.text.trim().isEmpty
+                            ? null
+                            : typeController.text.trim(),
+                      ),
+                    );
+                    setState(() {});
+                  },
+                  icon: const Icon(Icons.add),
+                  label: const Text('Add overtime'),
+                ),
+                const SizedBox(height: 8),
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text(
+                    'Total overtime: ${_sumOvertimeHours(entries).toStringAsFixed(2)} hrs (paid hrs ${paidHours.toStringAsFixed(2)})',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Close'),
+            ),
+            FilledButton(
+              onPressed: () {
+                roster.updateTickSheetEntry(
+                  staffId: member.id,
+                  date: date,
+                  status: entry?.status ?? 'confirmed',
+                  comment: entry?.comment,
+                  overtimeHours: entry?.overtimeHours,
+                  overtimeJobNumber: entry?.overtimeJobNumber,
+                  overtimeLocation: entry?.overtimeLocation,
+                  overtimeReason: entry?.overtimeReason,
+                  convertToToil: entry?.convertToToil ?? false,
+                  startTime: entry?.startTime,
+                  endTime: entry?.endTime,
+                  breakMinutes: entry?.breakMinutes,
+                  paidHours: entry?.paidHours,
+                  shiftCode: entry?.shiftCode,
+                  taxableActivities: entry?.taxableActivities ?? const [],
+                  nonTaxableActivities:
+                      entry?.nonTaxableActivities ?? const [],
+                  overtimeEntries: entries,
+                  higherGradeEntries:
+                      entry?.higherGradeEntries ?? const [],
+                  bonusPayments: entry?.bonusPayments ?? const [],
+                );
+                Navigator.pop(context);
+              },
+              child: const Text('Save'),
+            ),
+          ],
+        ),
+      ),
+    );
+
+    hoursController.dispose();
+    reasonController.dispose();
+    jobController.dispose();
+    typeController.dispose();
+  }
+
+  Future<void> _editHigherGradeEntries(
+    RosterNotifier roster,
+    models.StaffMember member,
+    DateTime date,
+    models.TickSheetEntry? entry,
+  ) async {
+    final entries =
+        entry?.higherGradeEntries.map((e) => e).toList() ?? <models.HigherGradeEntry>[];
+    final gradeController = TextEditingController();
+    final jobController = TextEditingController();
+    final hoursController = TextEditingController();
+
+    await showDialog<void>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setState) => AlertDialog(
+          title: Text(
+            'Higher grade - ${member.name} (${DateFormat('EEE dd').format(date)})',
+          ),
+          content: SizedBox(
+            width: 460,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (entries.isEmpty)
+                  const Text('No higher grade hours recorded.')
+                else
+                  ...entries.asMap().entries.map((row) {
+                    final item = row.value;
+                    final label = item.jobCode?.isNotEmpty == true
+                        ? '${item.grade} · ${item.jobCode}'
+                        : item.grade;
+                    return ListTile(
+                      title: Text(label),
+                      subtitle:
+                          Text('${item.hours.toStringAsFixed(2)} hrs'),
+                      trailing: IconButton(
+                        icon: const Icon(Icons.delete_outline),
+                        onPressed: () => setState(() => entries.removeAt(row.key)),
+                      ),
+                    );
+                  }),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: gradeController,
+                  decoration: const InputDecoration(
+                    labelText: 'Higher grade classification',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: jobController,
+                  decoration: const InputDecoration(
+                    labelText: 'Job / order number',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: hoursController,
+                  keyboardType:
+                      const TextInputType.numberWithOptions(decimal: true),
+                  decoration: const InputDecoration(
+                    labelText: 'Hours',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                FilledButton.icon(
+                  onPressed: () {
+                    final hours = double.tryParse(hoursController.text.trim());
+                    if (hours == null || hours <= 0) return;
+                    final grade = gradeController.text.trim();
+                    if (grade.isEmpty) return;
+                    entries.add(
+                      models.HigherGradeEntry(
+                        grade: grade,
+                        hours: hours,
+                        jobCode: jobController.text.trim().isEmpty
+                            ? null
+                            : jobController.text.trim(),
+                      ),
+                    );
+                    setState(() {});
+                  },
+                  icon: const Icon(Icons.add),
+                  label: const Text('Add higher grade'),
+                ),
+                const SizedBox(height: 8),
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text(
+                    'Total higher grade: ${_sumHigherGradeHours(entries).toStringAsFixed(2)} hrs',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Close'),
+            ),
+            FilledButton(
+              onPressed: () {
+                roster.updateTickSheetEntry(
+                  staffId: member.id,
+                  date: date,
+                  status: entry?.status ?? 'confirmed',
+                  comment: entry?.comment,
+                  overtimeHours: entry?.overtimeHours,
+                  overtimeJobNumber: entry?.overtimeJobNumber,
+                  overtimeLocation: entry?.overtimeLocation,
+                  overtimeReason: entry?.overtimeReason,
+                  convertToToil: entry?.convertToToil ?? false,
+                  startTime: entry?.startTime,
+                  endTime: entry?.endTime,
+                  breakMinutes: entry?.breakMinutes,
+                  paidHours: entry?.paidHours,
+                  shiftCode: entry?.shiftCode,
+                  taxableActivities: entry?.taxableActivities ?? const [],
+                  nonTaxableActivities:
+                      entry?.nonTaxableActivities ?? const [],
+                  overtimeEntries: entry?.overtimeEntries ?? const [],
+                  higherGradeEntries: entries,
+                  bonusPayments: entry?.bonusPayments ?? const [],
+                );
+                Navigator.pop(context);
+              },
+              child: const Text('Save'),
+            ),
+          ],
+        ),
+      ),
+    );
+
+    gradeController.dispose();
+    jobController.dispose();
+    hoursController.dispose();
+  }
+
+  Future<void> _editBonusPayments(
+    RosterNotifier roster,
+    models.StaffMember member,
+    DateTime date,
+    models.TickSheetEntry? entry,
+  ) async {
+    final entries =
+        entry?.bonusPayments.map((e) => e).toList() ?? <models.BonusPaymentEntry>[];
+    final descController = TextEditingController();
+    final codeController = TextEditingController();
+    final jobController = TextEditingController();
+    final hoursController = TextEditingController();
+
+    await showDialog<void>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setState) => AlertDialog(
+          title: Text(
+            'Bonus payments - ${member.name} (${DateFormat('EEE dd').format(date)})',
+          ),
+          content: SizedBox(
+            width: 460,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (entries.isEmpty)
+                  const Text('No bonus payments recorded.')
+                else
+                  ...entries.asMap().entries.map((row) {
+                    final item = row.value;
+                    return ListTile(
+                      title: Text(item.description),
+                      subtitle: Text(
+                        '${item.hours.toStringAsFixed(2)} hrs${item.code?.isNotEmpty == true ? ' · ${item.code}' : ''}',
+                      ),
+                      trailing: IconButton(
+                        icon: const Icon(Icons.delete_outline),
+                        onPressed: () => setState(() => entries.removeAt(row.key)),
+                      ),
+                    );
+                  }),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: descController,
+                  decoration: const InputDecoration(
+                    labelText: 'Description',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: codeController,
+                  decoration: const InputDecoration(
+                    labelText: 'Classification code',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: jobController,
+                  decoration: const InputDecoration(
+                    labelText: 'Job / order number',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: hoursController,
+                  keyboardType:
+                      const TextInputType.numberWithOptions(decimal: true),
+                  decoration: const InputDecoration(
+                    labelText: 'Hours or value',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                FilledButton.icon(
+                  onPressed: () {
+                    final hours = double.tryParse(hoursController.text.trim());
+                    if (hours == null || hours <= 0) return;
+                    final desc = descController.text.trim();
+                    if (desc.isEmpty) return;
+                    entries.add(
+                      models.BonusPaymentEntry(
+                        description: desc,
+                        hours: hours,
+                        code: codeController.text.trim().isEmpty
+                            ? null
+                            : codeController.text.trim(),
+                        jobCode: jobController.text.trim().isEmpty
+                            ? null
+                            : jobController.text.trim(),
+                      ),
+                    );
+                    setState(() {});
+                  },
+                  icon: const Icon(Icons.add),
+                  label: const Text('Add bonus'),
+                ),
+                const SizedBox(height: 8),
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text(
+                    'Total bonus hours: ${_sumBonusHours(entries).toStringAsFixed(2)}',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Close'),
+            ),
+            FilledButton(
+              onPressed: () {
+                roster.updateTickSheetEntry(
+                  staffId: member.id,
+                  date: date,
+                  status: entry?.status ?? 'confirmed',
+                  comment: entry?.comment,
+                  overtimeHours: entry?.overtimeHours,
+                  overtimeJobNumber: entry?.overtimeJobNumber,
+                  overtimeLocation: entry?.overtimeLocation,
+                  overtimeReason: entry?.overtimeReason,
+                  convertToToil: entry?.convertToToil ?? false,
+                  startTime: entry?.startTime,
+                  endTime: entry?.endTime,
+                  breakMinutes: entry?.breakMinutes,
+                  paidHours: entry?.paidHours,
+                  shiftCode: entry?.shiftCode,
+                  taxableActivities: entry?.taxableActivities ?? const [],
+                  nonTaxableActivities:
+                      entry?.nonTaxableActivities ?? const [],
+                  overtimeEntries: entry?.overtimeEntries ?? const [],
+                  higherGradeEntries:
+                      entry?.higherGradeEntries ?? const [],
+                  bonusPayments: entries,
+                );
+                Navigator.pop(context);
+              },
+              child: const Text('Save'),
+            ),
+          ],
+        ),
+      ),
+    );
+
+    descController.dispose();
+    codeController.dispose();
+    jobController.dispose();
+    hoursController.dispose();
+  }
+
+  Future<void> _editTimesheetMetadata(models.StaffMember member) async {
+    final meta = member.metadata ?? {};
+    final businessUnit =
+        TextEditingController(text: meta['businessUnit']?.toString() ?? '');
+    final employeeNumber =
+        TextEditingController(text: meta['employeeNumber']?.toString() ?? '');
+    final grade =
+        TextEditingController(text: meta['grade']?.toString() ?? '');
+    final jobTitle =
+        TextEditingController(text: meta['jobTitle']?.toString() ?? '');
+
+    final roster = ref.read(rosterProvider);
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('Staff profile - ${member.name}'),
+        content: SizedBox(
+          width: 380,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: businessUnit,
+                decoration: const InputDecoration(
+                  labelText: 'Business unit',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: employeeNumber,
+                decoration: const InputDecoration(
+                  labelText: 'Employee number',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: grade,
+                decoration: const InputDecoration(
+                  labelText: 'Grade',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: jobTitle,
+                decoration: const InputDecoration(
+                  labelText: 'Job title',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+
+    if (saved == true) {
+      final updated = Map<String, dynamic>.from(member.metadata ?? {})
+        ..['businessUnit'] = businessUnit.text.trim()
+        ..['employeeNumber'] = employeeNumber.text.trim()
+        ..['grade'] = grade.text.trim()
+        ..['jobTitle'] = jobTitle.text.trim();
+      roster.updateStaffMetadata(member.id, updated);
+    }
+
+    businessUnit.dispose();
+    employeeNumber.dispose();
+    grade.dispose();
+    jobTitle.dispose();
   }
 
   DateTime _startOfWeek(DateTime date, int weekStartDay) {
@@ -1605,8 +3584,8 @@ class _StaffManagementScreenState extends ConsumerState<StaffManagementScreen> {
     required int year,
     required RosterNotifier roster,
   }) {
-    final dates = <String>{};
     final today = DateTime.now();
+    final dates = <String>{};
 
     void addRange(DateTime start, DateTime end) {
       var cursor = DateTime(start.year, start.month, start.day);

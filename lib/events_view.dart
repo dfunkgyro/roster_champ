@@ -67,36 +67,51 @@ class _EventsViewState extends ConsumerState<EventsView> {
       final start = DateTime(now.year, now.month, now.day);
       final end = DateTime(now.year + 1, now.month, now.day);
 
-      final holidays = await HolidayService.instance.getHolidaysRange(
-        countryCode: settings.holidayCountryCode,
-        additionalCountries: settings.additionalHolidayCountries,
-        start: start,
-        end: end,
-        allowedTypes: settings.holidayTypes,
-      );
-      final publicEventMap = await PublicEventService.instance.getPublicEvents(
-        settings: settings,
-        start: start,
-        end: end,
-      );
-
-      final overlay = <models.Event>[];
-      for (final item in holidays.values) {
-        overlay.add(
-          models.Event(
-            id: 'holiday-${item.date.toIso8601String()}-${item.name.hashCode}',
-            title: item.localName.isNotEmpty ? item.localName : item.name,
-            description: item.types.isNotEmpty
-                ? item.types.join(', ')
-                : 'Holiday',
-            date: item.date,
-            eventType: models.EventType.holiday,
-          ),
+      Map<String, HolidayItem> holidays = {};
+      try {
+        holidays = await HolidayService.instance.getHolidaysRange(
+          countryCode: settings.holidayCountryCode,
+          additionalCountries: settings.additionalHolidayCountries,
+          start: start,
+          end: end,
+          allowedTypes: settings.holidayTypes,
         );
+      } catch (e) {
+        debugPrint('Holiday overlay load failed: $e');
       }
 
-      for (final entry in publicEventMap.entries) {
-        overlay.addAll(entry.value);
+      Map<String, List<models.Event>> publicEventMap = {};
+      try {
+        publicEventMap = await PublicEventService.instance.getPublicEvents(
+          settings: settings,
+          start: start,
+          end: end,
+        );
+      } catch (e) {
+        debugPrint('Public event overlay load failed: $e');
+      }
+
+      final overlay = <models.Event>[];
+      if (holidays.isNotEmpty) {
+        for (final item in holidays.values) {
+          overlay.add(
+            models.Event(
+              id: 'holiday-${item.date.toIso8601String()}-${item.name.hashCode}',
+              title: item.localName.isNotEmpty ? item.localName : item.name,
+              description: item.types.isNotEmpty
+                  ? item.types.join(', ')
+                  : 'Holiday',
+              date: item.date,
+              eventType: models.EventType.holiday,
+            ),
+          );
+        }
+      }
+
+      if (publicEventMap.isNotEmpty) {
+        for (final entry in publicEventMap.entries) {
+          overlay.addAll(entry.value);
+        }
       }
 
       if (settings.dstAdjustmentsEnabled) {
@@ -122,10 +137,6 @@ class _EventsViewState extends ConsumerState<EventsView> {
       overlay.sort((a, b) => a.date.compareTo(b.date));
       if (mounted) {
         setState(() => _overlayEvents = overlay);
-      }
-    } catch (_) {
-      if (mounted) {
-        setState(() => _overlayEvents = []);
       }
     } finally {
       if (mounted) {
@@ -485,6 +496,40 @@ class _EventCard extends ConsumerWidget {
   }
 
   Future<void> _confirmDelete(BuildContext context, WidgetRef ref) async {
+    if (event.recurringId != null && event.recurringId!.isNotEmpty) {
+      final action = await showDialog<String>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('Delete Recurring Event?'),
+          content: Text(
+            'This is part of a recurring series. What would you like to delete?',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, 'cancel'),
+              child: const Text('Cancel'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(context, 'single'),
+              child: const Text('This Event'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, 'all'),
+              style: FilledButton.styleFrom(backgroundColor: Colors.red),
+              child: const Text('All Repeats'),
+            ),
+          ],
+        ),
+      );
+
+      if (action == 'single') {
+        ref.read(rosterProvider).deleteEvent(event.id);
+      } else if (action == 'all') {
+        ref.read(rosterProvider).deleteRecurringEvents(event.recurringId!);
+      }
+      return;
+    }
+
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
